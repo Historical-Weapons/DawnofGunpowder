@@ -9960,3 +9960,847 @@ if (document.getElementById("se-root")) {
 
 console.log("[SE-MinMaxPatch] ✓ Patch v2 Loaded: Fixed Inspector Reset Logic.");
 })();
+
+
+
+// =============================================================================
+// SCENARIO EDITOR — LOAD/SAVE/TEST PATCH v3
+// Fixes: black screen, data fusion, file manager UI, test play, resetTools
+// APPEND TO BOTTOM OF FILE
+// =============================================================================
+(function SE_LoadSavePatch() {
+"use strict";
+if (window.__SE_LSP_V3__) return;
+window.__SE_LSP_V3__ = true;
+
+const SE = window.ScenarioEditor;
+if (!SE) return;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 1. DEEP RESET — purge ALL state before loading anything
+// ─────────────────────────────────────────────────────────────────────────────
+function _deepReset() {
+    // Reset map engine
+    const me = SE.mapEngine;
+    if (me) {
+        const map = me.getMap();
+        if (map) {
+            map.tiles = [];
+            map.cols = 0;
+            map.rows = 0;
+        }
+    }
+
+    // Reset CNP city/NPC state
+    const S = window._SE_CNP;
+    if (S) {
+        S.cities         = [];
+        S._nextId        = 1;
+        S.selectedCityId = null;
+        S.placingCity    = false;
+        S.relocatingId   = null;
+        S.factionAliases = {};
+        S.spawnRules     = {};
+        S.compOverrides  = {};
+        S.diplomacy      = {};
+        S.patrolMode     = null;
+        S._pickingEntry  = null;
+    }
+
+    // Reset story triggers
+    const T = window._SE_STORY;
+    if (T) {
+        T.triggers      = [];
+        T.objectives    = [];
+        T.dialogueLines = [];
+        T.selectedId    = null;
+        T._nextId       = 1;
+        T._dirty        = false;
+        T._rt = {
+            active: false, turn: 1,
+            firedIds: new Set(),
+            capturedCities: [],
+            battlePending: null,
+        };
+    }
+
+    // Clear viewport overlay
+    const ov = document.getElementById("se-cnp-overlay");
+    if (ov) ov.remove();
+
+    // Reset viewport placeholder
+    const ph = document.querySelector(".se-viewport-placeholder");
+    if (ph) { ph.style.opacity = ""; ph.style.display = ""; }
+
+    // Clear zoom label
+    const zl = document.querySelector(".se-zoom-display");
+    if (zl) zl.textContent = "100%";
+
+    // Clear status bar
+    const sc = document.getElementById("se-st-scenario");
+    if (sc) sc.textContent = "[Unsaved]";
+
+    console.log("[LSP] Deep reset complete.");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 2. SAFE LOAD — reset then deserialize
+// ─────────────────────────────────────────────────────────────────────────────
+function _safeLoad(json) {
+    let data;
+    try { data = typeof json === "string" ? JSON.parse(json) : json; }
+    catch(e) { _toast("⚠ Invalid JSON: " + e.message); return false; }
+
+    _deepReset();
+
+    // Restore story data
+    const T = window._SE_STORY;
+    if (T && data.triggers)       T.triggers      = data.triggers;
+    if (T && data.objectives)     T.objectives    = data.objectives;
+    if (T && data.dialogueLines)  T.dialogueLines = data.dialogueLines;
+    if (T && data.nextId)         T._nextId       = data.nextId;
+    if (T && data.meta?.name)     T._scenarioName = data.meta.name;
+
+    // Restore map tiles
+    if (data.mapData) {
+        const me = SE.mapEngine;
+        const md = data.mapData;
+        if (me && md.cols && md.rows && Array.isArray(md.tiles)) {
+            const TDEFS = me.TILE_DEFS || {};
+            const tiles = [];
+            let idx = 0;
+            for (let c = 0; c < md.cols; c++) {
+                tiles[c] = [];
+                for (let r = 0; r < md.rows; r++) {
+                    const name = md.tiles[idx++] || "Ocean";
+                    tiles[c][r] = { name, ...(TDEFS[name] || TDEFS["Ocean"] || { color: "#1a3f5c" }) };
+                }
+            }
+            me.loadRawMap(tiles, md.cols, md.rows, md.tileSize || 16, md.mapType || "loaded");
+        }
+    }
+
+    // Restore cities/NPCs
+    const S = window._SE_CNP;
+    if (S) {
+        if (data.cities)         S.cities         = data.cities;
+        if (data.factionAliases) S.factionAliases = data.factionAliases;
+        if (data.spawnRules)     S.spawnRules     = data.spawnRules;
+        if (data.compOverrides)  S.compOverrides  = data.compOverrides;
+        if (data.diplomacy)      S.diplomacy      = data.diplomacy;
+        if (S.cities.length)     S._nextId        = Math.max(...S.cities.map(c => c.id || 0)) + 1;
+    }
+
+    // Update UI
+    const sc = document.getElementById("se-st-scenario");
+    if (sc) sc.textContent = data.meta?.name || "Loaded";
+    const ni = document.getElementById("se-story-name");
+    if (ni) ni.value = data.meta?.name || "";
+
+    // Rebuild UI panels
+    setTimeout(() => {
+        SE._setTab?.(window._activeTab || "TRIGGERS");
+        SE.mapEngine?._rebuildMinimap?.();
+    }, 100);
+
+    _toast("✓ Loaded: " + (data.meta?.name || "Scenario"));
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 3. FILE MANAGER MODAL
+// ─────────────────────────────────────────────────────────────────────────────
+const FM_CSS = `
+#se-fm-overlay {
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.88);
+    z-index: 60000;
+    display: flex; align-items: center; justify-content: center;
+    font-family: 'Georgia', serif;
+}
+#se-fm-panel {
+    background: #1a140e;
+    border: 2px solid #c8921a;
+    border-radius: 3px;
+    width: min(560px, 96vw);
+    max-height: 80vh;
+    display: flex; flex-direction: column;
+    box-shadow: 0 12px 48px rgba(0,0,0,0.95);
+    overflow: hidden;
+}
+#se-fm-titlebar {
+    background: linear-gradient(to bottom, #3c2c14, #221a0e);
+    border-bottom: 2px solid #c8921a;
+    padding: 8px 14px;
+    display: flex; align-items: center; gap: 10px;
+    flex-shrink: 0;
+}
+#se-fm-titlebar span { color: #e8b832; font-size: 13px; letter-spacing: 2px; font-weight: bold; flex: 1; }
+#se-fm-path {
+    background: #0e0a06;
+    border: 1px solid #5a4020;
+    color: #a09060;
+    font-family: 'Consolas', monospace;
+    font-size: 10px;
+    padding: 5px 10px;
+    flex-shrink: 0;
+    border-bottom: 1px solid #3a2808;
+    word-break: break-all;
+}
+#se-fm-toolbar {
+    background: #231a0e;
+    border-bottom: 1px solid #3a2808;
+    padding: 5px 10px;
+    display: flex; gap: 6px; flex-wrap: wrap;
+    flex-shrink: 0;
+}
+#se-fm-list {
+    flex: 1; overflow-y: auto; padding: 6px;
+    display: flex; flex-direction: column; gap: 4px;
+    -webkit-overflow-scrolling: touch;
+}
+.se-fm-row {
+    display: grid;
+    grid-template-columns: 20px 1fr auto auto auto;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 10px;
+    background: #221a0e;
+    border: 1px solid #3a2808;
+    border-radius: 2px;
+    transition: border-color 0.1s;
+}
+.se-fm-row:hover { border-color: #c8921a; background: #2c1e08; }
+.se-fm-icon { font-size: 14px; }
+.se-fm-name { font-size: 11px; color: #e0c87a; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.se-fm-meta { font-size: 9px; color: #7a6040; white-space: nowrap; }
+.se-fm-btn {
+    background: #1e1608; border: 1px solid #5a4020;
+    color: #c8a060; font-family: 'Georgia', serif;
+    font-size: 10px; padding: 3px 8px; cursor: pointer;
+    border-radius: 1px; white-space: nowrap;
+    transition: border-color 0.1s, color 0.1s;
+}
+.se-fm-btn:hover { border-color: #c8921a; color: #e8b832; }
+.se-fm-btn.danger { border-color: #5a2020; color: #c07060; }
+.se-fm-btn.danger:hover { border-color: #c83820; color: #ff8878; }
+.se-fm-empty { text-align: center; padding: 30px; color: #6a5040; font-size: 12px; font-style: italic; }
+#se-fm-statusbar {
+    background: #0e0a06; border-top: 1px solid #3a2808;
+    padding: 4px 10px; font-size: 10px; color: #7a6040;
+    flex-shrink: 0;
+}
+`;
+
+function _getStorageKey() {
+    // Determine the localStorage path display
+    return "localStorage → Browser Storage";
+}
+
+function _listSaves() {
+    const saves = [];
+    for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (!k) continue;
+        if (!k.startsWith("SE_scenario_") && !k.startsWith("SE_story_") && !k.startsWith("SE_v3_")) continue;
+        if (k === "SE_story_LAST") continue;
+        try {
+            const raw  = localStorage.getItem(k);
+            const data = JSON.parse(raw);
+            saves.push({
+                key:      k,
+                name:     data?.meta?.name || k.replace(/^SE_(scenario|story)_/, ""),
+                triggers: data?.triggers?.length || 0,
+                cities:   data?.cities?.length || 0,
+                hasTiles: !!(data?.mapData?.tiles?.length),
+                savedAt:  data?.savedAt || data?.meta?.savedAt || 0,
+                sizeKB:   Math.round(raw.length / 1024),
+            });
+        } catch(e) { /* skip corrupt entries */ }
+    }
+    return saves.sort((a, b) => b.savedAt - a.savedAt);
+}
+
+function _showFileManager() {
+    document.getElementById("se-fm-overlay")?.remove();
+    document.getElementById("se-fm-css")?.remove();
+
+    const s = document.createElement("style");
+    s.id = "se-fm-css";
+    s.textContent = FM_CSS;
+    document.head.appendChild(s);
+
+    const overlay = document.createElement("div");
+    overlay.id = "se-fm-overlay";
+
+    function _render() {
+        const saves = _listSaves();
+        overlay.innerHTML = `
+        <div id="se-fm-panel">
+            <div id="se-fm-titlebar">
+                <span>📁 SCENARIO FILE MANAGER</span>
+                <button class="se-fm-btn" id="se-fm-close-btn">✕ Close</button>
+            </div>
+            <div id="se-fm-path">
+                📍 Location: Browser localStorage &nbsp;|&nbsp;
+                Origin: ${location.origin} &nbsp;|&nbsp;
+                Key prefix: SE_scenario_* / SE_story_*
+            </div>
+            <div id="se-fm-toolbar">
+                <button class="se-fm-btn" id="se-fm-import-btn">📂 Import .json File</button>
+                <button class="se-fm-btn" id="se-fm-save-now-btn">💾 Save Current</button>
+                <button class="se-fm-btn" id="se-fm-export-all-btn">⬇ Export All</button>
+                <button class="se-fm-btn danger" id="se-fm-clear-all-btn">🗑 Clear All Saves</button>
+            </div>
+            <div id="se-fm-list">
+                ${saves.length === 0
+                    ? `<div class="se-fm-empty">📭 No saved scenarios found.<br>Save your current work or import a .json file.</div>`
+                    : saves.map(sv => `
+                <div class="se-fm-row" data-key="${sv.key}">
+                    <span class="se-fm-icon">📜</span>
+                    <div>
+                        <div class="se-fm-name">${sv.name}</div>
+                        <div class="se-fm-meta">
+                            ⚡${sv.triggers} triggers &nbsp;·&nbsp;
+                            🏯${sv.cities} cities &nbsp;·&nbsp;
+                            🗺${sv.hasTiles ? "Has tiles" : "No tiles"} &nbsp;·&nbsp;
+                            ${sv.sizeKB}KB &nbsp;·&nbsp;
+                            ${sv.savedAt ? new Date(sv.savedAt).toLocaleString() : "Unknown date"}
+                        </div>
+                    </div>
+                    <button class="se-fm-btn" data-action="load" data-key="${sv.key}">▶ Load</button>
+                    <button class="se-fm-btn" data-action="export" data-key="${sv.key}">↗ Export</button>
+                    <button class="se-fm-btn danger" data-action="delete" data-key="${sv.key}">✕</button>
+                </div>`).join("")}
+            </div>
+            <div id="se-fm-statusbar" id="se-fm-status">
+                ${saves.length} scenario(s) &nbsp;·&nbsp;
+                Total: ~${saves.reduce((s,x)=>s+x.sizeKB,0)}KB used
+            </div>
+        </div>`;
+
+        // Wire buttons
+        overlay.querySelector("#se-fm-close-btn").onclick  = () => { overlay.remove(); document.getElementById("se-fm-css")?.remove(); };
+        overlay.querySelector("#se-fm-import-btn").onclick = _importFile;
+        overlay.querySelector("#se-fm-save-now-btn").onclick = () => {
+            _saveNow();
+            setTimeout(_render, 200);
+        };
+        overlay.querySelector("#se-fm-export-all-btn").onclick = _exportAll;
+        overlay.querySelector("#se-fm-clear-all-btn").onclick = () => {
+            if (!confirm("Delete ALL saved scenarios from localStorage?")) return;
+            saves.forEach(sv => localStorage.removeItem(sv.key));
+            _render();
+        };
+
+        // Row action buttons
+        overlay.querySelectorAll("[data-action]").forEach(btn => {
+            btn.onclick = (e) => {
+                e.stopPropagation();
+                const key = btn.dataset.key;
+                const action = btn.dataset.action;
+                if (action === "load") {
+                    const raw = localStorage.getItem(key);
+                    if (_safeLoad(raw)) {
+                        overlay.remove();
+                        document.getElementById("se-fm-css")?.remove();
+                    }
+                } else if (action === "export") {
+                    const raw = localStorage.getItem(key);
+                    _downloadJSON(raw, key.replace(/^SE_(scenario|story)_/, "") + ".json");
+                } else if (action === "delete") {
+                    const sv = saves.find(s => s.key === key);
+                    if (confirm(`Delete "${sv?.name || key}"?`)) {
+                        localStorage.removeItem(key);
+                        _render();
+                    }
+                }
+            };
+        });
+
+        overlay.onclick = (e) => { if (e.target === overlay) { overlay.remove(); document.getElementById("se-fm-css")?.remove(); } };
+    }
+
+    _render();
+    document.body.appendChild(overlay);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 4. SAVE / EXPORT HELPERS
+// ─────────────────────────────────────────────────────────────────────────────
+function _serialize() {
+    const T  = window._SE_STORY;
+    const S  = window._SE_CNP;
+    const me = SE.mapEngine;
+    const map = me?.getMap();
+
+    let mapData = null;
+    if (map && map.tiles && map.cols > 0) {
+        const flat = [];
+        for (let r = 0; r < map.rows; r++)
+            for (let c = 0; c < map.cols; c++)
+                flat.push(map.tiles[c]?.[r]?.name || "Ocean");
+        // Store col-major as the engine uses col-major tiles
+        const flatCM = [];
+        for (let c = 0; c < map.cols; c++)
+            for (let r = 0; r < map.rows; r++)
+                flatCM.push(map.tiles[c]?.[r]?.name || "Ocean");
+        mapData = { cols: map.cols, rows: map.rows, tileSize: map.tileSize || 16,
+                    mapType: me.getMapType?.() || "custom", tiles: flatCM };
+    }
+
+    return {
+        version:        3,
+        savedAt:        Date.now(),
+        meta:           { name: T?._scenarioName || "Untitled", author: "Dev" },
+        triggers:       T ? JSON.parse(JSON.stringify(T.triggers || []))      : [],
+        objectives:     T ? JSON.parse(JSON.stringify(T.objectives || []))    : [],
+        dialogueLines:  T ? JSON.parse(JSON.stringify(T.dialogueLines || [])) : [],
+        nextId:         T?._nextId || 1,
+        mapData,
+        cities:         S ? JSON.parse(JSON.stringify(S.cities || []))         : [],
+        factionAliases: S ? JSON.parse(JSON.stringify(S.factionAliases || {})) : {},
+        spawnRules:     S ? JSON.parse(JSON.stringify(S.spawnRules || {}))     : {},
+        compOverrides:  S ? JSON.parse(JSON.stringify(S.compOverrides || {}))  : {},
+        diplomacy:      S ? JSON.parse(JSON.stringify(S.diplomacy || {}))      : {},
+    };
+}
+
+function _saveNow() {
+    const data = _serialize();
+    const name = data.meta.name;
+    const key  = "SE_scenario_" + name.replace(/\W+/g, "_");
+    localStorage.setItem(key, JSON.stringify(data));
+    localStorage.setItem("SE_story_LAST", JSON.stringify(data));
+    const sc = document.getElementById("se-st-scenario");
+    if (sc) sc.textContent = name;
+    _toast("💾 Saved: " + name);
+    const dot = document.getElementById("se-save-dot");
+    if (dot) dot.className = "se-save-dot";
+    if (window._SE_STORY) window._SE_STORY._dirty = false;
+    return data;
+}
+
+function _downloadJSON(json, filename) {
+    const blob = new Blob([json], { type: "application/json" });
+    const url  = URL.createObjectURL(blob);
+    const a    = Object.assign(document.createElement("a"), { href: url, download: filename });
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+}
+
+function _exportAll() {
+    const saves = _listSaves();
+    if (!saves.length) { _toast("⚠ Nothing to export"); return; }
+    const bundle = {};
+    saves.forEach(sv => { try { bundle[sv.key] = JSON.parse(localStorage.getItem(sv.key)); } catch(e) {} });
+    _downloadJSON(JSON.stringify(bundle, null, 2), "SE_all_scenarios_" + Date.now() + ".json");
+    _toast("↗ Exported " + saves.length + " scenarios");
+}
+
+function _importFile() {
+    const inp = document.createElement("input");
+    inp.type = "file"; inp.accept = ".json";
+    inp.onchange = ev => {
+        const file = ev.target.files?.[0];
+        if (!file) return;
+        const r = new FileReader();
+        r.onload = re => {
+            try {
+                const raw  = re.target.result;
+                const data = JSON.parse(raw);
+                // Check if it's a bundle (exported with Export All)
+                const keys = Object.keys(data);
+                if (keys.length > 0 && keys[0].startsWith("SE_")) {
+                    keys.forEach(k => localStorage.setItem(k, JSON.stringify(data[k])));
+                    _toast("✓ Imported bundle: " + keys.length + " scenarios");
+                    document.getElementById("se-fm-overlay") && _showFileManager();
+                } else {
+                    // Single scenario
+                    if (_safeLoad(raw)) {
+                        document.getElementById("se-fm-overlay")?.remove();
+                        document.getElementById("se-fm-css")?.remove();
+                    }
+                }
+            } catch(e) { _toast("⚠ Invalid file: " + e.message); }
+        };
+        r.readAsText(file);
+    };
+    inp.click();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 5. TEST PLAY — runs scenario immediately without leaving editor
+// ─────────────────────────────────────────────────────────────────────────────
+const TEST_CSS = `
+#se-test-overlay {
+    position: fixed; inset: 0;
+    background: #0a0806;
+    z-index: 70000;
+    display: flex; flex-direction: column;
+    font-family: 'Georgia', serif;
+}
+#se-test-topbar {
+    height: 36px; flex-shrink: 0;
+    background: linear-gradient(to bottom, #3c2c14, #221a0e);
+    border-bottom: 2px solid #c8921a;
+    display: flex; align-items: center; gap: 10px; padding: 0 12px;
+    z-index: 10;
+}
+#se-test-topbar .se-test-badge {
+    background: rgba(200,146,26,0.2); border: 1px solid #c8921a;
+    color: #e8b832; font-size: 10px; letter-spacing: 2px;
+    padding: 2px 10px; border-radius: 2px;
+    animation: se-test-pulse 2s infinite;
+}
+@keyframes se-test-pulse {
+    0%,100% { box-shadow: 0 0 4px rgba(200,146,26,0.3); }
+    50%      { box-shadow: 0 0 10px rgba(200,146,26,0.7); }
+}
+#se-test-canvas-wrap { flex: 1; position: relative; overflow: hidden; }
+#se-test-canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+#se-test-hud {
+    position: absolute; top: 10px; left: 10px;
+    background: rgba(10,8,6,0.85); border: 1px solid #3a2808;
+    color: #d8c890; font-size: 11px; padding: 8px 12px;
+    border-radius: 2px; pointer-events: none;
+    line-height: 1.8; min-width: 140px;
+}
+`;
+
+function _launchTestPlay() {
+    // Save first
+    _saveNow();
+
+    document.getElementById("se-test-overlay")?.remove();
+    document.getElementById("se-test-css")?.remove();
+
+    const s = document.createElement("style");
+    s.id = "se-test-css";
+    s.textContent = TEST_CSS;
+    document.head.appendChild(s);
+
+    const overlay = document.createElement("div");
+    overlay.id = "se-test-overlay";
+    overlay.innerHTML = `
+    <div id="se-test-topbar">
+        <span class="se-test-badge">▶ TEST PLAY</span>
+        <span style="color:#a07828;font-size:11px;flex:1" id="se-test-status">
+            Scenario: ${window._SE_STORY?._scenarioName || "Untitled"}
+        </span>
+        <span style="color:#7a6040;font-size:10px" id="se-test-turn">Turn 1</span>
+        <button style="background:#2a1010;border:1px solid #5a2020;color:#c07060;
+                       font-family:Georgia,serif;font-size:11px;padding:4px 12px;
+                       cursor:pointer;border-radius:2px;" id="se-test-next-turn">⏭ Next Turn</button>
+        <button style="background:#1e1608;border:1px solid #5a4020;color:#c8a060;
+                       font-family:Georgia,serif;font-size:11px;padding:4px 12px;
+                       cursor:pointer;border-radius:2px;" id="se-test-exit">✕ Exit Test</button>
+    </div>
+    <div id="se-test-canvas-wrap">
+        <canvas id="se-test-canvas"></canvas>
+        <div id="se-test-hud">
+            <div>⚡ Trigger Runtime: <span style="color:#6ac86a">ACTIVE</span></div>
+            <div id="se-test-hud-turn">Turn: <span style="color:#e8b832">1</span></div>
+            <div id="se-test-hud-fired">Fired: <span style="color:#e8b832">0</span></div>
+            <div id="se-test-hud-cities">Cities: <span style="color:#e8b832">${window._SE_CNP?.cities?.length || 0}</span></div>
+        </div>
+    </div>`;
+
+    document.body.appendChild(overlay);
+
+    // Render the map onto the test canvas
+    const testCanvas = overlay.querySelector("#se-test-canvas");
+    const wrap       = overlay.querySelector("#se-test-canvas-wrap");
+    const ctx        = testCanvas.getContext("2d");
+    let   turn       = 1;
+    let   rafId      = null;
+
+    function _renderTest() {
+        const W = wrap.clientWidth, H = wrap.clientHeight;
+        testCanvas.width = W; testCanvas.height = H;
+        ctx.fillStyle = "#0a0806";
+        ctx.fillRect(0, 0, W, H);
+
+        const me  = SE.mapEngine;
+        const map = me?.getMap();
+        if (!map || !map.tiles || map.cols === 0) {
+            ctx.fillStyle = "#e8b832";
+            ctx.font = "14px Georgia";
+            ctx.textAlign = "center";
+            ctx.fillText("No map loaded — use Map Editor to create one", W/2, H/2);
+            return;
+        }
+
+        const TDEFS = me.TILE_DEFS || {};
+        const ts    = Math.min((W * 0.92) / map.cols, (H * 0.92) / map.rows);
+        const ox    = (W - map.cols * ts) / 2;
+        const oy    = (H - map.rows * ts) / 2;
+
+        for (let c = 0; c < map.cols; c++) {
+            for (let r = 0; r < map.rows; r++) {
+                const tile = map.tiles[c]?.[r];
+                ctx.fillStyle = (tile && TDEFS[tile.name] ? TDEFS[tile.name].color : "#1a3f5c");
+                ctx.fillRect(ox + c * ts, oy + r * ts, ts + 0.5, ts + 0.5);
+            }
+        }
+
+        // Draw city dots
+        const S = window._SE_CNP;
+        if (S?.cities) {
+            S.cities.forEach(city => {
+                const px = ox + city.nx * map.cols * ts;
+                const py = oy + city.ny * map.rows * ts;
+                ctx.beginPath();
+                ctx.arc(px, py, Math.max(3, ts * 1.2), 0, Math.PI * 2);
+                ctx.fillStyle = city.color || "#e8b832";
+                ctx.fill();
+                ctx.strokeStyle = "rgba(0,0,0,0.7)";
+                ctx.lineWidth = 1;
+                ctx.stroke();
+                if (ts >= 2) {
+                    ctx.fillStyle = "#fff8e0";
+                    ctx.font = `${Math.max(8, ts * 0.8)}px Georgia`;
+                    ctx.fillText(city.name, px + ts * 1.5, py + ts * 0.4);
+                }
+            });
+        }
+
+        // Map border
+        ctx.strokeStyle = "rgba(200,146,26,0.4)";
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(ox, oy, map.cols * ts, map.rows * ts);
+    }
+
+    function _tickRuntime() {
+        const T = window._SE_STORY;
+        if (!T) return;
+        const fired = T._rt?.firedIds?.size || 0;
+        document.getElementById("se-test-hud-turn")?.querySelector("span") &&
+            (document.getElementById("se-test-hud-turn").querySelector("span").textContent = turn);
+        document.getElementById("se-test-hud-fired")?.querySelector("span") &&
+            (document.getElementById("se-test-hud-fired").querySelector("span").textContent = fired);
+
+        if (window.SE_storyTick) window.SE_storyTick({ turn, cities: window._SE_CNP?.cities || [] });
+    }
+
+    // Activate story runtime
+    if (window._SE_STORY) {
+        window._SE_STORY._rt.active = true;
+        window._SE_STORY._rt.turn   = 1;
+        window._SE_STORY._rt.firedIds = new Set();
+    }
+    _tickRuntime(); // fire MAP_LAUNCH triggers
+
+    // Render loop
+    let lastW = 0, lastH = 0;
+    function loop() {
+        const W = wrap.clientWidth, H = wrap.clientHeight;
+        if (W !== lastW || H !== lastH) { _renderTest(); lastW = W; lastH = H; }
+        rafId = requestAnimationFrame(loop);
+    }
+    loop();
+
+    // Next Turn button
+    overlay.querySelector("#se-test-next-turn").onclick = () => {
+        turn++;
+        if (window._SE_STORY) window._SE_STORY._rt.turn = turn;
+        document.getElementById("se-test-turn").textContent = "Turn " + turn;
+        _tickRuntime();
+        _renderTest();
+    };
+
+    // Exit → back to editor
+    overlay.querySelector("#se-test-exit").onclick = () => {
+        cancelAnimationFrame(rafId);
+        overlay.remove();
+        document.getElementById("se-test-css")?.remove();
+        if (window._SE_STORY) window._SE_STORY._rt.active = false;
+        _toast("← Returned to Scenario Editor");
+        // Re-mount the trigger tab to refresh any fired states
+        setTimeout(() => SE._setTab?.("TRIGGERS"), 100);
+    };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 6. RESET TOOLS
+// ─────────────────────────────────────────────────────────────────────────────
+window.SE_resetTools = function() {
+    const root = document.getElementById("se-root");
+    if (!root) return;
+
+    // Reset mode to MAP
+    SE._setMode?.("MAP");
+
+    // Reset tool to PAINT
+    SE._setTool?.("PAINT");
+
+    // Reset tile to Plains
+    SE._setTile?.("Plains");
+
+    // Reset brush to 1x1
+    SE._setBrush?.(1);
+
+    // Reset zoom to fit
+    SE.mapEngine?.fitToView?.();
+
+    // Reset bottom tab to TRIGGERS
+    SE._setTab?.("TRIGGERS");
+
+    // Remove any active overlays from CNP
+    const S = window._SE_CNP;
+    if (S) {
+        S.placingCity   = false;
+        S.relocatingId  = null;
+        S.patrolMode    = null;
+        S._pickingEntry = null;
+    }
+
+    // Reset viewport cursor
+    const vp = document.getElementById("se-viewport");
+    if (vp) vp.style.cursor = "crosshair";
+
+    _toast("↺ Tools reset to defaults");
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 7. TOAST HELPER
+// ─────────────────────────────────────────────────────────────────────────────
+function _toast(msg, ms) {
+    ms = ms || 3000;
+    let el = document.getElementById("se-lsp-toast");
+    if (!el) {
+        el = document.createElement("div");
+        el.id = "se-lsp-toast";
+        el.style.cssText =
+            "position:fixed;bottom:50px;left:50%;transform:translateX(-50%) translateY(8px);" +
+            "background:#1a1208;border:1px solid #c8921a;color:#e8b832;" +
+            "padding:7px 18px;font-family:Georgia,serif;font-size:12px;" +
+            "border-radius:2px;z-index:99997;pointer-events:none;" +
+            "transition:opacity 0.25s,transform 0.25s;opacity:0;" +
+            "max-width:90vw;text-align:center;box-shadow:0 4px 16px rgba(0,0,0,0.8);";
+        document.body.appendChild(el);
+    }
+    el.textContent = msg;
+    el.style.opacity = "1";
+    el.style.transform = "translateX(-50%) translateY(0)";
+    clearTimeout(el._t);
+    el._t = setTimeout(() => {
+        el.style.opacity = "0";
+        el.style.transform = "translateX(-50%) translateY(8px)";
+    }, ms);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 8. WIRE INTO EXISTING BUTTONS — patch open() to replace old handlers
+// ─────────────────────────────────────────────────────────────────────────────
+function _rewireButtons(root) {
+    if (!root) return;
+
+    function _findBtn(fragment) {
+        const clean = s => s.replace(/\s+/g,"").toLowerCase();
+        const needle = clean(fragment);
+        return Array.from(root.querySelectorAll(".se-btn")).find(b =>
+            clean(b.textContent).includes(needle)
+        );
+    }
+
+    function _activate(btn, handler) {
+        if (!btn) return;
+        btn.classList.remove("stub");
+        btn.style.opacity = "1";
+        btn.style.cursor  = "pointer";
+        btn.style.pointerEvents = "auto";
+        btn.onclick = (e) => { e.stopPropagation(); handler(); };
+    }
+
+    // 💾 Save
+    _activate(_findBtn("💾Save"), _saveNow);
+
+    // 📂 Load → open file manager
+    _activate(_findBtn("📂Load"), _showFileManager);
+
+    // ↗ Export
+    _activate(_findBtn("↗Export"), () => {
+        const data = _serialize();
+        const name = (data.meta.name || "scenario").replace(/\W+/g,"_");
+        _downloadJSON(JSON.stringify(data, null, 2), name + "_" + Date.now() + ".json");
+    });
+
+    // ▶ Test Play
+    _activate(_findBtn("TestPlay"), _launchTestPlay);
+
+    // 💾 Save in story bar (se-story-name area)
+    const storyBar = root.querySelector(".se-storybar-inj");
+    if (storyBar) {
+        const saveBtns = storyBar.querySelectorAll(".se-btn");
+        saveBtns.forEach(btn => {
+            const t = btn.textContent.replace(/\s+/g,"").toLowerCase();
+            if (t.includes("save"))    { btn.classList.remove("stub"); btn.onclick = (e) => { e.stopPropagation(); _saveNow(); }; }
+            if (t.includes("load"))    { btn.classList.remove("stub"); btn.onclick = (e) => { e.stopPropagation(); _showFileManager(); }; }
+            if (t.includes("export"))  { btn.classList.remove("stub"); btn.onclick = (e) => { e.stopPropagation(); _downloadJSON(JSON.stringify(_serialize(),null,2), "scenario.json"); }; }
+        });
+    }
+
+    // Ctrl+S shortcut
+    document.addEventListener("keydown", function _kd(e) {
+        if (!document.getElementById("se-root")) { document.removeEventListener("keydown", _kd); return; }
+        if (e.ctrlKey && e.key === "s") { e.preventDefault(); _saveNow(); }
+    });
+}
+
+// Hook open lifecycle
+const _prev = SE.open.bind(SE);
+SE.open = function() {
+    _prev();
+    setTimeout(function attempt() {
+        const root = document.getElementById("se-root");
+        if (!root) { setTimeout(attempt, 120); return; }
+        _rewireButtons(root);
+    }, 450);
+};
+
+// Hook _setTab to re-wire after tab switches rebuild DOM
+const _prevSetTab = SE._setTab?.bind(SE);
+if (_prevSetTab) {
+    SE._setTab = function(tab) {
+        _prevSetTab(tab);
+        setTimeout(() => {
+            const root = document.getElementById("se-root");
+            if (root) _rewireButtons(root);
+        }, 200);
+    };
+}
+
+// Patch if already open
+if (document.getElementById("se-root")) {
+    setTimeout(() => _rewireButtons(document.getElementById("se-root")), 300);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 9. FAVICON FIX (suppresses 404 console error)
+// ─────────────────────────────────────────────────────────────────────────────
+(function _fixFavicon() {
+    if (document.querySelector("link[rel~='icon']")) return;
+    const link = document.createElement("link");
+    link.rel   = "icon";
+    link.type  = "image/svg+xml";
+    // Inline SVG scroll emoji as favicon — no external file needed
+    link.href  = "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📜</text></svg>";
+    document.head.appendChild(link);
+})();
+
+// Expose public API
+SE.lsp = { save: _saveNow, load: _safeLoad, showFileManager: _showFileManager, testPlay: _launchTestPlay, reset: _deepReset, resetTools: window.SE_resetTools };
+
+console.log(
+    "%c[SE-LSP v3] ✓ Loaded\n" +
+    " • _deepReset() — purges map/cities/triggers before load\n" +
+    " • _safeLoad()  — full deserialize with reset guard\n" +
+    " • File Manager — localStorage browser with Load/Export/Delete\n" +
+    " • Test Play    — inline, no main-menu redirect, Exit→editor\n" +
+    " • SE_resetTools() — resets tools without clearing map data\n" +
+    " • Favicon fix  — inline SVG, no 404",
+    "color:#e8b832;font-family:monospace;font-size:11px"
+);
+
+})(); // end SE_LoadSavePatch
