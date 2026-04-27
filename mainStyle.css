@@ -1,0 +1,239 @@
+/* Prevent text selection / I-beam cursor everywhere */
+html, body, body * {
+  -webkit-user-select: none;
+  -moz-user-select: none;
+  -ms-user-select: none;
+  user-select: none;
+
+  -webkit-tap-highlight-color: transparent;
+  -webkit-touch-callout: none;
+  cursor: default;
+}
+canvas { display: block; position: absolute; top: 0; left: 0; z-index: 1; }
+h1 { margin: 0; font-size: 1.4rem; color: #f5d76e; text-shadow: 1px 1px 2px #000; border-bottom: 1px solid #5d4037; padding-bottom: 5px; }
+
+/* LOADING SCREEN */
+#loading { position: fixed; bottom: 0; left: 0; width: 100%; height: 40px; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,0.65); color: #d4b886; font-size: 13px; font-weight: bold; text-transform: uppercase; letter-spacing: 2px; text-shadow: 1px 1px 3px #000; z-index: 10020; pointer-events: none; }
+
+/* MAIN UI (TOP-LEFT) */
+#ui { position: absolute; top: 20px; left: 20px; z-index: 1000; color: #d4b886; border-radius: 4px; width: 280px; display: none; pointer-events: auto; transition: all 0.25s ease; overflow: hidden; border: none !important; background: transparent !important; padding: 0 !important; box-shadow: none !important; }
+#ui.collapsed { width: 280px; height: 44px; padding: 8px 10px; }
+#ui.collapsed .ui-content { display: none; }
+.ui-topbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.ui-topbar h1 { margin: 0; font-size: 1.4rem; color: #f5d76e; text-shadow: 1px 1px 2px #000; border-bottom: none; padding-bottom: 0; }
+.ui-header-title { display: inline-block; background: linear-gradient(to bottom, #7b1a1a, #4a0a0a); color: #f5d76e; border: 2px solid #ffca28; border-radius: 3px; padding: 6px 10px; margin-bottom: 8px; font-size: 15px; font-weight: bold; font-family: 'Georgia', serif; text-transform: uppercase; letter-spacing: 1px; text-shadow: 1px 1px 1px #000; box-shadow: 0 2px 4px rgba(0,0,0,0.5); pointer-events: none; user-select: none; }
+
+/* UNIFIED COSMETIC BUTTONS & HEADERS */
+.ui-collapse-btn, #dip-log-toggle-btn { position: absolute !important; left: 5px !important; top: 5px !important; width: 24px !important; height: 24px !important; background: rgba(0,0,0,0.4) !important; border: 1px solid #d4b886 !important; color: #f5d76e !important; cursor: pointer; display: flex !important; align-items: center; justify-content: center; font-size: 16px !important; z-index: 20 !important; transition: all 0.2s; box-sizing: border-box !important; margin: 0 !important; }
+.ui-collapse-btn { text-shadow: 1px 1px 1px #000; font-family: 'Georgia', serif; box-shadow: 0 2px 4px rgba(0,0,0,0.5); }
+.ui-collapse-btn:hover, #dip-log-toggle-btn:hover { background: #d4b886 !important; color: #2b1d1a !important; }
+.ui-collapse-btn:hover { border-color: #fff; transform: translateY(-1px); }
+.diplomacy-header, #ui-main-header { background: linear-gradient(to bottom, #7b1a1a, #4a0a0a) !important; color: #f5d76e !important; border: 2px solid #ffca28 !important; padding: 0 0 0 40px !important; height: 35px !important; line-height: 31px !important; font-family: 'Georgia', serif; font-size: 14px !important; font-weight: bold; letter-spacing: 1px; text-transform: uppercase; display: block !important; box-sizing: border-box !important; position: relative !important; text-align: left !important; box-shadow: 0 4px 15px rgba(0,0,0,0.5) !important; }
+
+/* CONTENT & STATS */
+.ui-content, #diplomacy-content-wrapper { background: rgba(15,15,15,0.9) !important; border: 1px solid #d4b886 !important; border-top: none !important; }
+.ui-content { padding: 15px 20px 15px 38px !important; color: #e0e0e0; font-family: 'Georgia', serif; box-shadow: 3px 3px 8px rgba(0,0,0,0.6); box-sizing: border-box; width: 100%; overflow: hidden; border-left: none; border-radius: 0 0 8px 0; transform: translateY(0); transition: transform 0.35s cubic-bezier(0.4, 0.0, 0.2, 1), opacity 0.3s ease; opacity: 1; }
+.ui-content.collapsed { transform: translateY(-100%); opacity: 0; pointer-events: none; }
+.stat { display: flex; justify-content: space-between; margin: 8px 0; font-size: 0.9rem; }
+.val { color: #fff; font-weight: bold; }
+.hint { font-style: italic; font-size: 0.75rem; color: #888; margin-top: 10px; border-top: 1px solid #333; padding-top: 5px; }
+.ui-content .stat { display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 14px; border-bottom: 1px solid rgba(93, 64, 55, 0.3); padding-bottom: 4px; }
+.ui-content .stat span:first-child { color: #d4b886; }
+
+/* DIPLOMACY CONTAINER (TOP-RIGHT) */
+#diplomacy-container { position: absolute; top: 20px; right: 20px; width: 280px; z-index: 5000; pointer-events: none; display: flex; flex-direction: column; padding: 0 !important; border: none !important; background: transparent !important; box-shadow: none !important; box-sizing: border-box; border-radius: 2px; }
+#diplomacy-container button { pointer-events: auto; }
+#diplomacy-container.collapsed { padding: 0 !important; width: 280px !important; }
+#diplomacy-container.collapsed #dip-log-body { display: none !important; }
+.diplomacy-btn-wrapper { position: relative; width: 280px; height: 35px; pointer-events: auto; margin: 0; padding: 0; }
+.diplomacy-main-btn { width: 100%; height: 100%; background: linear-gradient(to bottom, #7b1a1a, #4a0a0a); color: #f5d76e; border: 2px solid #ffca28; padding: 0 0 0 40px; font-family: 'Georgia', serif; font-size: 0.9rem; font-weight: bold; text-transform: uppercase; letter-spacing: 1px; cursor: pointer; text-align: left; box-shadow: 0 4px 15px rgba(0,0,0,0.5); box-sizing: border-box; }
+
+/* EVENT LOG */
+#event-log-container { margin-top: 8px; height: 140px; background: rgba(0,0,0,0.5); border: 1px inset #3e2723; padding: 8px; overflow-y: auto; pointer-events: auto; scrollbar-width: thin; scrollbar-color: #5d4037 rgba(0,0,0,0.3); }
+.log-entry { font-size: 0.72rem; font-family: 'Georgia', serif; margin-bottom: 5px; padding-bottom: 3px; border-bottom: 1px solid rgba(255,255,255,0.03); line-height: 1.2; animation: logFadeIn 0.3s ease-out; }
+@keyframes logFadeIn { from { opacity: 0; transform: translateX(10px); } to { opacity: 1; transform: translateX(0); } }
+.log-time { color: #888; font-family: monospace; margin-right: 5px; }
+.log-war { color: #ff5252; font-weight: bold; }
+.log-peace { color: #8bc34a; }
+.log-general { color: #d4b886; }
+
+/* GEOPOLITICAL MATRIX */
+#diplomacy-panel { position: fixed; left: 0; top: 50%; width: calc(100% - 10px); height: 90%; pointer-events: auto; z-index: 2000; background: linear-gradient(135deg, rgba(25,15,10,0.98), rgba(10,5,0,1)); border: 2px solid #5d4037; border-left: none; color: #d4b886; padding: 20px; box-sizing: border-box; box-shadow: 5px 0 20px rgba(0,0,0,0.8); display: none; }
+#diplomacy-panel.collapsed { height: 60px !important; max-height: 60px !important; overflow: hidden !important; padding: 12px 20px !important; }
+#diplomacy-panel.collapsed #dip-body { display: none !important; }
+#diplomacy-table-container { width: 100%; height: calc(100% - 50px); overflow: auto; pointer-events: auto; }
+.dip-table { width: 100%; min-width: 800px; border-collapse: separate; border-spacing: 1px; background-color: #1a120f; }
+.dip-table td { padding: 10px; background: rgba(45,35,25,0.9); text-align: center; min-width: 60px; }
+.dip-row-label { text-align: left !important; background: rgba(62,39,35,1) !important; color: #ffca28; font-weight: bold; position: sticky; left: 0; z-index: 5; white-space: nowrap; padding: 8px 15px !important; }
+
+/* SCROLLBARS */
+#diplomacy-panel::-webkit-scrollbar, #event-log-container::-webkit-scrollbar { width: 6px; }
+#diplomacy-panel::-webkit-scrollbar-track, #event-log-container::-webkit-scrollbar-track { background: rgba(0,0,0,0.3); }
+#diplomacy-panel::-webkit-scrollbar-thumb, #event-log-container::-webkit-scrollbar-thumb { background: #5d4037; border-radius: 0; }
+
+/* CITY & INTERACTION PANELS */
+#city-panel { position: absolute; bottom: 30px; left: 50%; transform: translateX(-50%); background: linear-gradient(to bottom, rgba(50,10,10,0.95), rgba(20,5,5,0.98)); color: #f5d76e; padding: 20px 40px; border: 2px solid #b71c1c; border-radius: 8px; pointer-events: auto; min-width: 300px; text-align: center; box-shadow: 0 10px 40px rgba(0,0,0,1); z-index: 20; display: none; transition: opacity 0.3s ease; }
+#city-panel h2 { margin: 0 0 10px 0; font-size: 2rem; color: #ffca28; letter-spacing: 2px; text-shadow: 2px 2px 4px #000; }
+#city-panel .city-stat { font-size: 1.1rem; color: #e0e0e0; }
+#city-panel .city-action { margin-top: 15px; font-size: 0.85rem; color: #9e9e9e; font-style: italic; }
+
+#siege-sally-prompt { position: fixed; left: 50%; top: 55%; transform: translate(-50%, -50%); display: none; flex-direction: column; gap: 12px; align-items: center; padding: 18px 22px; min-width: 320px; background: linear-gradient(to bottom, rgba(35,25,15,0.88), rgba(15,10,5,0.89)); color: #d4b886; border: 3px solid #ffca28; border-radius: 8px; box-shadow: 0 10px 40px rgba(0,0,0,1); z-index: 3000; pointer-events: auto; text-align: center; }
+#siege-sally-text { color: #ffca28; font-weight: bold; font-size: 1rem; }
+#siege-sally-actions { display: flex; gap: 8px; }
+
+/* PARLE / DIPLOMACY MODAL */
+#parle-panel { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); background: linear-gradient(to bottom, rgba(35,25,15,0.98), rgba(15,10,5,0.99)); color: #d4b886; padding: 25px; border: 3px solid #5d4037; border-radius: 6px; text-align: center; z-index: 2000; font-family: 'Georgia', serif; min-width: 500px; box-shadow: 0 10px 40px rgba(0,0,0,1); display: none; box-sizing: border-box; }
+#parle-header h2 { margin: 0 0 10px 0; font-size: 2.2rem; color: #ffca28; letter-spacing: 2px; text-shadow: 2px 2px 4px #000; }
+#parle-dialogue { margin: 15px 0; font-size: 1.1rem; color: #eee; font-style: italic; background: rgba(0,0,0,0.6); padding: 10px; border-radius: 4px; height: 160px; overflow-y: auto; text-align: left; }
+#parle-dialogue::-webkit-scrollbar { width: 8px; }
+#parle-dialogue::-webkit-scrollbar-track { background: rgba(0,0,0,0.3); }
+#parle-dialogue::-webkit-scrollbar-thumb { background: #5d4037; border-radius: 4px; border: 1px solid #d4b886; }
+
+.standing-badge { display: inline-block; padding: 2px 10px; border-radius: 4px; font-size: 0.8rem; font-weight: bold; text-transform: uppercase; margin-left: 10px; vertical-align: middle; border: 1px solid rgba(255,255,255,0.2); }
+.parle-stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-bottom: 20px; border-top: 1px solid #333; padding-top: 15px; }
+.force-column { background: rgba(0,0,0,0.5); padding: 10px; border-radius: 4px; border: 1px solid #444; text-align: left; }
+.force-header { font-weight: bold; color: #ffca28; margin-bottom: 8px; border-bottom: 1px solid #5d4037; padding-bottom: 3px; font-size: 0.9rem; text-transform: uppercase; }
+.unit-list { font-size: 0.8rem; color: #aaa; list-style: none; padding: 0; margin: 0; font-family: monospace; }
+.unit-list li { margin-bottom: 3px; }
+#parle-action-box { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; border-top: 1px solid #333; padding-top: 15px; margin-top: 10px; }
+
+/* ACTION BUTTONS */
+.menu-btn { background: linear-gradient(to bottom, #7b1a1a, #4a0a0a); color: #f5d76e; border: 1px solid #d4b886; padding: 8px 12px; font-family: 'Georgia', serif; font-size: 0.8rem; font-weight: bold; cursor: pointer; border-radius: 3px; transition: all 0.2s; text-transform: uppercase; letter-spacing: 1px; box-shadow: 0 2px 4px rgba(0,0,0,0.5); }
+.menu-btn:hover { background: #b71c1c; color: #fff; border-color: #fff; transform: translateY(-1px); }
+.menu-btn:active { transform: translateY(1px); box-shadow: none; }
+
+/* MEDIA QUERIES */
+@media (max-width: 800px) {
+  #units-guide-modal > div { flex-direction: column !important; width: 90% !important; height: 90% !important; }
+  #units-guide-left { width: 100% !important; height: 35% !important; border-right: none !important; border-bottom: 1px solid rgba(212,184,134,0.28) !important; }
+  #units-guide-right { width: 100% !important; height: 65% !important; }
+}
+
+/* ──────────────────────────────────────────
+   REVISED DIPLOMACY PANEL (Mobile-Scaled)
+   ────────────────────────────────────────── */
+#diplomacy-panel {
+    position: fixed !important;
+    top: 50% !important;
+    left: 50% !important;
+    transform: translate(-50%, -50%) !important;
+    
+    /* MODIFIED: 90% of screen height, 90% of screen width */
+    width: 90vw !important;
+    max-width: 90vw !important;
+    height: 90vh !important;
+    max-height: 90vh !important;
+
+    background: rgba(26, 13, 13, 0.98) !important;
+    border: 2px solid #d4b886 !important;
+    border-radius: 8px !important;
+    padding: 10px !important;
+    box-sizing: border-box !important;
+    display: none; /* Controlled by JS */
+    flex-direction: column !important;
+    z-index: 10001 !important;
+    box-shadow: 0 0 30px rgba(0,0,0,0.9) !important;
+}
+
+#dip-panel-header {
+    flex-shrink: 0 !important;
+    display: flex !important;
+    justify-content: space-between !important;
+    align-items: center !important;
+    margin-bottom: 8px !important;
+    border-bottom: 1px solid rgba(212, 184, 134, 0.3) !important;
+    padding-bottom: 5px !important;
+}
+
+#dip-panel-header h2 {
+    font-size: clamp(14px, 4vw, 18px) !important;
+    margin: 0 !important;
+    color: #f5d76e !important;
+}
+
+/* TABLE CONTAINER: Handles the scrolling */
+#diplomacy-table-container {
+    flex: 1 !important;
+    overflow: auto !important;
+    -webkit-overflow-scrolling: touch !important;
+    width: 100% !important;
+    background: rgba(0,0,0,0.2) !important;
+}
+
+/* THE TABLE COSMETICS */
+.dip-table {
+    width: 100% !important;
+    min-width: max-content !important; /* Prevents text squishing */
+    border-collapse: collapse !important;
+    font-size: clamp(10px, 3vw, 12px) !important; /* Scaled font for iPhone */
+}
+
+.dip-table th, .dip-table td {
+    padding: 6px 4px !important; /* Tighter padding for mobile */
+    text-align: center !important;
+    border: 1px solid rgba(212, 184, 134, 0.1) !important;
+}
+
+/* STICKY FACTION NAMES: Keeps labels visible while scrolling */
+.dip-row-label {
+    position: sticky !important;
+    left: 0 !important;
+    background: #1a0d0d !important;
+    z-index: 5 !important;
+    font-weight: bold !important;
+    white-space: nowrap !important;
+    padding-right: 10px !important;
+    color: #ffca28 !important;
+}
+
+/* MOBILE SCROLLBAR */
+#diplomacy-table-container::-webkit-scrollbar {
+    height: 5px !important;
+    width: 5px !important;
+}
+#diplomacy-table-container::-webkit-scrollbar-thumb {
+    background: #d4b886 !important;
+    border-radius: 3px !important;
+}
+
+/* ──────────────────────────────────────────
+   PC ONLY BUTTON LOGIC
+   ────────────────────────────────────────── */
+@media (max-width: 900px) {
+    .pc-only-btn {
+        display: none !important;
+    }
+}
+/* ──────────────────────────────────────────
+   DETAIL MENU OVERRIDE (BEATS GAME LOOP)
+   ────────────────────────────────────────── */
+body.detail-drawer-open #ui {
+    display: none !important;
+}
+
+/* Update these in mainStyle.css */
+.dip-table {
+    width: 100%;
+    border-collapse: collapse;
+    /* Large font for PC, smaller for Mobile */
+    font-size: clamp(12px, 1.2vw, 16px) !important; 
+}
+
+.dip-row-label {
+    position: sticky !important;
+    left: 0 !important;
+    background: #1a0d0d !important;
+    z-index: 5 !important;
+    font-weight: bold !important;
+    /* REMOVED white-space: nowrap; so <br> works! */
+    padding-right: 10px !important;
+    color: #ffca28 !important;
+    border-right: 2px solid rgba(212, 184, 134, 0.3) !important;
+}
+
+/* PC Specific: If the screen is wide, don't force the small width */
+@media (min-width: 901px) {
+    .dip-table th, .dip-table td {
+        padding: 12px 8px !important;
+    }
+}

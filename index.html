@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dawn of Gunpowder - East Asia</title>
+    <link rel="stylesheet" href="mainStyle.css">
+</head>
+<body>
+<div id="loading" style="display: none; z-index: 11999;">Initializing... (0%)</div>
+<div id="ui">
+    <button id="ui-collapse-btn" class="ui-collapse-btn" onclick="toggleUI()">−</button>
+    
+    <div class="game-hint-header" id="ui-main-header">
+        🧨 DAWN OF GUNPOWDER
+    </div>
+
+    <div class="ui-content" id="ui-main-wrapper">
+        <div class="stat"><span>Region:</span> <span id="terrain-text" class="val">Plains</span></div>
+        <div class="stat"><span>Speed:</span> <span id="speed-text" class="val">1.0x</span></div>
+        <div class="stat"><span>Coordinates:</span> <span id="loc-text" class="val">0, 0</span></div>
+        <div class="stat"><span>Zoom Level:</span> <span id="zoom-text" class="val">1.0x</span></div>
+
+        <div class="hint">Scroll to Zoom<br>WASD to explore. <br> Overworld Map - T for troops. <br> Battle/City - P for exit.</div>
+
+<div class="hint" style="
+    font-size: 11px; 
+    line-height: 1.4; 
+    color: #eee; 
+    background: rgba(0,0,0,0.7); 
+    padding: 10px 15px 10px 38px; /* Matches parent left-offset */
+    margin: 15px -20px -15px -38px; /* Negative margins to hit the edges */
+    font-family: monospace; 
+    pointer-events: none; 
+    border-top: 1px solid #444; 
+    width: auto; /* Removes fit-content to allow stretching */
+    display: block;
+">
+    <b style="color:#ffca28">🌍 </b>&nbsp; WASD🏃 Scroll🔍 T📜 P↩️<br>
+    <b style="color:#ffca28">✅ </b> &nbsp;  1⚔️&nbsp; 2🏹&nbsp; 3🐎&nbsp; 4🔥 5 ALL <br>
+    <b style="color:#ffca28">📢 </b> &nbsp;&nbsp;Z:🛡️ X:REG V:➖ C:⭕ B:🔲 <br>
+    <b style="color:#ffca28">🚩 </b> &nbsp;  Q:🔺️ R:️🔻 E:⛔ F:FOLLOW <br> 
+    <span style="color:#ff5252;">Hold Formation by Deselecting</span>   
+</div>
+    </div>
+</div>
+<div id="diplomacy-container" style="display: none;">
+    <div class="diplomacy-btn-wrapper">
+        <button id="dip-log-toggle-btn" onclick="toggleDipLog()">−</button>
+        
+        <button class="diplomacy-main-btn" onclick="toggleDiplomacyMenu()">
+            🫱‍🫲🏽 Diplomacy Table
+        </button>
+    </div>
+
+    <div id="dip-log-body">
+        <div id="event-log-container"></div>
+    </div>
+<button id="quit-to-menu-btn" class="diplomacy-main-btn pc-only-btn" style="margin-top: 6px; text-align: center; padding: 0; display: flex; justify-content: center; align-items: center; gap: 10px;" onclick="if(confirm('Are you sure you want to quit? Unsaved progress will be lost.')) location.reload();">
+        🚪 QUIT TO MAIN MENU
+    </button>
+    <button id="pc-detail-btn" class="diplomacy-main-btn pc-only-btn" style="margin-top: 6px; text-align: center; padding: 0; display: flex; justify-content: center; align-items: center; gap: 10px;" onclick="if(window.mobileUI) window.mobileUI.openDetailDrawer();">
+        DETAIL
+    </button>
+</div>
+
+    <div id="city-panel">
+        <h2 id="city-name">City Name</h2>
+        <div id="city-faction" style="font-size: 0.9rem; color: #aaa; margin-bottom: 10px; text-transform: uppercase; letter-spacing: 1px;">Faction</div>
+
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 5px; margin-bottom: 10px;">
+            <div class="city-stat">Pop: <span id="city-pop" style="color: #fff;">0</span></div>
+            <div class="city-stat">Garrison: <span id="city-garrison" style="color: #fff;">0</span></div>
+            <div class="city-stat">Gold: <span id="city-gold" style="color: #ffd700;">0</span></div>
+            <div class="city-stat">Food: <span id="city-food" style="color: #8bc34a;">0</span></div>
+        </div>
+            
+        <div id="recruit-box" style="display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; border-top: 1px solid #5d4037; padding-top: 15px; margin-top: 10px;">
+<button class="menu-btn" onclick="
+if(player.gold >= 50) { 
+    if(typeof AudioManager !== 'undefined') AudioManager.playSound('gold_buy');
+
+    // Give player 5 Militia
+    player.troops += 5; 
+    if(!player.roster) player.roster = [];
+    for(let i=0; i<5; i++) {
+        player.roster.push({ type: 'Militia', name: 'Militia', experienceLevel: 1 });
+    }
+
+    // Deduct gold from player
+    player.gold -= 50; 
+
+    // Add gold to active city
+    if(activeCity) {
+        activeCity.gold = (activeCity.gold || 0) + 50;
+
+        // Refresh city UI labels
+        document.getElementById('city-gold').innerText = Math.floor(activeCity.gold);
+        document.getElementById('city-food').innerText = Math.floor(activeCity.food || 0);
+    }
+
+} else {
+    if(typeof AudioManager !== 'undefined') AudioManager.playSound('error');
+    alert('Not enough gold!'); 
+}
+">Recruit 5 Militia (50 Gold)</button>
+
+<button class="menu-btn" onclick="if(activeCity) { 
+                if(typeof AudioManager !== 'undefined') AudioManager.playSound('ui_click'); 
+                
+                /* SURGERY: Enter the native architecture dimension */
+                enterCity(activeCity.originalFaction || activeCity.faction, player); 
+                
+                document.getElementById('city-panel').style.display = 'none'; 
+            }">Visit Settlement</button>
+            
+            <button class="menu-btn" onclick="
+                if(typeof troopGUI !== 'undefined') {
+                    if(typeof AudioManager !== 'undefined') AudioManager.playSound('ui_click');
+                    troopGUI.openUpgradeMenu();
+                } else {
+                    alert('troopGUI.js not loaded!');
+                }
+            ">Upgrade Troops</button>
+
+            <button class="menu-btn" onclick="
+                if(activeCity && player.gold >= 10) { 
+                    if(activeCity.food >= 10) {
+                        if(typeof AudioManager !== 'undefined') AudioManager.playSound('gold_buy');
+                        
+                        // Player Transaction
+                        player.food += 10; 
+                        player.gold -= 10; 
+                        refreshCityUI();
+                        // City Transaction
+                        activeCity.food -= 10;
+                        activeCity.gold = (activeCity.gold || 0) + 10;
+
+                        // Refresh City UI Labels
+                        document.getElementById('city-gold').innerText = Math.floor(activeCity.gold);
+                        document.getElementById('city-food').innerText = Math.floor(activeCity.food);
+                        
+                        console.log(`${activeCity.name} supply updated: ${activeCity.food} food left.`);
+                    } else {
+                        if(typeof AudioManager !== 'undefined') AudioManager.playSound('error');
+                        alert('The city has no food left to sell!'); 
+                    }
+                } else {
+                    if(typeof AudioManager !== 'undefined') AudioManager.playSound('error');
+                    alert('Not enough gold for rations!'); 
+                }
+            ">Buy Food (10 Gold)</button>
+			
+<button id="trade-btn" class="menu-btn" onclick="openTradePanel()" style="background: linear-gradient(to bottom, #1b5e20, #0a330c); border-color: #8bc34a; font-size: 1rem;">
+                ⚖️ Open Trade Market
+</button>
+            
+        </div>
+        <div id="hostile-box" style="display: none; flex-direction: column; gap: 8px; align-items: center; border-top: 1px solid #5d4037; padding-top: 15px; margin-top: 10px;">
+            <span style="color: #ff5252; font-weight: bold; font-style: italic; font-size: 0.95rem;">Move with WASD to leave</span>
+            
+            <button id="siege-button" class="menu-btn" style="background: linear-gradient(to bottom, #d32f2f, #b71c1c); border-color: #fff; color: #fff; padding: 10px 20px; font-size: 1rem; width: 90%;" onclick="
+                if(activeCity) {
+                    if(typeof AudioManager !== 'undefined') AudioManager.playSound('ui_click');
+                    if(typeof initiatePlayerSiege === 'function') {
+                        initiatePlayerSiege(activeCity);
+                    } else {
+                        console.error('siege_system.js not loaded!');
+                    }
+                }
+            ">Besiege Settlement</button>
+
+            <button id="assault-button" class="menu-btn" style="background: linear-gradient(to bottom, #ff9800, #e65100); border-color: #fff; color: #fff; padding: 10px 20px; font-size: 1rem; width: 90%; display: none;" onclick="
+                if(typeof triggerSiegeAssault === 'function') {
+                    triggerSiegeAssault();
+                } else {
+                    alert('Assault logic not found in siege_system.js');
+                }
+            ">Lead the Assault!</button>
+            
+            <button id="peace-button" class="menu-btn" style="background: linear-gradient(to bottom, #2e7d32, #1b5e20); border-color: #fff; color: #fff; padding: 10px 20px; font-size: 1rem; margin-top: 5px; width: 90%;" onclick="
+                if(activeCity) {
+                    if(typeof AudioManager !== 'undefined') AudioManager.playSound('ui_click');
+                    let peaceCost = 1000;
+                    if (activeCity.gold && player.gold) {
+                        peaceCost = Math.floor((activeCity.gold / Math.max(1, player.gold)) * 500);
+                        if (peaceCost < 500 || isNaN(peaceCost)) peaceCost = 1000;
+                        if (peaceCost > 5000) peaceCost = 5000;
+                    }
+                    if (player.gold >= peaceCost) {
+                        player.gold -= peaceCost;
+                        player.enemies = player.enemies.filter(e => e !== activeCity.faction);
+                        if(typeof FACTION_RELATIONS !== 'undefined' && FACTION_RELATIONS['Player\'s Kingdom']) {
+                            FACTION_RELATIONS['Player\'s Kingdom'][activeCity.faction] = 'Peace';
+                        }
+                        if(typeof logGameEvent === 'function') logGameEvent(`You bought peace with ${activeCity.faction} for ${peaceCost} Gold.`, 'peace');
+                        document.getElementById('city-panel').style.display = 'none';
+                        player.stunTimer = 0;
+                    } else {
+                        if(typeof AudioManager !== 'undefined') AudioManager.playSound('error');
+                        alert(`The ${activeCity.faction} demands ${peaceCost} Gold. You cannot afford this!`);
+                    }
+                }
+            ">Seek Peace</button>
+        </div>
+    </div> 
+	
+<div id="siege-gui" style="display: none; position: absolute; top: 80px; left: 50%; transform: translateX(-50%); background: rgba(35, 25, 15, 0.95); border: 3px solid #5d4037; padding: 20px; color: #fff; z-index: 6000; text-align: center; width: 320px; box-shadow: 0 0 20px rgba(0,0,0,0.8);">
+        <h2 style="margin-top: 0; color: #ff5252; font-family: 'Georgia', serif;">Under Siege</h2>
+        
+        <div id="siege-status-text" style="margin-bottom: 20px; font-weight: bold; font-size: 1.1rem; color: #ffca28;">
+            STATUS: Encircling the city...
+        </div>
+
+        <button id="gui-continue-btn" class="menu-btn" style="display: none; width: 100%; margin-bottom: 10px; background: linear-gradient(to bottom, #2e7d32, #1b5e20);" onclick="if(typeof resumeSiege === 'function') resumeSiege();">Continue Siege</button>
+        <button id="gui-assault-btn" class="menu-btn" style="width: 100%; margin-bottom: 10px; background: linear-gradient(to bottom, #d32f2f, #b71c1c);" onclick="if(typeof triggerSiegeAssault === 'function') triggerSiegeAssault();">Siege (Assault)</button>
+        <button id="gui-leave-btn" class="menu-btn" style="width: 100%; margin-bottom: 10px;" onclick="if(typeof endSiege === 'function') endSiege(false);">Leave</button>
+    </div>
+
+    <button id="gui-sally-btn" class="menu-btn" style="display: none; position: fixed; top: 400px; left: 50%; transform: translateX(-50%); width: 320px; background: #b71c1c; color: white; border: 2px solid #ffca28; font-weight: bold; animation: pulse 1s infinite; z-index: 6001;" onclick="if(typeof resolveSallyOut === 'function') resolveSallyOut('attack');">
+        DEFENDERS SALLYING OUT!
+    </button>
+	
+	
+    <div id="parle-panel" style="display: none;"> <div id="parle-header">
+            <h2 id="parle-npc-name">NPC Force</h2>
+            <span id="parle-npc-faction">Faction Name</span>
+            <span id="parle-faction-standing" class="standing-badge">NEUTRAL</span>
+        </div>
+
+        <div id="parle-dialogue">Hello there...</div>
+
+        <div class="parle-stat-grid">
+            <div class="force-column">
+                <div class="force-header">Our Force</div>
+                Pop: <span id="parle-player-troops" style="color: #fff;">0</span>
+            </div>
+            <div class="force-column">
+                <div class="force-header">Their Force</div>
+                Pop: <span id="parle-npc-troops" style="color: #fff;">0</span><br>
+                <span style="font-size:0.8rem; color: #888;">Notable Troops:</span>
+                <ul id="parle-npc-top-units" class="unit-list"></ul>
+            </div>
+        </div>
+        <div id="parle-action-box"></div> 
+    </div>  
+
+    <canvas id="gameCanvas"></canvas>
+<div id="diplomacy-panel" style="
+    display: none;
+    position: fixed; /* Changed to fixed for screen-centering */
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%); /* Perfectly centers the element */
+    width: 80%;
+    height: 80%; /* Fixed height as requested */
+    overflow: hidden; /* Prevent panel itself from scrolling, only the body */
+    background: rgba(35, 25, 15, 0.98); 
+    border: 3px solid #5d4037; 
+    border-radius: 8px; 
+    padding: 20px; 
+    color: #d4b886; 
+    z-index: 9999;
+    box-shadow: 0 0 50px rgba(0,0,0,0.9); 
+    font-family: 'Georgia', serif;
+    box-sizing: border-box;
+">
+
+    <div id="dip-header" style="
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        border-bottom: 1px solid #5d4037;
+        padding-bottom: 10px;
+        margin-bottom: 10px;
+        height: 40px; /* Locked height */
+    ">
+        <h2 style="margin: 0; font-size: 1.5rem;">Faction Diplomacy</h2>
+        <div style="display:flex; gap:6px; align-items:center;">
+            <button type="button" id="dip-toggle-btn" class="ui-collapse-btn" onclick="toggleDipPanel()">−</button>
+            <button type="button" class="ui-collapse-btn" onclick="document.getElementById('diplomacy-panel').style.display='none'">X</button>
+        </div>
+    </div>
+
+    <div id="dip-body" style="height: calc(100% - 60px); overflow-y: auto;">
+        <div id="diplomacy-table-container"></div>
+		
+    </div>
+</div>
+<div id="diplomacy-panel">
+    <div id="dip-panel-header">
+        <h2>Geopolitical Relations</h2>
+        <button class="dip-close-btn" onclick="toggleDiplomacyMenu()">✕</button>
+    </div>
+    <div id="diplomacy-table-container"></div>
+</div>
+</div>
+<div id="trade-panel" style="display:none;"></div>
+<script>
+// ============================================================================
+// REVISED TOGGLE UI: Targets the whole container state
+// ============================================================================
+function toggleUI() {
+    const uiContainer = document.getElementById('ui'); // The parent wrapper
+    const btn = document.getElementById('ui-collapse-btn');
+    
+    // Toggle the class on the parent container
+    const isCollapsed = uiContainer.classList.toggle('collapsed');
+    
+    // Update button text to match the state
+    btn.textContent = isCollapsed ? '+' : '−';
+}
+function toggleDipPanel() {
+    const panel = document.getElementById('diplomacy-panel');
+    const btn = document.getElementById('dip-toggle-btn');
+
+    panel.classList.toggle('collapsed');
+
+    btn.textContent = panel.classList.contains('collapsed') ? '+' : '−';
+}
+function toggleDipLog() {
+    const container = document.getElementById('diplomacy-container');
+    const btn = document.getElementById('dip-log-toggle-btn');
+    
+    const isCollapsed = container.classList.toggle('collapsed');
+    btn.textContent = isCollapsed ? '+' : '−';
+}
+</script>
+ <script src="core/camera_effects.js"></script>
+    <script src="sandboxmode/sandboxmode_npc_system.js"></script>
+    <script src="core/fortification_system.js"></script>
+    <script src="core/city_system.js"></script>
+    <script src="core/trade_materials_nonfood.js"></script>
+    <script src="core/city_dialogue_system.js"></script>
+    <script src="core/city_conversation_engine.js"></script>
+    <script src="battle_engine/siegebattle.js"></script>
+    <script src="battle_engine/siegeEngineLogic.js"></script>
+    <script src="battle_engine/drawSiegeEngines.js"></script>
+    <script src="battle_engine/siege_function_helpers.js"></script>
+    <script src="battle_engine/battlefield_launch.js"></script>
+    <script src="battle_engine/naval_battles.js"></script>
+    <script src="battle_engine/drowning_detector.js"></script>
+    <script src="battle_engine/drowning_visuals.js"></script>
+    <script src="menu/custom_naval_launcher.js"></script>
+    <script src="battle_engine/battlefield_logic.js"></script>
+    <script src="battle_engine/enemyCommanderAI.js"></script>
+    <script src="battle_engine/enemyTacticalAI.js"></script>
+    <script src="battle_engine/ai_categories.js"></script>
+    <script src="battle_engine/troop_system.js"></script>
+    <script src="battle_engine/troop_draw.js"></script>
+    <script src="menu/unit-encyclopedia.js"></script>
+    <script src="battle_engine/infscript.js"></script>
+    <script src="battle_engine/cavscript.js"></script>
+    <script src="battle_engine/direction_patch.js"></script>
+    <script src="core/player_overlay_system.js"></script>
+    <script src="battle_engine/leave_battle_roster.js"></script>
+    <script src="battle_engine/battlefield_commands.js"></script>
+    <script src="core/troopGUI.js"></script>
+    <script src="menu/menu.js"></script>
+    <script src="menu/menu-units-guide.js"></script>
+	
+	
+	<script src="scenario_editor.js"></script> 	
+	<script src="scenario_menu.js"></script> 
+	
+    <script src="menu/loading-screen.js"></script>
+    <script src="core/audio_system.js"></script>
+    <script src="core/soundeffects.js"></script>
+    <script src="menu/custom_battle_gui.js"></script>
+    <script src="menu/customsiegebattle.js"></script>
+    <script src="core/RandomDialogue.js"></script>
+    <script src="core/parler_system.js"></script>
+    <script src="battle_engine/siege_system.js"></script>
+    <script src="core/faction_dynamics.js"></script>
+    <script src="sandboxmode/sandboxmode_overworld.js"></script>
+		<script src="npc_systems_story1.js"></script>
+	<script src="story1_map_and_update.js"></script>
+	
+	
+    <script src="core/camp_system.js"></script>
+    <script src="core/camp_system_combat.js"></script>
+    <script src="core/viewport_culling.js"></script>
+    <script src="battle_engine/viewport_culling_battles.js"></script>
+	
+    <script src="sandboxmode/sandboxmode_update.js"></script>
+	
+    <script src="menu/settings_ui.js"></script>
+    <script src="battle_engine/battle_enhancements.js"></script>
+    <script src="core/mobile_ui.js"></script>
+    <script src="core/inventory_patch.js"></script>	
+    <script src="core/quest_system.js"></script>
+    <script src="battle_engine/RTSControls.js"></script>
+    <script src="battle_engine/autoAttack.js"></script>
+    <script src="core/mobile_cleanup.js"></script>
+    <script src="core/save_system.js"></script>
+    <script src="core/world_map.js"></script>
+	
+	
+    <script src="battle_engine/optimization-sandbox.js"></script>
+    <script src="battle_engine/optimization-battles.js"></script>
+    <script src="battle_engine/optimization-siege.js"></script>
+</body>
+</html>
