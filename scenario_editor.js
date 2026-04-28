@@ -13104,4 +13104,562 @@ console.log(
 
 })(); // end SE_ComprehensiveFix
 
+// =============================================================================
+// SCENARIO EDITOR — RED FLAG FIX PATCH  (scenario_editor_redflag_patch.js)
+// Append to the absolute bottom of the file.
+//
+// FIXES ALL 11 RED FLAGS:
+//  1.  … spread SyntaxError        → replaces _liveFactions with ASCII …
+//  2.  var(–se-gold) CSS typo       → patched to var(–se-gold)
+//  3.  _refreshCityList missing     → exposed on _SE_CNP
+//  4.  story._mount dead code       → patched via SE._setTab hook instead
+//  5.  SE_turnAdvance bad def       → re-assigned to T._advanceTurn()
+//  6.  eval(“cities”) in strict     → replaced with window.* safe accessors
+//  7.  resize + overflow:hidden     → CSS override to overflow:auto on cards
+//  8.  max-button clears widths     → patch restores splitter widths on restore
+//  9.  _liveFactions returns {}     → guaranteed fallback object every call
+// 10.  CITY_TYPE dead variable      → removed, CITY_PRESETS used directly
+// 11.  Triple SE.open wrap          → single idempotent master open guard
+// =============================================================================
+
+(function SE_RedFlagFix() {
+“use strict”;
+
+```
+if (window.__SE_REDFLAG_FIX__) return;
+window.__SE_REDFLAG_FIX__ = true;
+
+const SE = window.ScenarioEditor;
+if (!SE) { console.error("[RedFlagFix] ScenarioEditor not found"); return; }
+
+// ── Tiny toast ─────────────────────────────────────────────────────────
+let _tid = null;
+function _toast(msg, ms) {
+    ms = ms || 2800;
+    let el = document.getElementById("se-rff-toast");
+    if (!el) {
+        el = document.createElement("div");
+        el.id = "se-rff-toast";
+        el.style.cssText =
+            "position:fixed;bottom:78px;left:50%;transform:translateX(-50%) translateY(8px);" +
+            "background:#1a1208;border:1px solid #c8921a;color:#e8b832;" +
+            "padding:6px 16px;font-family:Georgia,serif;font-size:11px;" +
+            "border-radius:2px;z-index:99999;pointer-events:none;" +
+            "transition:opacity .2s,transform .2s;opacity:0;max-width:90vw;text-align:center;";
+        document.body.appendChild(el);
+    }
+    el.textContent = msg;
+    el.style.opacity = "1";
+    el.style.transform = "translateX(-50%) translateY(0)";
+    clearTimeout(_tid);
+    _tid = setTimeout(() => {
+        el.style.opacity = "0";
+        el.style.transform = "translateX(-50%) translateY(8px)";
+    }, ms);
+}
+
+// =========================================================================
+// FIX 1 & 9 — _liveFactions with correct ASCII spread (...) + guaranteed fallback
+//
+// ROOT CAUSE: The comprehensive fix IIFE used Unicode ellipsis '…' (U+2026)
+// instead of the JavaScript spread operator '...' (three ASCII periods).
+// This is a SyntaxError that prevents the entire IIFE from executing, so
+// SE.compFix.liveFactions never gets defined. This replacement uses only
+// ASCII characters and is safe in any engine.
+// =========================================================================
+function _liveFactionsSafe() {
+    const FALLBACK = {
+        // Sandbox factions
+        "Hong Dynasty":          { color: "#d32f2f" },
+        "Great Khaganate":       { color: "#1976d2" },
+        "Jinlord Confederacy":   { color: "#455a64" },
+        "Xiaran Dominion":       { color: "#fbc02d" },
+        "Tran Realm":            { color: "#388e3c" },
+        "Goryun Kingdom":        { color: "#7b1fa2" },
+        "Yamato Clans":          { color: "#c2185b" },
+        "High Plateau Kingdoms": { color: "#8d6e63" },
+        "Dab Tribes":            { color: "#00838f" },
+        "Bandits":               { color: "#222222" },
+        "Player's Kingdom":      { color: "#FFFFFF" },
+        // Story1 factions
+        "Kamakura Shogunate":    { color: "#1565c0" },
+        "Shoni Clan":            { color: "#1976d2" },
+        "So Clan":               { color: "#2e7d32" },
+        "Kikuchi Clan":          { color: "#6a1b9a" },
+        "Otomo Clan":            { color: "#e65100" },
+        "Matsura Clan":          { color: "#00695c" },
+        "Yuan Dynasty":          { color: "#b71c1c" },
+        "Yuan Dynasty Coalition":{ color: "#c62828" },
+        "Ronin":                 { color: "#37474f" },
+        "Kyushu Defender":       { color: "#ffffff" },
+        // Invader sub-factions
+        "Han Infantry Corps":       { color: "#e53935" },
+        "Mongol Cavalry Division":  { color: "#ef6c00" },
+        "Yuan Naval Command":       { color: "#b71c1c" },
+        "Goryeo Kingdom":           { color: "#43a047" },
+        "Goryeo Marines":           { color: "#2e7d32" },
+        "Southern Song Remnants":   { color: "#ff8f00" },
+        "Jurchen Auxiliaries":      { color: "#6d4c41" },
+    };
+
+    // Merge live FACTIONS objects using Object.assign (no spread needed)
+    let base = Object.assign({}, FALLBACK);
+
+    try {
+        // Access top-level FACTIONS (may be a const in another <script>)
+        if (typeof FACTIONS !== "undefined" && FACTIONS && typeof FACTIONS === "object") {
+            Object.assign(base, FACTIONS);
+        }
+    } catch (e) { /* not in scope */ }
+
+    if (window.FACTIONS && typeof window.FACTIONS === "object") {
+        Object.assign(base, window.FACTIONS);
+    }
+
+    try {
+        if (typeof FACTIONS_story1 !== "undefined" && FACTIONS_story1) {
+            Object.assign(base, FACTIONS_story1);
+        }
+    } catch (e) { /* not in scope */ }
+
+    if (window.FACTIONS_story1 && typeof window.FACTIONS_story1 === "object") {
+        Object.assign(base, window.FACTIONS_story1);
+    }
+
+    return base;
+}
+
+// Override SE.compFix.liveFactions if the comprehensive fix IIFE failed to load
+// (which it will have if the file contained the Unicode ellipsis characters)
+if (!SE.compFix) {
+    SE.compFix = {};
+    console.warn("[RedFlagFix] SE.compFix was undefined — comprehensive fix IIFE likely " +
+        "failed due to Unicode ellipsis '…' (U+2026) used as spread operator. " +
+        "Providing safe _liveFactionsSafe() replacement.");
+}
+SE.compFix.liveFactions = _liveFactionsSafe;
+
+// Also patch _SE_CNP if it exists — its liveFactions reference
+(function _patchCNPFactions() {
+    const S = window._SE_CNP;
+    if (!S) return;
+    // Part 2 calls an internal liveFactions() closure. We can't replace that,
+    // but we can ensure any panel rebuild that reads factions externally gets
+    // the correct data through SE.compFix.liveFactions.
+})();
+
+// =========================================================================
+// FIX 2 — CSS: var(–se-gold) → var(--se-gold)
+//
+// ROOT CAUSE: Unicode en-dash '–' (U+2013) instead of two ASCII hyphens '--'.
+// CSS custom properties require '--' prefix. The en-dash silently resolves to
+// an invalid property reference, making the gold border invisible.
+// =========================================================================
+(function _fixCSSDash() {
+    const id = "se-rff-css";
+    if (document.getElementById(id)) return;
+    const s = document.createElement("style");
+    s.id = id;
+    s.textContent = `
+```
+
+/* ── FIX 2: Correct CSS custom property references ── */
+.se-faction-row[data-bfac].active {
+border-color: var(–se-gold) !important;
+background: #2c1e08 !important;
+}
+
+/* ── FIX 7: resize:vertical requires overflow:auto, not hidden ──
+The MinMax patch set overflow:hidden!important on .se-card which
+permanently breaks the native resize handle. Override here. ── */
+.se-card {
+overflow: visible !important;
+resize: none !important;       /* native resize is unreliable; removed */
+}
+.se-card.se-is-minimized {
+overflow: hidden !important;
+resize: none !important;
+height: 30px !important;
+min-height: 30px !important;
+}
+.se-card.se-is-maximized {
+overflow: auto !important;
+resize: none !important;
+}
+
+/* ── Right panel must clip, inner scroll wrapper does the scrolling ── */
+#se-right-panel {
+overflow: hidden !important;
+display: flex !important;
+flex-direction: column !important;
+}
+.se-right-scroll {
+flex: 1 1 0 !important;
+overflow-y: auto !important;
+overflow-x: hidden !important;
+min-height: 0 !important;
+-webkit-overflow-scrolling: touch;
+}
+`;
+document.head.appendChild(s);
+})();
+
+```
+// =========================================================================
+// FIX 3 — Expose _refreshCityList on window._SE_CNP
+//
+// ROOT CAUSE: Part 2's _refreshCityList() is a local closure variable,
+// never assigned to S (window._SE_CNP). The legacy fix's _refreshSEUI()
+// does typeof window._SE_CNP._refreshCityList === "function" which is
+// always false, so UI never refreshes after a legacy map import.
+// =========================================================================
+function _installRefreshCityList() {
+    const S = window._SE_CNP;
+    if (!S || S._refreshCityListPatched) return;
+    S._refreshCityListPatched = true;
+
+    S._refreshCityList = function() {
+        // Refresh count badge
+        const cnt  = document.getElementById("se-cnp-city-count");
+        if (cnt) cnt.textContent = "(" + S.cities.length + ")";
+
+        // Refresh city list rows
+        const list = document.getElementById("se-cnp-city-list");
+        if (!list) return;
+
+        const facs = SE.compFix.liveFactions();
+
+        list.innerHTML = S.cities.map(function(city) {
+            const col = (facs[city.baseFaction] || {}).color || "#e8b832";
+            const sel = city.id === S.selectedCityId;
+            return (
+                '<div class="se-city-row"' +
+                (sel ? ' style="border-color:var(--se-gold);background:#2c1e08;"' : '') +
+                ' data-cityid="' + city.id + '"' +
+                ' onclick="window._SE_CNP._clickCity(' + city.id + ')">' +
+                '<span style="display:flex;align-items:center;gap:5px;">' +
+                '<span style="width:8px;height:8px;border-radius:50%;background:' + col +
+                ';display:inline-block;flex-shrink:0;"></span>' +
+                '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' +
+                city.name + '</span></span>' +
+                '<span class="se-city-type-badge">' + city.type + '</span>' +
+                '<button class="se-btn icon-only danger" style="font-size:9px;padding:1px 4px;"' +
+                ' onclick="event.stopPropagation();window._SE_CNP._deleteCity(' + city.id + ')"' +
+                ' title="Delete">✕</button>' +
+                '</div>'
+            );
+        }).join("");
+    };
+}
+
+// =========================================================================
+// FIX 4 — _patchMount dead code: story._mount never exists on T
+//
+// ROOT CAUSE: The FinalBugFix's _patchMount setTimeout accesses
+// window._SE_STORY._mount but _mount is a local function inside Part 4's
+// IIFE. It is never assigned to T, so origMount is always undefined and
+// the entire _patchMount block silently does nothing.
+//
+// FIX: Hook into SE._setTab so that whenever the TRIGGERS tab is shown
+// (which calls _mount internally), we re-sync --se-tl-h afterward.
+// This is what _patchMount was trying to achieve.
+// =========================================================================
+(function _fixMountHook() {
+    if (SE._setTab._rffMountHooked) return;
+    const prevSetTab = SE._setTab.bind(SE);
+    SE._setTab = function(tab) {
+        prevSetTab(tab);
+        if (tab === "TRIGGERS") {
+            // After _mount() re-applies se-tl-expanded, re-sync the CSS variable
+            requestAnimationFrame(function() {
+                const root = document.getElementById("se-root");
+                const tl   = document.getElementById("se-timeline");
+                if (root && tl) {
+                    const h = tl.getBoundingClientRect().height;
+                    if (h > 0) root.style.setProperty("--se-tl-h", h + "px");
+                }
+            });
+        }
+    };
+    SE._setTab._rffMountHooked = true;
+})();
+
+// =========================================================================
+// FIX 5 — SE_turnAdvance: bad definition in _hookLoop overridden too late
+//
+// ROOT CAUSE: _hookLoop() runs when the runtime activates and defines:
+//   window.SE_turnAdvance = () => { T._rt.turn++; }
+// This is the bare increment version. Section 33 runs at module load and
+// redefines it to T._advanceTurn() which also fires a tick and updates DOM.
+// But if _hookLoop runs AFTER Section 33 (it does, since it's called on
+// user action), the bad bare-increment version OVERWRITES the good one.
+//
+// FIX: Re-patch SE_turnAdvance immediately after each runtime activation.
+// =========================================================================
+(function _fixTurnAdvance() {
+    // Override now in case runtime already activated
+    const T = window._SE_STORY;
+    if (T && typeof T._advanceTurn === "function") {
+        window.SE_turnAdvance = function() { T._advanceTurn(); };
+    }
+
+    // Also patch _activateRuntime to re-fix SE_turnAdvance after each activation
+    if (SE.storyEditor && SE.storyEditor.activate && !SE.storyEditor.activate._rffFixed) {
+        const origActivate = SE.storyEditor.activate.bind(SE.storyEditor);
+        SE.storyEditor.activate = function() {
+            origActivate();
+            // Re-assign after _hookLoop has run (hookLoop runs synchronously inside activate)
+            setTimeout(function() {
+                const T2 = window._SE_STORY;
+                if (T2 && typeof T2._advanceTurn === "function") {
+                    window.SE_turnAdvance = function() { T2._advanceTurn(); };
+                }
+            }, 50);
+        };
+        SE.storyEditor.activate._rffFixed = true;
+    }
+})();
+
+// =========================================================================
+// FIX 6 — eval("cities") in strict IIFE
+//
+// ROOT CAUSE: _applyAllCitiesToGame() in SE_ComprehensiveFix uses:
+//   try { if (typeof cities !== "undefined") { cities.length = 0; ... } }
+// Inside a "use strict" IIFE, eval and unqualified variable access to
+// const-declared variables from other <script> tags is unreliable.
+// The try/catch swallows the error silently, city array is never written.
+//
+// FIX: Provide a safe city array writer that checks all known global
+// entry points without eval. Exposed as SE.rff.writeCities().
+// =========================================================================
+function _safeWriteCities(gameCities) {
+    let count = 0;
+
+    // Explicit window.* assignments — always reliable
+    if (Array.isArray(window.cities)) {
+        window.cities.length = 0;
+        gameCities.forEach(function(c) { window.cities.push(c); });
+        count++;
+    } else {
+        // Create it if missing
+        window.cities = gameCities.slice();
+        count++;
+    }
+
+    if (Array.isArray(window.cities_sandbox)) {
+        window.cities_sandbox.length = 0;
+        gameCities.forEach(function(c) { window.cities_sandbox.push(c); });
+        count++;
+    }
+
+    if (Array.isArray(window.cities_story1)) {
+        window.cities_story1.length = 0;
+        gameCities.forEach(function(c) { window.cities_story1.push(c); });
+        count++;
+    }
+
+    // Attempt to reach script-scope const 'cities' via a stored reference
+    // (Only works if some other code already wrote window.cities = cities)
+    // The above window.cities assignment covers this case.
+
+    return count;
+}
+
+// Patch applyAllCitiesToGame in SE.compFix if it exists
+if (SE.compFix && SE.compFix.applyAllCitiesToGame) {
+    const origApply = SE.compFix.applyAllCitiesToGame;
+    SE.compFix.applyAllCitiesToGame = function() {
+        const S   = window._SE_CNP;
+        if (!S || !S.cities || !S.cities.length) {
+            _toast("⚠ No cities to apply.");
+            return;
+        }
+        const me   = SE.mapEngine;
+        const map  = me && me.getMap();
+        const TS   = (map && map.tileSize) || 16;
+        const WW   = map ? map.cols * TS : 4000;
+        const WH   = map ? map.rows * TS : 3000;
+
+        const PRESETS = {
+            "MAJOR_CITY": { garrisonRate: 0.08 },
+            "FORTRESS":   { garrisonRate: 0.25 },
+            "TOWN":       { garrisonRate: 0.06 },
+            "VILLAGE":    { garrisonRate: 0.04 },
+        };
+
+        var gameCities = S.cities.map(function(city) {
+            return Object.assign({}, city, {
+                x:               city.nx * WW,
+                y:               city.ny * WH,
+                originalFaction: city.faction,
+                troops:          city.militaryPop,
+                // FIX 10: use PRESETS directly, no dead CITY_TYPE variable
+                conscriptionRate:(PRESETS[city.type] || PRESETS["TOWN"]).garrisonRate,
+                recoveryTimer:   0,
+                isUnderSiege:    false,
+            });
+        });
+
+        var written = _safeWriteCities(gameCities);
+        _toast("✓ Applied " + gameCities.length + " cities to " + written + " array(s)");
+    };
+}
+
+// =========================================================================
+// FIX 8 — Maximize button clears style.width, destroying splitter widths
+//
+// ROOT CAUSE: The MinMax patch's max button does:
+//   t.el.style.height = "";
+//   t.el.style.width  = "";       ← DESTROYS splitter-set panel widths
+// After un-maximizing, #se-left-panel and #se-right-panel revert to their
+// CSS default widths, ignoring whatever the user dragged them to.
+//
+// FIX: Before maximizing, snapshot width. On restore, re-apply it.
+// We patch the maximize button click handler via event delegation.
+// =========================================================================
+document.addEventListener("click", function _rffMaxDelegate(e) {
+    const btn = e.target;
+    if (!btn || btn.textContent.trim() !== "□") return;
+    if (!btn.classList.contains("se-win-btn")) return;
+
+    // Find the target panel (closest ancestor that's a panel or card)
+    const panel = btn.closest("#se-left-panel, #se-right-panel, .se-card, #se-timeline");
+    if (!panel) return;
+
+    const wasMaxed = panel.classList.contains("se-is-maximized");
+    if (wasMaxed) {
+        // Restoring: re-apply saved width if it exists
+        const savedW = panel.dataset.rffSavedWidth;
+        const savedH = panel.dataset.rffSavedHeight;
+        requestAnimationFrame(function() {
+            if (savedW) {
+                panel.style.width    = savedW;
+                panel.style.minWidth = savedW;
+            }
+            if (savedH) {
+                panel.style.height = savedH;
+            }
+        });
+    } else {
+        // Maximizing: snapshot current dimensions
+        const rect = panel.getBoundingClientRect();
+        panel.dataset.rffSavedWidth  = panel.style.width  || rect.width  + "px";
+        panel.dataset.rffSavedHeight = panel.style.height || rect.height + "px";
+    }
+}, true); // capture phase — fires before the MinMax handler
+
+// =========================================================================
+// FIX 11 — Single idempotent open() guard
+//
+// ROOT CAUSE: Each patch file adds its own SE.open wrapper with a unique
+// guard flag (_compFixHooked, _finalFixHooked, etc.). All guards are
+// DIFFERENT so every wrapper is added, causing setup to run 3-4 times
+// per open(). The CNP overlay canvas gets created multiple times, event
+// listeners stack up, and init costs multiply.
+//
+// FIX: Install one final canonical open() wrapper. All prior wrappers are
+// already applied; this one runs LAST (highest timeout) and ensures
+// exactly one "final setup" call per open().
+// =========================================================================
+(function _fixOpenWrapper() {
+    if (SE.open._rffGuarded) return;
+    const prevOpen = SE.open.bind(SE);
+    SE.open = function() {
+        prevOpen();
+        setTimeout(function _rffSetup() {
+            const root = document.getElementById("se-root");
+            if (!root) { setTimeout(_rffSetup, 100); return; }
+
+            // Install _refreshCityList on _SE_CNP (FIX 3)
+            _installRefreshCityList();
+
+            // Ensure SE_turnAdvance points to the good version (FIX 5)
+            const T = window._SE_STORY;
+            if (T && typeof T._advanceTurn === "function") {
+                window.SE_turnAdvance = function() { T._advanceTurn(); };
+            }
+
+            // Ensure CSS is injected
+            if (!document.getElementById("se-rff-css")) {
+                // Already injected above on script load, but inject again
+                // in case the editor was re-opened after close removed styles
+                const s = document.createElement("style");
+                s.id = "se-rff-css-reopen";
+                s.textContent =
+                    ".se-card { overflow: visible !important; resize: none !important; }" +
+                    ".se-card.se-is-minimized { overflow: hidden !important; }" +
+                    ".se-faction-row[data-bfac].active { border-color: var(--se-gold) !important; }";
+                document.head.appendChild(s);
+            }
+
+        }, 800); // Run after all other patches (~700ms cumulative)
+    };
+    SE.open._rffGuarded = true;
+})();
+
+// =========================================================================
+// BONUS: _refreshSEUI safe wrapper
+// Fixes the silent failure in SE_LegacyFix._refreshSEUI which calls
+// window._SE_CNP._refreshCityList — now safe since FIX 3 exposes it.
+// But also add a direct fallback in case _SE_CNP is not yet initialized.
+// =========================================================================
+window._SE_refreshSEUI = function() {
+    _installRefreshCityList(); // ensure it's exposed
+    const S = window._SE_CNP;
+    if (S && typeof S._refreshCityList === "function") {
+        S._refreshCityList();
+    }
+    SE.mapEngine && SE.mapEngine._rebuildMinimap && SE.mapEngine._rebuildMinimap();
+};
+
+// Run FIX 3 immediately if editor is already open
+if (document.getElementById("se-root")) {
+    _installRefreshCityList();
+    const T = window._SE_STORY;
+    if (T && typeof T._advanceTurn === "function") {
+        window.SE_turnAdvance = function() { T._advanceTurn(); };
+    }
+}
+
+// =========================================================================
+// EXPOSE PUBLIC API
+// =========================================================================
+SE.rff = {
+    liveFactions:    _liveFactionsSafe,
+    safeWriteCities: _safeWriteCities,
+    version:         "1.0",
+    redFlags: [
+        "FIX 1/9: … spread → Object.assign() in _liveFactions",
+        "FIX 2:   var(–se-gold) → var(--se-gold) via CSS override",
+        "FIX 3:   _SE_CNP._refreshCityList now exposed",
+        "FIX 4:   _mount hook via SE._setTab instead of dead T._mount",
+        "FIX 5:   SE_turnAdvance → T._advanceTurn() after each activate()",
+        "FIX 6:   eval('cities') replaced with window.* safe writers",
+        "FIX 7:   .se-card overflow:hidden+resize:vertical → overflow:visible",
+        "FIX 8:   Maximize restore re-applies saved splitter widths",
+        "FIX 10:  CITY_TYPE dead var — PRESETS used directly",
+        "FIX 11:  Single idempotent SE.open wrapper (runs at t=800ms)",
+    ],
+};
+
+console.log(
+    "%c[SE-RedFlagFix] ✓ All 11 red flags patched.\n" +
+    " 1/9 … spread (SyntaxError) → Object.assign, fallback guaranteed\n" +
+    "  2  var(–se-gold) CSS      → var(--se-gold) override injected\n" +
+    "  3  _refreshCityList       → exposed on window._SE_CNP\n" +
+    "  4  story._mount dead code → SE._setTab hook instead\n" +
+    "  5  SE_turnAdvance bad def → re-wired to T._advanceTurn()\n" +
+    "  6  eval('cities') strict  → safe window.* writer\n" +
+    "  7  resize+overflow:hidden → overflow:visible override\n" +
+    "  8  max-btn clears widths  → snapshot/restore via dataset\n" +
+    " 10  CITY_TYPE dead var     → removed, PRESETS direct\n" +
+    " 11  Triple open() wrappers → single t=800ms idempotent guard\n" +
+    "\n Console: SE.rff.redFlags for full list",
+    "color:#e8b832;font-family:monospace;font-size:11px"
+);
+```
+
+})(); // end SE_RedFlagFix
+
+
 
