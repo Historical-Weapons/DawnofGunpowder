@@ -1,4 +1,4 @@
-🧭 What the game is about  
+[🧭 What the game is about ](https://historical-weapons.github.io/DawnofGunpowder/) 
 The game is a 13th-century tactical strategy war game focused on:
 
 Historical warfare (Mongols, Japan, East Asia)
