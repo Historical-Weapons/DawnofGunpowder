@@ -1,4 +1,4 @@
-const FACTIONS = {
+window.FACTIONS = {
     // 1. THE HEARTLAND: Central China (Nudged North to clear the South)
     "Hong Dynasty":          { color: "#d32f2f", geoWeight: { north: 0.40, south: 0.60, west: 0.40, east: 0.60 } }, 
 
@@ -32,7 +32,11 @@ const FACTIONS = {
     // 11. PLAYER: Yellow Sea Anchor
     "Player's Kingdom":      { color: "#FFFFFF", geoWeight: { north: 0.45, south: 0.45, west: 0.30, east: 0.70 } } 
 };
-const SYLLABLE_POOLS = {
+
+var FACTIONS = window.FACTIONS;
+
+
+window.SYLLABLE_POOLS = {
     "Hong Dynasty": ["Han","Zhuo","Mei","Ling","Xian","Yue","Lu","Feng","Bai","Shan","Qiao","He","Jin","Dao","Tong","An","Wu","Lin","Wan","Bao","Zi","Rong","Dong","Cheng","Hua","Shou","Yi","Tao","Yan","Gui"],
 "Jinlord Confederacy": [
     "Cira", "Nuru", "Guda", "Bi", "Bisi", 
@@ -72,7 +76,7 @@ const SYLLABLE_POOLS = {
   "Ying", "Cheung", "Chung", "Lok", "Lam"
 ]
 };
-
+var SYLLABLE_POOLS = window.SYLLABLE_POOLS;
 
 
 const NPC_CARRY_CAPACITY_PER_UNIT = 2; // Each person/soldier can carry 20 units of goods
@@ -240,10 +244,20 @@ function initializeCityData(city, worldWidth, worldHeight) {
     city.recoveryTimer = 0;
     city.faction = controllingFaction;
     
-    // ---> SURGERY: Permanently lock in the native culture <---
-    city.originalFaction = controllingFaction; 
-     
-    city.color = FACTIONS[controllingFaction].color;
+    // ---> SURGERY: Preserve originalFaction if _replaceCities already mapped it
+    // to the nearest built-in arch faction (for custom scenario factions whose
+    // name isn't in the local FACTIONS const).  Only stamp it from
+    // controllingFaction when no valid arch mapping was pre-set.
+    if (!city.originalFaction || !FACTIONS[city.originalFaction]) {
+        city.originalFaction = controllingFaction;
+    }
+
+    // Safe colour lookup: local FACTIONS const first, then window.FACTIONS
+    // (which is updated by _applyToLiveEngine for custom scenario factions),
+    // then a neutral grey so we never crash on an unknown faction name.
+    const _fData = FACTIONS[controllingFaction]
+        || (window.FACTIONS && window.FACTIONS[controllingFaction]);
+    city.color = _fData ? _fData.color : "#888888";
     
     // SURGERY: Force overwrite if the map generator gave it a generic "Settlement" name
     if (!city.name || city.name.startsWith("Settlement")) {

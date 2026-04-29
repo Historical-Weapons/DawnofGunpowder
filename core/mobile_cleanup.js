@@ -1168,19 +1168,30 @@ units.forEach((u, i) => {
                 ? ((rawExp % 1) * 100).toFixed(0) + '%'
                 : String(Math.floor(rawExp));
             
-            const mor = Math.floor(u.morale ?? 20);
-            const atk = Math.floor(u.meleeAttack ?? 10);
-            const def = Math.floor(u.meleeDefense ?? 10);
-            const arm = Math.floor(u.armor ?? 2);
-
-            // --- NEW: COST & UPKEEP LOGIC ---
-            // Fetch from the base roster template in case the individual unit object doesn't save cost
+// 1. Fetch the pristine template from the global Unit Roster
             const template = window.UnitRoster && window.UnitRoster.allUnits[u.type || u.name];
+            
+            // 2. Calculate dynamic scaling bonuses 
+            // (Engine formula: +2 ATK & DEF per Experience Level)
+            const levelBonus = (lvl || 1) * 2;
+
+            // 3. Fallback to templates, otherwise use absolute baseline minimums
+            const baseMor = template ? (template.maxMorale || template.morale) : 20;
+            const baseAtk = template ? template.meleeAttack : 10;
+            const baseDef = template ? template.meleeDefense : 10;
+            const baseArm = template ? template.armor : 2;
+
+            // 4. Map the final stats. 
+            // If the unit has an active override (u.meleeAttack), use it. 
+            // Otherwise, combine the Base Template + Level Bonus.
+            const mor = Math.floor(u.morale ?? baseMor);
+            const atk = Math.floor(u.meleeAttack ?? (baseAtk + levelBonus));
+            const def = Math.floor(u.meleeDefense ?? (baseDef + levelBonus));
+            const arm = Math.floor(u.armor ?? baseArm);
+
+            // --- COST & UPKEEP LOGIC ---
             const cost = Math.floor(u.cost ?? (template ? template.cost : 0));
-            
-            // Adjust the upkeep divisor based on your game's global economy logic (defaulting to 10% of cost here)
             const upkeep = Math.floor(u.upkeep ?? (cost / 10));
-            
             const rowBg = i % 2 === 0 ? 'rgba(255,255,255,0.03)' : 'transparent';
 
             // HP Color Conditional Formatting

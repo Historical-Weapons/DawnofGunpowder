@@ -237,3 +237,25 @@ body.detail-drawer-open #ui {
         padding: 12px 8px !important;
     }
 }
+
+/* 1. Make the Settlement Menu Panel 60% Transparent (40% Opaque) */
+#city-panel {
+    /* The original alpha values were 0.95 and 0.98. 
+       We change them to 0.4 to achieve 60% transparency. */
+    background: linear-gradient(to bottom, rgba(50,10,10,0.4), rgba(20,5,5,0.4)) !important;
+    
+    /* Optional: Add a slight blur so the text remains readable against the game map */
+    backdrop-filter: blur(2px);
+}
+
+/* 2. Make ALL buttons inside the Settlement Menu 20% Transparent (80% Opaque) */
+#city-panel button {
+    /* 20% transparent means 80% visibility */
+    opacity: 0.8 !important; 
+    transition: opacity 0.2s ease;
+}
+
+/* Optional: Make buttons solid again when hovered so they feel responsive */
+#city-panel button:hover {
+    opacity: 1.0 !important;
+}

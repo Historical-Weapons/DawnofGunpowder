@@ -1352,6 +1352,10 @@ let peakSpawnThreshold = isMobile ? 0.991 : 0.984;
 
     await setLoading(92, "Founding cities");
     populateCities();
+	
+	window.__sandboxBgCanvas = bgCanvas;
+window.__sandboxBgCtx = bgCtx;
+
     await setLoading(97, "Spawning caravans");
     initializeNPCs(cities, worldMap, TILE_SIZE, COLS, ROWS, PADDING_X, PADDING_Y);
 

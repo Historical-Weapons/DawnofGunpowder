@@ -413,14 +413,14 @@ leaveBattlefield = function(playerObj) {
 
     // 2. PERMADEATH & MIRACLE LOGIC
     if (currentBattleData && currentBattleData.playerDefeatedText) {
-        if (Math.random() > 0.10) { 
-            // 90% Chance -> Absolute Permadeath
+        if (Math.random() > 0.01) { 
+            // 99% Chance -> Absolute Permadeath
             if (typeof window.triggerPermadeath === 'function') {
                 window.triggerPermadeath();
             }
             return; // HALTS SCRIPT: Player is dead, game reloads
         } else {
-            // 10% Chance -> Miraculously saved by villager
+            // 1% Chance -> Miraculously saved by villager
             console.log("Miraculously saved by villagers!");
             
             // Absolutely wipe the army
@@ -516,8 +516,9 @@ leaveBattlefield = function(playerObj) {
         console.log(`[BATTLE END] didPlayerWin Evaluated To: ${didPlayerWin}`);
 
         if (didPlayerWin) {
+			playerObj.cohesion = Math.min(100, (playerObj.cohesion || 100) + 15);  
 			
-            // --- VICTORY LOOT ---
+            // --- VICTORY LOOT-
             let winSeverity = Math.min(1.0, eLost / eInitial); 
             console.log(`[VICTORY LOOT] Severity: ${(winSeverity*100).toFixed(0)}% (Enemies Lost: ${eLost})`);
 
@@ -572,14 +573,18 @@ leaveBattlefield = function(playerObj) {
             } else {
                 console.log(`[VICTORY LOOT] Enemy had no cargo items to steal.`);
             }
-        } else {
+	} else {
             // --- DEFEAT PENALTY ---
+            playerObj.cohesion = Math.max(0, (playerObj.cohesion || 100) - 25); // COHESION NERF
+
             let lossSeverity = Math.min(1.0, pLost / pInitial); // 0.0 to 1.0
             console.log(`[DEFEAT PENALTY] Severity: ${(lossSeverity*100).toFixed(0)}% (Player Lost: ${pLost}/${pInitial})`);
             
-            // Lose up to 50% of your current gold and food based on how badly you lost
-            let goldLost = Math.floor(playerObj.gold * lossSeverity * 0.5 * randMod); 
-            let foodLost = Math.floor((playerObj.food || 0) * lossSeverity * 0.5 * randMod); 
+            let randMod = 0.8 + (Math.random() * 0.2); // Cap RNG to 1.0
+            let plunderMultiplier = Math.pow(lossSeverity, 1.5) * 0.95; // Exponential scale!
+            
+            let goldLost = Math.floor(playerObj.gold * plunderMultiplier * randMod); 
+            let foodLost = Math.floor((playerObj.food || 0) * plunderMultiplier * randMod);
 
             console.log(`[DEFEAT PENALTY] Lost ${goldLost} Gold and ${foodLost} Food.`);
 
@@ -637,15 +642,23 @@ leaveBattlefield = function(playerObj) {
     // Triggers the UI
     originalLeaveBattlefield(playerObj);
 
-    // D. FINAL TRUTH SYNC
+// D. FINAL TRUTH SYNC
     playerObj.troops = playerObj.roster.length;
     if (enemyRef) enemyRef.count = enemyRef.roster.length;
 
     cachedCommander = null;
-	
-	isBattlefieldReady = false;
-};
+    isBattlefieldReady = false;
 
+    // --- SURGERY: STRICT < 3 PERMADEATH RULE ---
+    if (!didPlayerWin && playerObj.troops < 3) {
+        console.log("CRITICAL DEFEAT: Less than 3 troops remain. Permadeath triggered.");
+        if (typeof window.triggerPermadeath === 'function') {
+            window.triggerPermadeath();
+        } else {
+            window.location.reload();
+        }
+    }
+};
 
 
 

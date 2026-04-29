@@ -641,7 +641,7 @@ html += `
                 Open Diplomacy Table
             </button>
             <button id="mob-saveload-btn" class="menu-btn" style="width: 100%; margin-top: 10px; padding: 12px 10px; background: linear-gradient(to bottom, #1a4a0a, #0a2a04); border-color: #8bc34a; color: #8bc34a;" onclick="if(window.SaveSystem) { if(window.mobileUI) window.mobileUI.closeDetailDrawer(); window.SaveSystem.openPanel(); }">
-                💾 Save / Load Game
+                💾 Save Game
             </button>
             <button id="mob-quest-btn" class="menu-btn" style="width: 100%; margin-top: 10px; padding: 12px 10px; background: linear-gradient(to bottom, #4a3a00, #22180a); border-color: #ffe600; color: #ffe600;" onclick="if(window.mobileUI) window.mobileUI.closeDetailDrawer(); if(window.QuestSystem) window.QuestSystem.openQuestLog();">
                 📜 Quest Log

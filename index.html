@@ -16,7 +16,94 @@
     
     <div class="game-hint-header" id="ui-main-header">
         🧨 DAWN OF GUNPOWDER
+        <span id="options-menu-anchor" style="position:relative;display:inline-block;margin-left:8px;">
+            <button id="options-btn" onclick="toggleOptionsMenu(event)"
+                style="background:linear-gradient(to bottom,#3a3020,#1a1810);
+                       color:#d4b886;border:1px solid #6b5a32;padding:2px 9px;
+                       font-size:11px;font-family:Georgia,serif;cursor:pointer;
+                       border-radius:3px;vertical-align:middle;">
+                ⚙ Options ▾
+            </button>
+            <div id="options-dropdown" style="
+                display:none; position:absolute; top:100%; left:0; z-index:20000;
+                background:linear-gradient(to bottom,#2c2518,#1a1508);
+                border:1px solid #6b5a32; border-radius:3px; min-width:160px;
+                box-shadow:2px 4px 12px rgba(0,0,0,0.85); font-family:Georgia,serif;
+                padding:4px 0;">
+                <!-- VIEW section -->
+                <div style="padding:3px 10px;font-size:10px;color:#888;text-transform:uppercase;letter-spacing:1px;border-bottom:1px solid #444;">View</div>
+                <button class="opt-item" onclick="togglePanelVis('ui')"          style="width:100%;text-align:left;padding:5px 14px;background:none;border:0;color:#d4b886;cursor:pointer;font-size:12px;">📊 Stats Panel</button>
+                <button class="opt-item" onclick="togglePanelVis('diplomacy-container')" style="width:100%;text-align:left;padding:5px 14px;background:none;border:0;color:#d4b886;cursor:pointer;font-size:12px;">🫱 Diplomacy Bar</button>
+                <button class="opt-item" onclick="togglePanelVis('diplomacy-panel')"     style="width:100%;text-align:left;padding:5px 14px;background:none;border:0;color:#d4b886;cursor:pointer;font-size:12px;">🗺 Diplomacy Table</button>
+                <!-- RESET section -->
+                <div style="padding:3px 10px;font-size:10px;color:#888;text-transform:uppercase;letter-spacing:1px;border-top:1px solid #444;border-bottom:1px solid #444;margin-top:2px;">Reset</div>
+                <button class="opt-item" onclick="resetGUIPositions()"
+                    style="width:100%;text-align:left;padding:5px 14px;background:none;border:0;color:#ffca28;cursor:pointer;font-size:12px;font-weight:bold;">
+                    🔄 Reset Panel Positions
+                </button>
+            </div>
+        </span>
     </div>
+
+<script>
+// ── Options dropdown ──────────────────────────────────────────────────────────
+(function(){
+    // Close dropdown when clicking outside
+    document.addEventListener('click', function(e) {
+        const dd = document.getElementById('options-dropdown');
+        if (!dd) return;
+        if (!document.getElementById('options-menu-anchor').contains(e.target)) {
+            dd.style.display = 'none';
+        }
+    });
+})();
+
+function toggleOptionsMenu(e) {
+    e.stopPropagation();
+    const dd = document.getElementById('options-dropdown');
+    dd.style.display = dd.style.display === 'none' ? 'block' : 'none';
+}
+
+function togglePanelVis(id) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.style.display = (el.style.display === 'none') ? '' : 'none';
+}
+
+// Stores the original inline styles so Reset can restore them exactly.
+const _originalPanelStyles = {};
+
+function _capturePanelStyles() {
+    ['ui', 'diplomacy-container', 'city-panel', 'diplomacy-panel', 'trade-panel',
+     'parle-panel'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) _originalPanelStyles[id] = el.getAttribute('style') || '';
+    });
+}
+
+function resetGUIPositions() {
+    ['ui', 'diplomacy-container', 'city-panel', 'diplomacy-panel', 'trade-panel',
+     'parle-panel'].forEach(id => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        const orig = _originalPanelStyles[id];
+        if (orig !== undefined) {
+            el.setAttribute('style', orig);
+        }
+    });
+    const dd = document.getElementById('options-dropdown');
+    if (dd) dd.style.display = 'none';
+}
+
+// Capture initial positions once DOM is ready
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', _capturePanelStyles);
+} else {
+    // DOMContentLoaded already fired — capture after a short tick so all
+    // scripts have had a chance to apply their default styles.
+    setTimeout(_capturePanelStyles, 800);
+}
+</script>
 
     <div class="ui-content" id="ui-main-wrapper">
         <div class="stat"><span>Region:</span> <span id="terrain-text" class="val">Plains</span></div>
@@ -359,13 +446,17 @@ function toggleDipLog() {
     <script src="battle_engine/leave_battle_roster.js"></script>
     <script src="battle_engine/battlefield_commands.js"></script>
     <script src="core/troopGUI.js"></script>
+	
+<script src="story/scenario_update.js"></script>
+<script src="story/scenario_editor.js"></script>
+
+<script src="story/storymode_presentation.js"></script>   <!-- NEW -->
+<script src="story/scenario_triggers.js"></script>        <!-- NEW -->
+<script src="story/senario_devmade_import.js"></script>
     <script src="menu/menu.js"></script>
     <script src="menu/menu-units-guide.js"></script>
-	
-	
-	<script src="scenario_editor.js"></script> 	
-	<script src="scenario_menu.js"></script> 
-	
+  
+
     <script src="menu/loading-screen.js"></script>
     <script src="core/audio_system.js"></script>
     <script src="core/soundeffects.js"></script>
@@ -376,17 +467,12 @@ function toggleDipLog() {
     <script src="battle_engine/siege_system.js"></script>
     <script src="core/faction_dynamics.js"></script>
     <script src="sandboxmode/sandboxmode_overworld.js"></script>
-		<script src="npc_systems_story1.js"></script>
-	<script src="story1_map_and_update.js"></script>
-	
-	
+	<script src="story/story1_map_and_update.js"></script>
     <script src="core/camp_system.js"></script>
     <script src="core/camp_system_combat.js"></script>
     <script src="core/viewport_culling.js"></script>
     <script src="battle_engine/viewport_culling_battles.js"></script>
-	
     <script src="sandboxmode/sandboxmode_update.js"></script>
-	
     <script src="menu/settings_ui.js"></script>
     <script src="battle_engine/battle_enhancements.js"></script>
     <script src="core/mobile_ui.js"></script>
@@ -395,6 +481,8 @@ function toggleDipLog() {
     <script src="battle_engine/RTSControls.js"></script>
     <script src="battle_engine/autoAttack.js"></script>
     <script src="core/mobile_cleanup.js"></script>
+	
+	
     <script src="core/save_system.js"></script>
     <script src="core/world_map.js"></script>
 	
@@ -402,5 +490,172 @@ function toggleDipLog() {
     <script src="battle_engine/optimization-sandbox.js"></script>
     <script src="battle_engine/optimization-battles.js"></script>
     <script src="battle_engine/optimization-siege.js"></script>
+	
+	<script>
+(function applyMobileMenuPatch() {
+    // Poll lightly to wait for the Scenario Editor and Dev scripts
+    // to finish injecting their buttons after the manual is unlocked.
+    const poll = setInterval(() => {
+        const ui = document.getElementById("main-menu-ui-container");
+        if (!ui) return;
+
+        const allBtns = Array.from(ui.querySelectorAll("button"));
+        
+  // Find injected scenario buttons
+const launchBtn = allBtns.find(b => b.textContent && b.textContent.includes("Launch Scenario"));
+const editorBtn = allBtns.find(b => b.textContent && b.textContent.includes("Scenario Editor"));
+const sandboxImportBtn = allBtns.find(b => b.textContent && b.textContent.includes("Import Sandbox"));
+const storyBtn = allBtns.find(b => b.textContent && b.textContent.includes("Import Story 1"));
+
+// Find base game mode buttons
+const sandboxGameBtn = allBtns.find(b => b.textContent && b.textContent.includes("Sandbox Game"));
+const campaignBtn = allBtns.find(b => b.textContent && b.textContent.includes("Campaign Mode"));
+const customBattleBtn = allBtns.find(b => b.textContent && b.textContent.includes("Custom Battle"));
+const loadGameBtn = allBtns.find(b => b.textContent && b.textContent.includes("Load Game"));
+
+// Find root UI buttons
+const optionsBtn = allBtns.find(b => b.textContent && b.textContent.includes("Options"));
+const quitBtn = allBtns.find(b => b.textContent && b.textContent.includes("Quit Game"));
+const manualBtn = allBtns.find(b => b.textContent && b.textContent.includes("Manual"));
+        const unitsBtn = document.getElementById("units-guide-btn");
+        
+        // Wait until scenario buttons are injected AND the manual is unlocked
+        if (launchBtn && editorBtn && sandboxImportBtn && storyBtn && window.__isManualUnlocked) {
+            clearInterval(poll);
+            
+            // Group arrays
+            const scenarioBtns = [launchBtn, editorBtn, sandboxImportBtn, storyBtn];
+            const playBtns = [campaignBtn, sandboxGameBtn, customBattleBtn, loadGameBtn].filter(Boolean);
+            const rootBtns = [manualBtn, unitsBtn, optionsBtn, quitBtn].filter(Boolean); 
+
+            // --- SURGERY: DYNAMIC WIDTH CLONING ---
+            // Grab the exact dimensions mobile_cleanup/mobile_ui assigned to existing buttons
+            const refBtn = optionsBtn || quitBtn;
+            const targetWidth = refBtn ? refBtn.style.width : "min(280px, 85vw)";
+            const targetPadding = refBtn ? refBtn.style.padding : "15px clamp(10px, 4vw, 40px)";
+            const targetFontSize = refBtn ? refBtn.style.fontSize : "1.2rem";
+
+            // Exactly mimic the source menu styles and animations
+            function styleBtnAsOriginal(btn) {
+                if (!btn) return;
+                btn.style.background = "linear-gradient(to bottom, #7b1a1a, #4a0a0a)";
+                btn.style.color = "#f5d76e";
+                btn.style.border = "2px solid #d4b886";
+                btn.style.padding = targetPadding; // Cloned from mobile environment
+                btn.style.margin = "10px";
+                btn.style.fontFamily = "Georgia, serif";
+                btn.style.fontSize = targetFontSize; // Cloned from mobile environment
+                btn.style.fontWeight = "bold";
+                btn.style.cursor = "pointer";
+                btn.style.borderRadius = "4px";
+                btn.style.textTransform = "uppercase";
+                btn.style.width = targetWidth; // Cloned from mobile environment
+                btn.style.boxSizing = "border-box";
+                btn.style.transition = "all 0.2s";
+                btn.style.boxShadow = "0 4px 6px rgba(0,0,0,0.5)";
+                btn.style.backgroundImage = "linear-gradient(to bottom, #7b1a1a, #4a0a0a)"; 
+
+                btn.onmouseenter = () => {
+                    btn.style.transform = "scale(1.05)";
+                    btn.style.background = "linear-gradient(to bottom, #b71c1c, #7b1a1a)";
+                    btn.style.color = "#fff";
+                    btn.style.boxShadow = "0 0 20px #d4b886";
+                };
+
+                btn.onmouseleave = () => {
+                    btn.style.transform = "scale(1)";
+                    btn.style.background = "linear-gradient(to bottom, #7b1a1a, #4a0a0a)";
+                    btn.style.color = "#f5d76e";
+                    btn.style.boxShadow = "0 4px 6px rgba(0,0,0,0.5)";
+                };
+            }
+
+            // 1. Force scenario buttons to match exactly
+            scenarioBtns.forEach(styleBtnAsOriginal);
+
+            // 2. Create the Category & Back Buttons
+            const playCategoryBtn = document.createElement("button");
+            playCategoryBtn.innerText = "▶ PLAY";
+            styleBtnAsOriginal(playCategoryBtn);
+
+            const scenarioCategoryBtn = document.createElement("button");
+            scenarioCategoryBtn.innerText = "🛠️ TOOLS";
+            styleBtnAsOriginal(scenarioCategoryBtn);
+
+            const backBtn = document.createElement("button");
+            backBtn.innerText = "🔙 BACK";
+            styleBtnAsOriginal(backBtn);
+
+// 3. Reorder the DOM so everything sits neatly below the title
+            if (manualBtn) ui.appendChild(manualBtn);
+            
+            ui.appendChild(playCategoryBtn);
+            ui.appendChild(scenarioCategoryBtn);
+            
+            if (optionsBtn) ui.appendChild(optionsBtn);
+            
+            if (unitsBtn) ui.appendChild(unitsBtn); // <--- MOVED DOWN HERE
+            if (quitBtn) ui.appendChild(quitBtn);
+            playBtns.forEach(b => ui.appendChild(b));
+            scenarioBtns.forEach(b => ui.appendChild(b));
+            ui.appendChild(backBtn);
+
+            // --- SURGERY: HARD OVERRIDE FOR !IMPORTANT CSS ---
+            function forceHide(b) {
+                if (b) b.style.setProperty('display', 'none', 'important');
+            }
+            function forceShow(b) {
+                if (b) b.style.setProperty('display', 'block', 'important');
+            }
+
+            // 4. State Management Logic
+            function showMainMenu() {
+                playBtns.forEach(forceHide);
+                scenarioBtns.forEach(forceHide);
+                forceHide(backBtn); 
+
+                rootBtns.forEach(forceShow);
+                forceShow(playCategoryBtn);
+                forceShow(scenarioCategoryBtn);
+            }
+
+            function showPlayMenu() {
+                rootBtns.forEach(forceHide);
+                scenarioBtns.forEach(forceHide);
+                forceHide(playCategoryBtn);
+                forceHide(scenarioCategoryBtn);
+
+                playBtns.forEach(b => {
+                    if (b === loadGameBtn) {
+                        const hasSaveData = [0, 1, 2].some(i => !!localStorage.getItem("DoG_Save_" + i));
+                        if (hasSaveData) forceShow(b);
+                        else forceHide(b);
+                    } else {
+                        forceShow(b);
+                    }
+                });
+                forceShow(backBtn); 
+            }
+
+            function showScenarioMenu() {
+                rootBtns.forEach(forceHide);
+                playBtns.forEach(forceHide);
+                forceHide(playCategoryBtn);
+                forceHide(scenarioCategoryBtn);
+
+                scenarioBtns.forEach(forceShow);
+                forceShow(backBtn); 
+            }
+
+            // 5. Attach Listeners & Init
+            playCategoryBtn.onclick = showPlayMenu;
+            scenarioCategoryBtn.onclick = showScenarioMenu;
+            backBtn.onclick = showMainMenu;
+
+            showMainMenu();
+        }
+    }, 500);
+})();
+</script>
 </body>
 </html>

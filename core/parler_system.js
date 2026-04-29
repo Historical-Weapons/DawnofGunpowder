@@ -76,6 +76,21 @@ function generateNPCDialogue(npc, choice) {
     return "...";
 }
 
+function generateNPCDialogue(npc, choice) { //new version
+       if (choice !== "Hello") return "...";
+       const isEnemy = player.enemies && player.enemies.includes(npc.faction);
+       const isAlly  = npc.faction === player.faction;
+       return RandomDialogue.generateHello({
+           faction:       npc.faction,
+           playerFaction: player.faction,
+           playerNumbers: player.troops || 0,
+           npcNumbers:    npc.count    || 0,
+           npcType:       npc.role,
+           isEnemy,
+           isAlly
+      }, npc);
+  }
+
 function handleDiplomacyAction(npc, actionType) {
 if (isDiplomacyProcessing) return; // EXIT if we are already transitioning
 
@@ -720,6 +735,8 @@ function displayAutoresolveResults(npc, playerWon, playerLosses, npcLosses) {
 
     let resultHtml = "";
     if (playerWon) {
+		player.cohesion = Math.min(100, (player.cohesion || 100) + 15); //   BUFF
+		
         parleDialogue.innerText = `Victory! The enemy forces have been routed or destroyed.`;
         resultHtml = `
             <div style="padding: 10px; background: rgba(0,255,0,0.1); border: 1px solid #2e7d32; margin-bottom: 10px;">
@@ -783,18 +800,21 @@ function displayAutoresolveResults(npc, playerWon, playerLosses, npcLosses) {
 		
 } else {
         parleDialogue.innerText = `Defeat! Your forces have been crushed and scattered.`;
-
-        // --- SURGERY: AUTORESOLVE DEFEAT PENALTY ---
+// --- SURGERY: AUTORESOLVE DEFEAT PENALTY ---
         console.log("[AUTORESOLVE] Defeat! Calculating wealth loss...");
         
+        player.cohesion = Math.max(0, (player.cohesion || 100) - 25); // COHESION NERF
+
         // Calculate how much of your total army was lost
         let pInitial = playerLosses + (player.roster ? player.roster.length : 0);
         let lossSeverity = playerLosses / Math.max(1, pInitial); // 0.0 to 1.0
-        let randMod = 0.8 + (Math.random() * 0.4);
+        
+        let randMod = 0.8 + (Math.random() * 0.2); // Cap RNG to 1.0 max
+        let plunderMultiplier = Math.pow(lossSeverity, 1.5) * 0.95; // Exponential scale!
 
-        // 1. Lose Gold & Food (Up to 50% based on loss severity)
-        let goldLost = Math.floor(player.gold * lossSeverity * 0.5 * randMod);
-        let foodLost = Math.floor((player.food || 0) * lossSeverity * 0.5 * randMod);
+        // 1. Lose Gold & Food (Scales exponentially up to 95%)
+        let goldLost = Math.floor(player.gold * plunderMultiplier * randMod);
+        let foodLost = Math.floor((player.food || 0) * plunderMultiplier * randMod);
 
         player.gold = Math.max(0, player.gold - goldLost);
         player.food = Math.max(0, (player.food || 0) - foodLost);
@@ -860,7 +880,8 @@ function displayAutoresolveResults(npc, playerWon, playerLosses, npcLosses) {
 
     actionBox.innerHTML = resultHtml;
 
-    // Continue Button
+// Continue Button
+// Continue Button
     const continueBtn = createDiplomacyButton("Continue", () => {
         isDiplomacyProcessing = false;
         
@@ -873,14 +894,123 @@ function displayAutoresolveResults(npc, playerWon, playerLosses, npcLosses) {
             }
             leaveParle(player);
         } else {
-            // Handle player wipe logic
-            if (player.troops <= 0) {
-                // Hook to your game over / captured state
-                console.log("Player army wiped out.");
+            // 1. Force a strict number cast to prevent NaN or string bugs
+            const remainingTroops = Number(player.troops) || 0;
+            
+            // Handle player wipe logic (< 3 troops permadeath)
+            if (remainingTroops < 3) {
+                console.log("CRITICAL DEFEAT: Army reduced to less than 3. Permadeath triggered.");
+                
+                // 2. FIX: Close the Parley UI FIRST so it doesn't block the black screen!
+                leaveParle(player); 
+
+                // 3. FIX: Catch any silent errors (like missing poem arrays) and force the reload
+                try {
+                    if (typeof window.triggerPermadeath === 'function') {
+                        window.triggerPermadeath();
+                    } else {
+                        throw new Error("triggerPermadeath function missing.");
+                    }
+                } catch (err) {
+                    console.error("Permadeath UI failed, using absolute fallback.", err);
+                    alert("Your army has been annihilated. The campaign is lost.");
+                    window.location.reload(true); 
+                }
+                return; // Stop execution here
             }
-            leaveParle(player);
+            
+            // If they lost but still have >= 3 troops (somehow survived)
+            leaveParle(player); 
         }
     });
 
     actionBox.appendChild(continueBtn);
+}
+
+// ============================================================================
+// UI OVERHAUL PATCH: PORTRAITS & BOTTOM STAT GRID
+// Paste at the bottom of parler_system.js
+// ============================================================================
+
+if (typeof initiateParleWithNPC === 'function') {
+    const originalInitiateParle = initiateParleWithNPC;
+
+    initiateParleWithNPC = function(npc, tile) {
+        // 1. Run the original setup logic
+        originalInitiateParle(npc, tile);
+
+        const panel = document.getElementById('parle-panel');
+        const statGrid = document.querySelector('.parle-stat-grid');
+        const actionBox = document.getElementById('parle-action-box');
+        const dialogue = document.getElementById('parle-dialogue');
+
+        if (!panel || !statGrid || !actionBox || !dialogue) return;
+
+        // ====================================================================
+        // LAYOUT SHIFT: Move the Stat Grid below the Action Box (Buttons)
+        // ====================================================================
+        // appendChild moves an existing node to the end of the parent container
+        panel.appendChild(statGrid);
+
+        // Add some margin to the action box so it doesn't touch the stats
+        actionBox.style.marginBottom = "15px";
+        statGrid.style.borderTop = "1px solid #5d4037"; // Visual separation
+        statGrid.style.paddingTop = "10px";
+
+        // ====================================================================
+        // INJECT PROCEDURAL PORTRAIT
+        // ====================================================================
+        let portraitContainer = document.getElementById('parle-portrait-container');
+        
+        // Create the container if it doesn't exist yet
+        if (!portraitContainer) {
+            portraitContainer = document.createElement('div');
+            portraitContainer.id = "parle-portrait-container";
+            
+// Styled to match the dark 13th-century aesthetic of the UI
+            portraitContainer.style.cssText = `
+                float: left; 
+                width: 60px; 
+                height: 60px; 
+                border: 2px solid #5d4037; 
+                border-radius: 4px; 
+                margin-top: 40px; /* <--- ADD THIS LINE */
+                margin-right: 15px; 
+                margin-bottom: 10px; 
+                background: linear-gradient(to bottom, #2c2518, #1a1508);
+                display: flex; 
+                justify-content: center; 
+                align-items: center; 
+                font-size: 38px;
+                box-shadow: 2px 2px 5px rgba(0,0,0,0.5);
+            `;
+            const portraitIcon = document.createElement('span');
+            portraitIcon.id = "parle-npc-portrait-icon";
+            portraitContainer.appendChild(portraitIcon);
+            
+            // Insert it right before the dialogue so the text wraps around it
+            dialogue.parentNode.insertBefore(portraitContainer, dialogue);
+            
+            // Ensure the dialogue box has enough height to clear the floating portrait
+            dialogue.style.minHeight = "70px";
+        }
+
+        // Determine the portrait visual based on the NPC Role
+        const iconSpan = document.getElementById('parle-npc-portrait-icon');
+        let emoji = "👤"; // Default
+
+        const role = String(npc.role).toLowerCase();
+        if (role === "military" || role === "patrol") emoji = "💂";
+        else if (role === "bandit") emoji = "🥷";
+        else if (role === "civilian") emoji = "🧑‍🌾";
+        else if (role === "commerce") emoji = "🐪";
+        
+        iconSpan.innerText = emoji;
+
+        // Color coordinate the portrait frame to the NPC's Faction Color
+        const npcFactionData = (typeof FACTIONS !== 'undefined' && FACTIONS[npc.faction]) ? FACTIONS[npc.faction] : { color: "#777" };
+        portraitContainer.style.borderColor = npcFactionData.color;
+    };
+    
+    console.log("Parler System UI Overhaul Hook Loaded.");
 }

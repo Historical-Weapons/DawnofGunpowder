@@ -75,7 +75,9 @@ function maintainSiegeUI() {
 }
 
 // 6. MAIN DRAWING FUNCTION
-function drawPlayerOverlay(ctx, player, zoom) {
+function drawPlayerOverlay(ctx, player, zoom) { //OBSOLETE
+	return; // <--- ADD THIS LINE HERE. It stops the rest of the code from running.
+	
     if (typeof inBattleMode !== 'undefined' && (inBattleMode || inCityMode || (typeof inParleMode !== 'undefined' && inParleMode))) {
         isHoveringPlayer = false;
         window.isRosterOpen = false;

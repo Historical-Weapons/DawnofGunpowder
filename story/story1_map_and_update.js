@@ -811,6 +811,16 @@ window.initGame_story1 = async function () {
 
     if (typeof worldMapRef !== 'undefined') worldMapRef = worldMap;
 
+    // ── FIX: Expose window-level refs so world_map.js (WorldMap overlay) and
+    //         scenario_update.js can read the live story-mode data the same
+    //         way they read the sandbox data.  Without these, the WorldMap
+    //         overlay shows "World map not yet available" and city dots are
+    //         invisible in story mode.
+    window.cities_sandbox       = cities;
+    window._tradeWorldRef       = worldMap;
+    window.WORLD_WIDTH_sandbox  = (typeof WORLD_WIDTH  !== 'undefined') ? WORLD_WIDTH  : 4000;
+    window.WORLD_HEIGHT_sandbox = (typeof WORLD_HEIGHT !== 'undefined') ? WORLD_HEIGHT : 3000;
+
     // ── 5. Spawn NPC armies ──────────────────────────────────────────────────
     await setLoading(86, "Deploying clan armies and the Yuan fleet…");
     if (typeof initializeNPCs === 'function') {

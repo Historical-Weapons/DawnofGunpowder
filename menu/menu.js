@@ -256,8 +256,7 @@ const campaignBtn = createBtn("⚔️ Campaign Mode", () => {
     }, destroyMenu);
 });
 campaignBtn.style.display  = "none"; // revealed after Manual is read
-campaignBtn.style.background = "linear-gradient(to bottom, #1a3a5c, #0d1e30)";
-campaignBtn.style.borderColor = "#d4b886";
+ 
 
 // ── CAMPAIGN SELECTION SCREEN ──────────────────────────────────────────────
 function showCampaignScreen(menuEl, onBack, onLaunch) {
@@ -549,7 +548,7 @@ function startGameSafe() {
 const instrBtn = createBtn("Manual", () => {
     // 1. Unlock buttons
 	window.__isManualUnlocked = true; // <--- ADD THIS LINE HERE
-	
+	instrBtn.remove(); // <--- NEW SURGERY: DESTROYS THE MANUAL BUTTON AFTER CLICKING
     playBtn.style.display = "block";
     customBattleBtn.style.display = "block"; 
     campaignBtn.style.display = "block"; // STORY1: show campaign button

@@ -1433,15 +1433,38 @@ let isSwing = (unitSeed % 3 === 0); // Roughly 33% of units will swing instead o
 let thrust = !isSwing ? snapCycle * 14 : snapCycle * 5; // Longer reach for thrusts
 let swingAngle = isSwing ? (snapCycle * 1.2) - 0.6 : 0; // Rotational arc for swings
 
-// 1. Draw Stowed Bow in Bow Case (Kept as is)
+// 1. Draw Stowed Bow (Dynamic by Faction)
 ctx.save();
 ctx.translate(-5, 0 + b);
 ctx.rotate(Math.PI / 6);
-ctx.fillStyle = "#4e342e"; ctx.fillRect(-3, -8, 6, 16);
-ctx.strokeStyle = "#212121"; ctx.lineWidth = 1; ctx.strokeRect(-3, -8, 6, 16);
-ctx.strokeStyle = "#3e2723"; ctx.lineWidth = 2;
-ctx.beginPath(); ctx.moveTo(0, -8); 
-ctx.quadraticCurveTo(4, -12, -2, -16); ctx.stroke();
+
+let isJapan = (factionColor === "#c2185b");
+
+if (isJapan) {
+    // Japan: Long asymmetrical Yumi slung on the back
+    ctx.strokeStyle = "#1a1a1a"; // Dark black lacquer
+    ctx.lineWidth = 2.5;
+    ctx.beginPath(); 
+    ctx.moveTo(-1, -22); // Extreme top limb
+    ctx.quadraticCurveTo(4, -8, 0, 0); 
+    ctx.quadraticCurveTo(4, 6, -1, 10);  // Short bottom limb
+    ctx.stroke();
+    
+    // Taut Bowstring
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.5)"; 
+    ctx.lineWidth = 0.6;
+    ctx.beginPath(); 
+    ctx.moveTo(-1, -22); 
+    ctx.lineTo(-1, 10); 
+    ctx.stroke();
+} else {
+    // Standard Nomad: Compact bow stowed inside a leather hip case
+    ctx.fillStyle = "#4e342e"; ctx.fillRect(-3, -8, 6, 16);
+    ctx.strokeStyle = "#212121"; ctx.lineWidth = 1; ctx.strokeRect(-3, -8, 6, 16);
+    ctx.strokeStyle = "#3e2723"; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(0, -8); 
+    ctx.quadraticCurveTo(4, -12, -2, -16); ctx.stroke();
+}
 ctx.restore();
 
 // 2. REVISED: Draw Melee Lance & Hand
@@ -1468,7 +1491,7 @@ ctx.fill();
 
 ctx.restore();
         } else {
-			   drawOffhandhorseBow(animFrame);   // keep bow visible
+			   
             // --- RANGED COMBAT: Has Ammo ---
             // 1. Draw Stowed Lance
             ctx.save();
@@ -1525,26 +1548,50 @@ if (cycle < 0.2) {
     hasArrow = false; 
     stringX = handX - 4; 
 }
+// Draw Bow
+ctx.save();
+ctx.translate(handX, handY); 
+ctx.rotate(bowKhatra); 
+ctx.translate(-handX, -handY);
 
-// ... (Rest of your Drawing code: Draw Bow, Draw Arrow, Draw Right Hand) ...
-            // Draw Bow
-            ctx.save();
-            ctx.translate(handX, handY); 
-            ctx.rotate(bowKhatra); 
-            ctx.translate(-handX, -handY);
-            ctx.strokeStyle = "#3e2723"; ctx.lineWidth = 1.5;
-            
-            // Replaced hardcoded values to be relative to handY
-            ctx.beginPath(); ctx.moveTo(handX - 4, handY - 8); 
-            ctx.quadraticCurveTo(handX + 6, handY - 4, handX, handY); 
-            ctx.quadraticCurveTo(handX + 6, handY + 8, handX - 4, handY + 8); ctx.stroke();
-            
-            ctx.strokeStyle = "rgba(255, 255, 255, 0.6)"; ctx.lineWidth = 0.5;
-            ctx.beginPath(); ctx.moveTo(handX - 4, handY - 8); 
-            ctx.lineTo(stringX, rightHandY); 
-            ctx.lineTo(handX - 4, handY + 8); ctx.stroke();
-            ctx.restore();
+let isJapan = (factionColor === "#c2185b");
 
+// Asymmetric sizing for Yumi vs Symmetric for Nomad bows
+let topTipY = isJapan ? handY - 24 : handY - 8; 
+let botTipY = isJapan ? handY + 4  : handY + 8;  
+let topDipY = isJapan ? handY - 14 : handY - 4; 
+let botDipY = isJapan ? handY - 1  : handY + 8;  
+
+ctx.strokeStyle = isJapan ? "#1a1a1a" : "#3e2723"; // Black lacquer vs Wood/Horn
+ctx.lineWidth = isJapan ? 2 : 1.5;
+
+// Draw the bow stave
+ctx.beginPath(); 
+ctx.moveTo(handX - 4, topTipY); 
+ctx.quadraticCurveTo(handX + 6, topDipY, handX, handY); // Upper limb
+ctx.quadraticCurveTo(handX + 6, botDipY, handX - 4, botTipY); // Lower limb
+ctx.stroke();
+
+// Yumi specific rattan grip wrap (Drawn over the stave)
+if (isJapan) {
+    ctx.strokeStyle = "#e0e0e0"; 
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.moveTo(handX - 1, handY - 1.5);
+    ctx.lineTo(handX - 1, handY + 1.5);
+    ctx.stroke();
+}
+
+// Draw the taut bowstring attached to the dynamic tips
+ctx.strokeStyle = "rgba(255, 255, 255, 0.6)"; 
+ctx.lineWidth = 0.5;
+ctx.beginPath(); 
+ctx.moveTo(handX - 4, topTipY); 
+ctx.lineTo(stringX, rightHandY); 
+ctx.lineTo(handX - 4, botTipY); 
+ctx.stroke();
+
+ctx.restore();
             // Draw Arrow (Only renders if hasArrow is true, which is fixed to start at 0.2)
             if (hasArrow) {
                 ctx.save();
@@ -1874,8 +1921,4 @@ let gLegSwing = moving ? Math.sin(animFrame * 0.4) * 2 : 0;
     ctx.restore(); // 2. Restores the Rider's 'bob' and elevation layer 
 
 }  
-
-// Fixed: Added 'frame' to the parameters and defined 'b' locally
-function drawOffhandhorseBow(frame) {
-//nevermind THIS RENDERS TWO BOWS IF I DRAW ANOTHER ONE
-}
+ 

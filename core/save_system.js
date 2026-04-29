@@ -1,66 +1,84 @@
 // ============================================================================
-// DAWN OF GUNPOWDER — SAVE / LOAD SYSTEM  (save_system.js)  v3.0
+// DAWN OF GUNPOWDER — SAVE / LOAD SYSTEM  (save_system.js)  v4.0
 // ============================================================================
 //
 // DROP-IN: One <script src="save_system.js"></script> tag, LAST in index.html.
 //
 // ────────────────────────────────────────────────────────────────────────────
-// v3.0 CHANGE-LOG vs v1.2
+// v4.0 CHANGE-LOG vs v3.0
 // ────────────────────────────────────────────────────────────────────────────
-//  [FIX-1]  SEEDED PRNG (Mulberry32) injected as Math.random during world
-//            generation so cities land at IDENTICAL positions on every load.
-//            v1.2 wrongly documented the world as "fully deterministic" —
-//            populateCities() and bgCanvas decorations both call Math.random().
+//  [FIX-8]  TRIPLE-WRAP BUG ELIMINATED.
+//            v3.0 and scenario_update.js BOTH wrapped window.initGame —
+//            save_system.js via patchInitGame() in bootstrap, and
+//            scenario_update.js via _ensureInitHook() + window.load retry.
+//            Result: scenario wrapped the already-patched DoG version,
+//            breaking the duplicate-launch guard and causing corrupt state.
 //
-//  [FIX-2]  worldSeed persisted in every save-slot JSON. On load the seed is
-//            restored before initGame() runs → same terrain deco, same city
-//            placement → save data is then applied on top (faction/pop/gold).
+//            Fix: save_system.js is now THE ONLY code that wraps initGame.
+//            It exposes a cooperative callback array:
+//              window.__DoG_postInitCallbacks  (Array<Function>)
+//            Any module that needs post-init work (e.g. ScenarioRuntime)
+//            pushes a one-shot function there instead of wrapping initGame.
+//            Callbacks are fired after the original initGame resolves and
+//            BEFORE any pending save is applied, so scenario data lands first
+//            and save data correctly layers on top.
 //
-//  [FIX-3]  LOAD FROM MAIN MENU now works. loadAndRefresh() detects the
-//            main-menu state, stores a pending load, destroys the menu,
-//            shows the loading screen, and triggers initGame() itself.
-//            Users no longer have to click "Sandbox Game" manually first.
+//            scenario_update.js must be updated: replace _ensureInitHook()
+//            with _ensurePostInitHook() that pushes to __DoG_postInitCallbacks.
+//            See the companion patch file (scenario_update_v4.js).
 //
-//  [FIX-4]  ANTI-DUPLICATE initGame() / draw() GUARD. Monkey-patching the
-//            global initGame() prevents a second concurrent call (caused by
-//            double-click or external trigger) from spawning a second RAF loop.
-//            Duplicate RAF loops were the primary source of frame-rate collapse.
+//  [FIX-9]  STORY MODE SAVE/LOAD.
+//            initGame_story1() is now patched identically to initGame() so
+//            the duplicate guard, seeded PRNG, and pending-load logic work
+//            in story mode too.  Loading a story save from the main menu
+//            correctly launches initGame_story1() instead of initGame().
 //
-//  [FIX-5]  Pending-load is applied IMMEDIATELY after initGame() resolves
-//            (inside the patched wrapper) rather than waiting for the 1-second
-//            polling interval, eliminating a visible "wrong world flash".
+//  [FIX-10] GAME-MODE TAGGING.
+//            Every save now records gameMode: "sandbox" | "story" | "custom".
+//            The Save/Load panel shows a coloured badge per slot.
+//            Loading a save meant for a different mode shows a warning
+//            rather than silently corrupting the world state.
 //
-//  [FIX-6]  ANDROID / CAPACITOR STORAGE — two pluggable storage adapters:
-//            • StorageLs   — localStorage  (default; works on https:// WebView)
-//            • StorageCap  — @capacitor/preferences async API (toggle below)
-//            Toggle USE_CAPACITOR_STORAGE = true when serving from file://
-//            origin. All saves are mirrored to localStorage so the metadata
-//            panel (getSlotMeta) remains a fast synchronous read.
+//  [FIX-11] FIVE SAVE SLOTS (was three).
+//            Slot layout:
+//              0 = Auto-Save   (written every 5 min; F5 DOES NOT touch this)
+//              1 = Quick Save  (F5 write / F9 read)
+//              2 = Manual A
+//              3 = Manual B
+//              4 = Manual C
 //
-//  [FIX-7]  City-count safety: when saved city count ≠ generated count, the
-//            system now logs a clear warning and merges by name-matching before
-//            falling back to index-based overwrite.
+//  [FIX-12] SCENARIO EDITOR ISOLATION (clarification + guard).
+//            The scenario editor saves campaign maps as local JSON file
+//            downloads — it never touches localStorage, so there is ZERO
+//            key-namespace collision with DoG_Save_N player saves.
+//            This comment explicitly documents that boundary so future
+//            devs don't accidentally merge the two systems.
 //
 // ────────────────────────────────────────────────────────────────────────────
-// PLATFORM STRATEGY
-//   Android APK / Capacitor (https://localhost origin)  → localStorage (default)
-//   Android APK / Capacitor (file:// origin)            → @capacitor/preferences
-//   PC Electron                                          → localStorage
-//   Web browser (Kongregate / Newgrounds / itch.io)     → localStorage
+// SAVE NAMESPACE MAP  (localStorage keys used by this file — nothing else)
+// ────────────────────────────────────────────────────────────────────────────
+//   DoG_Save_0  … DoG_Save_4   — player progress saves (this file only)
+//
+// SAVE NAMESPACE MAP  (other systems — do NOT touch these from this file)
+//   [none]  — scenario editor writes .dog_scenario.json to disk, not LS
+//   [none]  — story1 has no separate localStorage keys
 //
 // ────────────────────────────────────────────────────────────────────────────
-// WHAT IS SAVED
-//   ✅ worldSeed           — Mulberry32 seed for deterministic world regen
-//   ✅ player.*            — position, gold, food, hp, stats, roster, enemies
-//   ✅ cities[]            — full runtime state incl. x/y position
-//   ✅ FACTION_RELATIONS   — live diplomacy matrix
-//   ✅ globalNPCs[]        — overworld caravans, patrols, armies, bandits
-//   ✅ zoom                — camera zoom level
-//   ✅ diplomacyTick       — prevents instant faction wars on load
-//   ✅ activeSieges[]      — in-progress city siege state
-//   ❌ bgCanvas            — NOT saved; regenerated deterministically via seed
-//   ❌ worldMap[][]        — NOT saved; hash/fbm is deterministic given seed
-//   ❌ battleEnvironment   — NOT saved; save blocked mid-battle
+// WHAT IS SAVED (all modes)
+//   ✅ gameMode          — "sandbox" | "story" | "custom"
+//   ✅ worldSeed         — Mulberry32 seed (sandbox only; story regen from code)
+//   ✅ player.*          — position, gold, food, hp, stats, roster, enemies
+//   ✅ cities[]          — full runtime state incl. x/y position
+//   ✅ FACTION_RELATIONS — live diplomacy matrix
+//   ✅ globalNPCs[]      — overworld caravans, patrols, armies, bandits
+//   ✅ zoom              — camera zoom level
+//   ✅ diplomacyTick     — prevents instant faction wars on load
+//   ✅ activeSieges[]    — in-progress city siege state
+//   ❌ bgCanvas          — NOT saved; regenerated deterministically via seed
+//   ❌ worldMap[][]      — NOT saved; hash/fbm is deterministic given seed
+//   ❌ battleEnvironment — NOT saved; save blocked mid-battle
+//   ❌ scenario doc      — NOT saved for custom mode (world cannot be restored;
+//                          only player stats are preserved cross-session)
 // ============================================================================
 
 (function () {
@@ -72,31 +90,27 @@
 
     /**
      * CAPACITOR STORAGE TOGGLE
-     *
-     * Leave false  → uses localStorage (works for Capacitor https://localhost).
-     * Set  true    → uses @capacitor/preferences for durable native storage.
-     *               Required when your Capacitor app uses a file:// origin or
-     *               you find Android clearing WebView storage between sessions.
-     *
-     * SETUP (when enabling):
-     *   npm install @capacitor/preferences
-     *   npx cap sync
-     *   Then ensure capacitor.config.json has the plugin listed.
-     *
-     * NOTE: When enabled, saves are MIRRORED to localStorage so the UI panel
-     *       can still do fast synchronous metadata reads.  The Capacitor store
-     *       is the authoritative copy; localStorage is the read-cache only.
+     * Leave false → uses localStorage (works for Capacitor https://localhost).
+     * Set  true   → uses @capacitor/preferences for durable native storage.
      */
-    const USE_CAPACITOR_STORAGE = false; // ← flip to true for file:// Capacitor
+    const USE_CAPACITOR_STORAGE = false;
 
     // =========================================================================
     // §1  CONSTANTS
     // =========================================================================
 
-    const SAVE_VERSION   = "3.0";
-    const NUM_SLOTS      = 3;
+    const SAVE_VERSION   = "4.0";
+    const NUM_SLOTS      = 5;          // ← v4.0: was 3
     const KEY_PREFIX     = "DoG_Save_";
     const UI_Z           = 15000;
+
+    /**
+     * AUTO_SAVE_SLOT — index 0 is always the auto-save.
+     * QUICK_SAVE_SLOT — index 1 is the F5/F9 quick-save target.
+     * Slots 2–4 are manual.
+     */
+    const AUTO_SAVE_SLOT  = 0;
+    const QUICK_SAVE_SLOT = 1;
 
     // =========================================================================
     // §2  PLATFORM DETECTION
@@ -114,7 +128,7 @@
     function getPlatformLabel() {
         if (IS_ELECTRON)       return "PC (Electron)";
         if (IS_CAPACITOR && IS_ANDROID) return `Android (Capacitor ${window.Capacitor?.version ?? ""})`;
-        if (IS_CAPACITOR && IS_IOS)     return `iOS (Capacitor)`;
+        if (IS_CAPACITOR && IS_IOS)     return "iOS (Capacitor)";
         if (IS_ANDROID)        return "Android Browser";
         if (IS_IOS)            return "iOS Browser";
         if (IS_MOBILE)         return "Mobile Browser";
@@ -125,56 +139,31 @@
     // §3  STORAGE ADAPTERS
     // =========================================================================
 
-    // ── 3a.  localStorage adapter (synchronous) ──────────────────────────────
     const StorageLs = {
-        get(key)        { try { return localStorage.getItem(key);       } catch(e) { _storageWarn("get",  e); return null;  } },
-        set(key, value) { try { localStorage.setItem(key, value); return true; } catch(e) { _storageWarn("set",  e); return false; } },
-        remove(key)     { try { localStorage.removeItem(key); return true;     } catch(e) { _storageWarn("rm",   e); return false; } }
+        get(key)        { try { return localStorage.getItem(key);            } catch(e) { _storageWarn("get", e); return null;  } },
+        set(key, value) { try { localStorage.setItem(key, value); return true; } catch(e) { _storageWarn("set", e); return false; } },
+        remove(key)     { try { localStorage.removeItem(key); return true;    } catch(e) { _storageWarn("rm",  e); return false; } }
     };
 
-    // ── 3b.  Capacitor Preferences adapter (async) ────────────────────────────
-    //
-    //  This adapter is INERT when USE_CAPACITOR_STORAGE === false.
-    //  Swap in by setting the toggle above. The adapter automatically mirrors
-    //  every write to localStorage so synchronous metadata reads still work.
-    //
-    //  If @capacitor/preferences is not installed, it falls back silently to
-    //  localStorage and logs a one-time warning.
-    //
-    //  ALTERNATIVE (sqlite):
-    //  For very large save files (>5 MB) or complex offline-first needs,
-    //  swap the body of each method below to use capacitor-community/sqlite.
-    //  Example: https://github.com/capacitor-community/sqlite
-    //  The API surface is identical — just replace Preferences.get/set/remove.
-    //
     let _capWarnedOnce = false;
     const StorageCap = {
         async get(key) {
-            const CapPrefs = window.Capacitor?.Plugins?.Preferences;
-            if (!CapPrefs) { _capFallbackWarn(); return StorageLs.get(key); }
-            try {
-                const { value } = await CapPrefs.get({ key });
-                return value ?? null;
-            } catch(e) { _storageWarn("cap.get", e); return StorageLs.get(key); }
+            const CP = window.Capacitor?.Plugins?.Preferences;
+            if (!CP) { _capFallbackWarn(); return StorageLs.get(key); }
+            try { const { value } = await CP.get({ key }); return value ?? null; }
+            catch(e) { _storageWarn("cap.get", e); return StorageLs.get(key); }
         },
         async set(key, value) {
-            const CapPrefs = window.Capacitor?.Plugins?.Preferences;
-            if (!CapPrefs) { _capFallbackWarn(); return StorageLs.set(key, value); }
-            try {
-                await CapPrefs.set({ key, value });
-                // Mirror to localStorage for fast sync metadata reads
-                StorageLs.set(key, value);
-                return true;
-            } catch(e) { _storageWarn("cap.set", e); return false; }
+            const CP = window.Capacitor?.Plugins?.Preferences;
+            if (!CP) { _capFallbackWarn(); return StorageLs.set(key, value); }
+            try { await CP.set({ key, value }); StorageLs.set(key, value); return true; }
+            catch(e) { _storageWarn("cap.set", e); return false; }
         },
         async remove(key) {
-            const CapPrefs = window.Capacitor?.Plugins?.Preferences;
-            if (!CapPrefs) { _capFallbackWarn(); return StorageLs.remove(key); }
-            try {
-                await CapPrefs.remove({ key });
-                StorageLs.remove(key);
-                return true;
-            } catch(e) { _storageWarn("cap.rm", e); return false; }
+            const CP = window.Capacitor?.Plugins?.Preferences;
+            if (!CP) { _capFallbackWarn(); return StorageLs.remove(key); }
+            try { await CP.remove({ key }); StorageLs.remove(key); return true; }
+            catch(e) { _storageWarn("cap.rm", e); return false; }
         }
     };
 
@@ -189,14 +178,12 @@
         );
     }
 
-    // ── 3c.  Unified async interface (routes to correct adapter) ─────────────
     const Storage = {
         async get(key)        { return USE_CAPACITOR_STORAGE ? StorageCap.get(key)        : StorageLs.get(key);        },
         async set(key, value) { return USE_CAPACITOR_STORAGE ? StorageCap.set(key, value) : StorageLs.set(key, value); },
         async remove(key)     { return USE_CAPACITOR_STORAGE ? StorageCap.remove(key)     : StorageLs.remove(key);     }
     };
 
-    // Synchronous metadata read (always from localStorage mirror — fast)
     function getSlotMetaSync(slot) {
         const raw = StorageLs.get(getSaveKey(slot));
         if (!raw) return null;
@@ -205,6 +192,7 @@
             return {
                 timestamp:    d.timestamp,
                 platform:     d.platform,
+                gameMode:     d.gameMode     || "sandbox",
                 playerX:      d.player && Math.round(d.player.x),
                 playerY:      d.player && Math.round(d.player.y),
                 playerGold:   d.player && Math.floor(d.player.gold),
@@ -212,7 +200,8 @@
                 cityCount:    d.cities && d.cities.length,
                 npcCount:     d.globalNPCs && d.globalNPCs.length,
                 version:      d.version,
-                worldSeed:    d.worldSeed
+                worldSeed:    d.worldSeed,
+                hasScenario:  !!(d.scenarioDoc && (d.scenarioDoc.tilesRLE || d.scenarioDoc.tiles))
             };
         } catch(e) { return null; }
     }
@@ -220,20 +209,33 @@
     function getSaveKey(slot) { return KEY_PREFIX + slot; }
 
     // =========================================================================
-    // §4  SEEDED PRNG  (Mulberry32 — fast, high quality, 32-bit state)
+    // §4  GAME-MODE DETECTION
     // =========================================================================
     //
-    //  Injected as window.Math.random for the duration of initGame() so that
-    //  populateCities() and bgCanvas decoration calls produce IDENTICAL output
-    //  for a given seed.  The original Math.random is restored afterwards.
+    //  window.__DoG_gameMode  is the canonical runtime mode flag.
+    //  It is set:
+    //    • "sandbox"  — by patchInitGame() wrapper when initGame() runs
+    //    • "story"    — by patchInitGame_story1() wrapper when initGame_story1() runs
+    //    • "custom"   — by ScenarioRuntime.launch() before engine start
     //
-    //  NOTE: hash() / fbm() in sandbox_overworld.js are already deterministic
-    //  (pure functions of x,y).  Only the decoration calls and city placement
-    //  need seeding.
+    //  Callers outside this module should ONLY READ this flag, never write it
+    //  (except ScenarioRuntime.launch() which must set it before init).
+
+    function detectGameMode() {
+        // The runtime flag is always authoritative once set.
+        if (window.__DoG_gameMode) return window.__DoG_gameMode;
+        // If an active scenario is running (post-launch), classify as custom.
+        if (window.__activeScenario) return "custom";
+        // Default to sandbox.
+        return "sandbox";
+    }
+
+    // =========================================================================
+    // §5  SEEDED PRNG  (Mulberry32)
+    // =========================================================================
 
     function makeMulberry32(seed) {
-        // Returns a 0..1 closure compatible with Math.random signature.
-        let s = seed >>> 0; // force unsigned 32-bit
+        let s = seed >>> 0;
         return function () {
             s = (s + 0x6D2B79F5) >>> 0;
             let t = Math.imul(s ^ (s >>> 15), 1 | s);
@@ -245,7 +247,7 @@
     let _origMathRandom = null;
 
     function installSeededRNG(seed) {
-        if (_origMathRandom !== null) return; // already installed — don't double-wrap
+        if (_origMathRandom !== null) return;
         _origMathRandom = Math.random;
         Math.random = makeMulberry32(seed);
         console.log(`[SaveSystem] Seeded PRNG installed (seed: ${seed >>> 0})`);
@@ -259,121 +261,226 @@
     }
 
     function generateNewSeed() {
-        // Mix time + crypto bytes for unpredictability
         let base = (Date.now() ^ (Math.random() * 0xFFFFFFFF)) >>> 0;
         try {
             const buf = new Uint32Array(1);
             crypto.getRandomValues(buf);
             base ^= buf[0];
-        } catch(e) { /* crypto not available — base alone is fine */ }
+        } catch(e) {}
         return base >>> 0;
     }
 
     // =========================================================================
-    // §5  initGame() MONKEY-PATCH
-    //      — anti-duplicate guard
-    //      — seeded PRNG injection
-    //      — immediate pending-load application post-init
+    // §6  COOPERATIVE POST-INIT CALLBACK SYSTEM
+    // =========================================================================
+    //
+    //  Problem being solved
+    //  ────────────────────
+    //  Historically, scenario_update.js wrapped window.initGame to apply
+    //  scenario data after world generation.  save_system.js ALSO wrapped
+    //  window.initGame to inject seeded PRNG and apply pending saves.
+    //  When both scripts loaded, the chain became:
+    //
+    //    ScenarioWrapper → DoG_initGame_patched → original initGame
+    //
+    //  The duplicate-launch guard inside DoG_initGame_patched ran INSIDE
+    //  the ScenarioWrapper — guard flags were visible but the outer wrapper
+    //  was unaware of them, leading to race conditions and corrupted state.
+    //
+    //  Solution
+    //  ────────
+    //  save_system.js is THE ONLY code that wraps window.initGame and
+    //  window.initGame_story1.  All other modules that need to run code
+    //  after engine initialisation push a one-shot callback onto:
+    //
+    //      window.__DoG_postInitCallbacks  (Array<Function>)
+    //
+    //  Callbacks are fired in push order immediately after the original
+    //  initGame resolves, before any pending save is applied.
+    //  Each callback is consumed (splice-removed) so it never fires twice.
+    //
+    //  ScenarioRuntime (scenario_update.js v4+) pushes its apply-step here
+    //  instead of wrapping initGame.  See _ensurePostInitHook() in that file.
+
+    // Ensure the array exists — scenario_update.js may push to it earlier.
+    if (!Array.isArray(window.__DoG_postInitCallbacks)) {
+        window.__DoG_postInitCallbacks = [];
+    }
+
+    /** Drain and fire all registered post-init callbacks (one-shot). */
+    function _firePostInitCallbacks() {
+        const cbs = window.__DoG_postInitCallbacks.splice(0);
+        cbs.forEach(fn => {
+            try { fn(); }
+            catch(e) { console.error("[SaveSystem] postInitCallback threw:", e); }
+        });
+    }
+
+    // =========================================================================
+    // §7  initGame() MONKEY-PATCH  (sandbox mode)
     // =========================================================================
 
-    // Called once at bootstrap, after all game scripts have loaded.
     function patchInitGame() {
-        if (typeof initGame !== "function") {
-            console.warn("[SaveSystem] initGame() not found — cannot patch. Save features will still work but duplicate-launch guard is disabled.");
+        if (typeof window.initGame !== "function") {
+            console.warn("[SaveSystem] initGame() not found — patch skipped.");
             return;
         }
-        if (window.initGame.__DoG_patched) return; // guard against double bootstrap
+        if (window.initGame.__DoG_patched) return;  // idempotent guard
 
         const _origInit = window.initGame;
 
         window.initGame = async function DoG_initGame_patched() {
-            // ── Duplicate-launch guard ────────────────────────────────────────
+            // ── Duplicate-launch guard ────────────────────────────────────
             if (window.__DoG_gameInitRunning) {
-                console.warn("[SaveSystem] initGame() already running — duplicate call blocked.");
+                console.warn("[SaveSystem] initGame() already running — duplicate blocked.");
                 return;
             }
             if (window.__DoG_drawLoopActive) {
-                console.warn("[SaveSystem] Draw loop already active — initGame() duplicate blocked.");
+                console.warn("[SaveSystem] Draw loop active — initGame() duplicate blocked.");
                 return;
             }
 
             window.__DoG_gameInitRunning = true;
+            window.__DoG_gameMode = "sandbox";          // ← tag this as sandbox
 
-            // ── Seed selection ────────────────────────────────────────────────
-            let seedToUse = window.DoG_pendingWorldSeed; // set by loadAndRefresh when loading a save
+            // ── Seed selection ────────────────────────────────────────────
+            let seedToUse = window.DoG_pendingWorldSeed;
             if (seedToUse === undefined || seedToUse === null) {
-                // Fresh game — generate a new seed and store it globally
                 seedToUse = generateNewSeed();
             }
             window.DoG_worldSeed        = seedToUse >>> 0;
             window.DoG_pendingWorldSeed = undefined;
 
-            // ── Inject seeded PRNG ────────────────────────────────────────────
+            // ── Inject seeded PRNG ────────────────────────────────────────
             installSeededRNG(seedToUse);
 
             try {
                 await _origInit.apply(this, arguments);
                 window.__DoG_drawLoopActive = true;
-                console.log("[SaveSystem] initGame() completed. Draw loop active.");
+                console.log("[SaveSystem] initGame() completed (sandbox). Draw loop active.");
             } finally {
-                // Always restore Math.random even if initGame throws
                 uninstallSeededRNG();
                 window.__DoG_gameInitRunning = false;
             }
 
-            // ── Apply pending save IMMEDIATELY (no 1-second wait) ─────────────
-            if (_pendingLoad && gameIsReady()) {
+            // ── Fire post-init callbacks (e.g. ScenarioRuntime applies scenario) ─
+            _firePostInitCallbacks();
+
+            // ── Apply pending sandbox save IMMEDIATELY post-init ──────────
+            if (_pendingLoad && _pendingLoad.snapshot.gameMode !== "story" && gameIsReady()) {
                 const { snapshot } = _pendingLoad;
                 _pendingLoad = null;
-                console.log("[SaveSystem] Applying pending save immediately post-initGame.");
+                console.log("[SaveSystem] Applying pending sandbox save immediately post-init.");
                 _applySnapshot(snapshot);
                 showToast("✅ Save restored!", 3000);
             }
         };
 
         window.initGame.__DoG_patched = true;
-        console.log("[SaveSystem] initGame() patched ✓");
+        console.log("[SaveSystem] initGame() patched ✓ (sandbox mode)");
     }
 
     // =========================================================================
-    // §6  GAME-READY GUARD
+    // §8  initGame_story1() MONKEY-PATCH  (story mode)
+    // =========================================================================
+    //
+    //  Story mode uses a completely separate entry point (window.initGame_story1)
+    //  defined in story1_map_and_update.js.  We patch it with the same
+    //  duplicate-launch guard and pending-load logic as sandbox.
+    //
+    //  Note: initGame_story1 already sets window.__gameStarted = true on its
+    //  first line.  Our patch doesn't touch __gameStarted — the original
+    //  logic handles that correctly.
+    //
+    //  When loading a story save from the main menu:
+    //    1. _pendingLoad is set with { snapshot, expectedMode: "story" }
+    //    2. _triggerGameStartFromMenu("story") calls window.initGame_story1()
+    //    3. Our patched wrapper runs, calls the original story init
+    //    4. Post-init callbacks fire (none for story normally)
+    //    5. Pending story save is applied on top
+
+    function patchInitGame_story1() {
+        if (typeof window.initGame_story1 !== "function") {
+            // story1 may not be loaded — this is fine; patch will be retried.
+            return false;
+        }
+        if (window.initGame_story1.__DoG_patched) return true;
+
+        const _origStory = window.initGame_story1;
+
+        window.initGame_story1 = async function DoG_initGame_story1_patched() {
+            // ── Duplicate-launch guard ────────────────────────────────────
+            if (window.__DoG_gameInitRunning) {
+                console.warn("[SaveSystem] initGame_story1() already running — duplicate blocked.");
+                return;
+            }
+            if (window.__DoG_drawLoopActive) {
+                console.warn("[SaveSystem] Draw loop active — initGame_story1() duplicate blocked.");
+                return;
+            }
+
+            window.__DoG_gameInitRunning = true;
+            window.__DoG_gameMode = "story";            // ← tag this as story
+
+            // Story mode does not use the seeded PRNG — its map is
+            // polygon-based (deterministic without randomness injection).
+            // We still track the run to prevent duplicates.
+
+            try {
+                await _origStory.apply(this, arguments);
+                window.__DoG_drawLoopActive = true;
+                console.log("[SaveSystem] initGame_story1() completed. Draw loop active.");
+            } finally {
+                window.__DoG_gameInitRunning = false;
+            }
+
+            // ── Fire post-init callbacks ──────────────────────────────────
+            _firePostInitCallbacks();
+
+            // ── Apply pending story save IMMEDIATELY post-init ────────────
+            if (_pendingLoad && _pendingLoad.snapshot.gameMode === "story" && gameIsReady()) {
+                const { snapshot } = _pendingLoad;
+                _pendingLoad = null;
+                console.log("[SaveSystem] Applying pending story save immediately post-init.");
+                _applySnapshot(snapshot);
+                showToast("✅ Story save restored!", 3000);
+            }
+        };
+
+        window.initGame_story1.__DoG_patched = true;
+        console.log("[SaveSystem] initGame_story1() patched ✓ (story mode)");
+        return true;
+    }
+
+    // =========================================================================
+    // §9  GAME-READY GUARD
     // =========================================================================
 
-function gameIsReady() {
-    // 1. Must have an active draw loop and world data
-    const basicReady = window.__DoG_drawLoopActive === true && 
-                       typeof player !== "undefined" && 
-                       typeof cities !== "undefined";
+    function gameIsReady() {
+        const basicReady = window.__DoG_drawLoopActive === true &&
+                           typeof player !== "undefined" &&
+                           typeof cities !== "undefined";
 
-    // 2. BLOCK if in any form of battle
-    const inAnyBattle = (window.inBattleMode || window.inSiegeBattle || window.inNavalBattle);
+        const inAnyBattle = (window.inBattleMode || window.inSiegeBattle || window.inNavalBattle);
+        const customBattleMenuOpen = !!document.getElementById("cb-menu-container") ||
+                                     !!document.getElementById("custom-battle-menu");
 
-    // 3. BLOCK if the Custom Battle Menu is currently open
-    // FIX: Look for 'cb-menu-container' which is the actual ID appended to the DOM
-    const customBattleMenuOpen = !!document.getElementById("cb-menu-container") || !!document.getElementById("custom-battle-menu");
+        return basicReady && !inAnyBattle && !customBattleMenuOpen;
+    }
 
-    // NOTE: City mode is intentionally NOT blocked — quest accepts and cargo
-    // changes happen inside cities and must be preserved in saves.
-    return basicReady && !inAnyBattle && !customBattleMenuOpen;
-}
-
-function isOnMainMenu() {
-        // 1. HARD BLOCK: If the engine is in any type of battle, we are NOT on the main menu
-        if (typeof inBattleMode !== "undefined" && inBattleMode) return false;
-        if (typeof inSiegeBattle !== "undefined" && inSiegeBattle) return false;
+    function isOnMainMenu() {
+        if (typeof inBattleMode   !== "undefined" && inBattleMode)   return false;
+        if (typeof inSiegeBattle  !== "undefined" && inSiegeBattle)  return false;
         if (window.inNavalBattle) return false;
-
-        // 2. HARD BLOCK: If the Custom Battle GUI is open, we are NOT on the main menu
-        if (document.getElementById("cb-menu-container") || document.getElementById("custom-battle-menu")) return false;
+        if (document.getElementById("cb-menu-container") ||
+            document.getElementById("custom-battle-menu")) return false;
 
         const m = document.getElementById("main-menu");
-        
-        // 3. ENHANCED CHECK: Ensure menu exists, isn't faded out, AND isn't hidden by display:none
         return !!(m && m.style.opacity !== "0" && m.style.display !== "none" && m.parentNode);
     }
 
     // =========================================================================
-    // §7  SERIALISATION HELPERS
+    // §10  SERIALISATION HELPERS
     // =========================================================================
 
     function serializeStats(stats) {
@@ -415,14 +522,14 @@ function isOnMainMenu() {
                     count: u.count !== undefined ? u.count : 1
                   }))
                 : [],
-stats_snapshot: serializeStats(player.stats),
+            stats_snapshot: serializeStats(player.stats),
             baseSpeed:       player.baseSpeed,
             size:            player.size,
-            questLog:        player.questLog || { active: [], completed: [] },
-            inventory:       player.inventory || {},
+            questLog:        player.questLog    || { active: [], completed: [] },
+            inventory:       player.inventory   || {},
             cargoCapacity:   player.cargoCapacity || 50,
-            cargoUsed:       player.cargoUsed || 0,
-            cohesion:        player.cohesion !== undefined ? player.cohesion : 100
+            cargoUsed:       player.cargoUsed    || 0,
+            cohesion:        player.cohesion     !== undefined ? player.cohesion : 100
         };
     }
 
@@ -488,7 +595,7 @@ stats_snapshot: serializeStats(player.stats),
     }
 
     // =========================================================================
-    // §8  DESERIALISATION HELPERS
+    // §11  DESERIALISATION HELPERS
     // =========================================================================
 
     function applyPlayerData(data) {
@@ -511,15 +618,14 @@ stats_snapshot: serializeStats(player.stats),
         player.roster          = Array.isArray(data.roster)
             ? data.roster.map(u => ({ type: u.type, exp: u.exp || 1, count: u.count || 1 }))
             : [];
-			
-			// --- NEW FEATURES RESTORED HERE ---
-        player.questLog        = data.questLog      ?? { active: [], completed: [] };
-        player.inventory       = data.inventory     ?? {};
-        player.cargoCapacity   = data.cargoCapacity ?? 50;
-        player.cargoUsed       = data.cargoUsed     ?? 0;
-        player.cohesion        = data.cohesion      ?? 100;
-        // ----------------------------------
-		
+
+        // Cargo + quest state
+        player.questLog      = data.questLog      ?? { active: [], completed: [] };
+        player.inventory     = data.inventory     ?? {};
+        player.cargoCapacity = data.cargoCapacity ?? 50;
+        player.cargoUsed     = data.cargoUsed     ?? 0;
+        player.cohesion      = data.cohesion      ?? 100;
+
         if (data.baseSpeed !== undefined) player.baseSpeed = data.baseSpeed;
         if (data.size      !== undefined) player.size      = data.size;
         if (data.stats_snapshot) {
@@ -532,35 +638,23 @@ stats_snapshot: serializeStats(player.stats),
         if (!Array.isArray(saved) || saved.length === 0) return;
 
         if (saved.length === cities.length) {
-            // Perfect match — overwrite in-place; NPC city-index refs stay valid
-            saved.forEach((c, i) => {
-                Object.assign(cities[i], c);
-                _fixCityColor(cities[i]);
-            });
-
+            saved.forEach((c, i) => { Object.assign(cities[i], c); _fixCityColor(cities[i]); });
         } else {
-            // Count mismatch — try name-matching first, then fall back to index
             console.warn(
                 `[SaveSystem] City count mismatch: save has ${saved.length}, ` +
                 `generated ${cities.length}. Attempting name-match merge.`
             );
-
-            // Build a name→liveIndex map
             const nameMap = {};
             cities.forEach((c, i) => { nameMap[c.name] = i; });
 
             saved.forEach(sc => {
                 const idx = nameMap[sc.name];
-                if (idx !== undefined) {
-                    Object.assign(cities[idx], sc);
-                    _fixCityColor(cities[idx]);
-                }
+                if (idx !== undefined) { Object.assign(cities[idx], sc); _fixCityColor(cities[idx]); }
             });
 
-            // Second pass: index-overwrite any that weren't name-matched
             const limit = Math.min(saved.length, cities.length);
             for (let i = 0; i < limit; i++) {
-                if (!nameMap[saved[i].name] && nameMap[saved[i].name] !== 0) {
+                if (nameMap[saved[i].name] === undefined) {
                     Object.assign(cities[i], saved[i]);
                     _fixCityColor(cities[i]);
                 }
@@ -584,25 +678,20 @@ stats_snapshot: serializeStats(player.stats),
 
     function applyNPCData(data) {
         if (!Array.isArray(data)) return;
-        // Wipe existing NPCs; replace entirely with saved set
         globalNPCs.length = 0;
-
         data.forEach(n => {
-            const originCity = (n.originCityIdx >= 0 && cities[n.originCityIdx])
-                ? cities[n.originCityIdx] : null;
-            const targetCity = (n.targetCityIdx >= 0 && cities[n.targetCityIdx])
-                ? cities[n.targetCityIdx] : null;
-
+            const originCity = (n.originCityIdx >= 0 && cities[n.originCityIdx]) ? cities[n.originCityIdx] : null;
+            const targetCity = (n.targetCityIdx >= 0 && cities[n.targetCityIdx]) ? cities[n.targetCityIdx] : null;
             globalNPCs.push({
-                id:            n.id            || Math.random().toString(36).slice(2, 9),
-                role:          n.role          || "Patrol",
-                count:         n.count         || 1,
+                id:            n.id || Math.random().toString(36).slice(2, 9),
+                role:          n.role || "Patrol",
+                count:         n.count || 1,
                 faction:       n.faction,
                 color:         n.color,
                 x:             n.x,
                 y:             n.y,
-                targetX:       n.targetX       ?? n.x,
-                targetY:       n.targetY       ?? n.y,
+                targetX:       n.targetX ?? n.x,
+                targetY:       n.targetY ?? n.y,
                 gold:          n.gold          || 0,
                 food:          n.food          || 0,
                 speed:         n.speed         || 0.5,
@@ -633,38 +722,191 @@ stats_snapshot: serializeStats(player.stats),
         });
     }
 
+
+// =========================================================================
+    // §12b  SCENARIO TILE COMPRESSION  (RLE + palette)
     // =========================================================================
-    // §9  CORE SAVE / LOAD  (async)
+    //
+    //  The raw tile grid (e.g. 250×187 = 46,750 tiles × 5+ fields per tile) is
+    //  4–6 MB as JSON — well over localStorage's ~5 MB total quota.
+    //
+    //  We replace scenarioDoc.tiles with a compact tilesRLE structure:
+    //
+    //    tilesRLE = {
+    //      tilesX:  <number>,              — scenario column count
+    //      tilesY:  <number>,              — scenario row count
+    //      palette: [                      — all DISTINCT tile objects (5–20 entries)
+    //                 { name, color, speed, e, m, impassable }, ...
+    //               ],
+    //      runs:    [ [paletteIdx, count], ... ]   — column-major RLE
+    //    }
+    //
+    //  Column-major order (x outer, y inner) matches _reskinWorldMap's access
+    //  pattern so decompression streams tiles in the exact order they are read.
+    //
+    //  Typical compression: 46,750 tiles → ~400–1,200 runs ≈ 15–50 KB.
+    //  That is a 100–300× reduction, well within the 5 MB quota even with
+    //  all other save data included.
+    //
+    //  The original scenarioDoc object is NEVER mutated; we work on a shallow
+    //  clone.  If tiles are absent (already stripped, old save) we return the
+    //  clone as-is so the restore path degrades gracefully.
+
+    function _compressScenarioTiles(doc) {
+        if (!doc || !doc.tiles) return null;
+
+        const sX = doc.dimensions.tilesX;
+        const sY = doc.dimensions.tilesY;
+
+        // ── Build palette: unique tile signatures → index ──────────────────
+        const paletteMap = new Map();   // signature string → palette index
+        const palette    = [];          // palette index → tile object
+
+        function _sig(t) {
+            // Stable string key so the same logical tile always maps to the
+            // same palette entry regardless of object identity.
+            return `${t.name}|${t.color}|${t.speed ?? ""}|${t.e ?? ""}|${t.m ?? ""}|${!!t.impassable}`;
+        }
+
+        function _palIdx(t) {
+            if (!t) {
+                // Missing tile — ensure a "null sentinel" is in the palette.
+                // We record it as palette index 0 by convention (first miss
+                // becomes index 0 only if no real tile was first).
+                const nullSig = "__NULL__";
+                if (paletteMap.has(nullSig)) return paletteMap.get(nullSig);
+                const idx = palette.length;
+                palette.push(null);          // null sentinel
+                paletteMap.set(nullSig, idx);
+                return idx;
+            }
+            const s = _sig(t);
+            if (paletteMap.has(s)) return paletteMap.get(s);
+            const idx = palette.length;
+            palette.push({
+                name:       t.name,
+                color:      t.color,
+                speed:      t.speed,
+                e:          t.e,
+                m:          t.m,
+                impassable: !!t.impassable
+            });
+            paletteMap.set(s, idx);
+            return idx;
+        }
+
+        // ── Run-length encode in column-major order ────────────────────────
+        // x is the outer loop, y is the inner loop — exactly matching
+        // _reskinWorldMap so the decompressor can feed tiles in read order.
+        const runs = [];
+        let curIdx = -1, curCount = 0;
+
+        for (let x = 0; x < sX; x++) {
+            for (let y = 0; y < sY; y++) {
+                const tile = doc.tiles[x] ? doc.tiles[x][y] : null;
+                const idx  = _palIdx(tile);
+                if (idx === curIdx) {
+                    curCount++;
+                } else {
+                    if (curCount > 0) runs.push([curIdx, curCount]);
+                    curIdx   = idx;
+                    curCount = 1;
+                }
+            }
+        }
+        if (curCount > 0) runs.push([curIdx, curCount]);
+
+        return { tilesX: sX, tilesY: sY, palette, runs };
+    }
+
+    /**
+     * Returns a SHALLOW CLONE of scenarioDoc with .tiles replaced by .tilesRLE.
+     * The original document is never mutated.
+     * If the scenario has no tiles (e.g. already stripped), returns a plain
+     * shallow clone so the restore path still works.
+     */
+    function _compressScenarioForSave(scenarioDoc) {
+        if (!scenarioDoc) return null;
+
+        const clone = Object.assign({}, scenarioDoc);    // shallow clone
+
+        if (clone.tiles) {
+            const rle = _compressScenarioTiles(scenarioDoc);
+            if (rle) {
+                clone.tilesRLE = rle;
+                delete clone.tiles;                      // drop the bulk array
+                console.log(
+                    `[SaveSystem] Tiles compressed: ${rle.tilesX}×${rle.tilesY} → ` +
+                    `${rle.runs.length} runs, ${rle.palette.length} palette entries.`
+                );
+            }
+            // If compression returned null (shouldn't happen) the raw tiles
+            // stay in the clone — better a quota error than silent data loss.
+        }
+
+        return clone;
+    }
+	
+	
+    // =========================================================================
+    // §12  CORE SAVE / LOAD  (async)
     // =========================================================================
 
     async function saveGame(slot) {
         if (!gameIsReady()) {
-            return { success: false, error: "Return to overworld before saving (no mid-battle or city saves)." };
+            return { success: false, error: "Return to overworld before saving (no mid-battle saves)." };
         }
         try {
+            const currentMode = detectGameMode();
             const snapshot = {
                 version:          SAVE_VERSION,
                 timestamp:        Date.now(),
                 platform:         getPlatformLabel(),
-                slotLabel:        `Slot ${slot + 1}`,
-                worldSeed:        window.DoG_worldSeed ?? 0,   // ← NEW: persist seed
+                slotLabel:        slot === AUTO_SAVE_SLOT ? "Auto-Save" : `Slot ${slot + 1}`,
+                // ── GAME MODE TAG (v4.0) ────────────────────────────────────
+                // "sandbox"  — standard procedurally-generated sandbox world
+                // "story"    — a story chapter (e.g. Bun'ei 1274)
+                // "custom"   — player-created scenario (world NOT saved here;
+                //              only player stats persist cross-session)
+                gameMode:         currentMode,
+                worldSeed:        window.DoG_worldSeed ?? 0,
                 player:           serializePlayer(),
                 cities:           serializeCities(),
                 factionRelations: JSON.parse(JSON.stringify(FACTION_RELATIONS)),
                 diplomacyTick:    (typeof diplomacyTick !== "undefined") ? diplomacyTick : 0,
                 globalNPCs:       serializeNPCs(),
                 activeSieges:     serializeActiveSieges(),
-                zoom:             (typeof zoom !== "undefined") ? zoom : 0.8
+                zoom:             (typeof zoom !== "undefined") ? zoom : 0.8,
+
+// ── SCENARIO DOCUMENT (custom mode only) ─────────────────────
+                // Stored so that loading this save can fully restore the scenario
+                // world (terrain tiles, bgCanvas, cities, factions) rather than
+                // falling back to a plain sandbox with stats-only.
+                //
+                // The raw tile grid (~46,750 tiles) is several MB and would blow
+                // localStorage's ~5 MB quota.  _compressScenarioForSave() strips
+                // scenarioDoc.tiles and replaces it with a compact RLE structure
+                // (tilesRLE) that is typically 15–50 KB instead of 4–6 MB.
+                // _reskinWorldMap in scenario_update.js decompresses on load.
+                //
+                // null for sandbox / story saves — they don't need it.
+                scenarioDoc:      (currentMode === "custom" &&
+                                   typeof window.ScenarioRuntime !== "undefined" &&
+                                   typeof window.ScenarioRuntime.getActiveScenario === "function")
+                                   ? _compressScenarioForSave(window.ScenarioRuntime.getActiveScenario())
+                                   : null
             };
 
             const json  = JSON.stringify(snapshot);
             const bytes = new Blob([json]).size;
-
-            const ok = await Storage.set(getSaveKey(slot), json);
+            const ok    = await Storage.set(getSaveKey(slot), json);
             if (!ok) return { success: false, error: "Storage write failed — quota exceeded?" };
 
-            console.log(`[SaveSystem] Slot ${slot + 1} saved — ${(bytes / 1024).toFixed(1)} KB | seed: ${snapshot.worldSeed}`);
-            return { success: true, bytes };
+            console.log(
+                `[SaveSystem] Slot ${slot} saved — ${(bytes / 1024).toFixed(1)} KB | ` +
+                `mode: ${currentMode} | seed: ${snapshot.worldSeed}`
+            );
+            return { success: true, bytes, gameMode: currentMode };
         } catch(e) {
             console.error("[SaveSystem] saveGame error:", e);
             return { success: false, error: String(e) };
@@ -683,25 +925,23 @@ stats_snapshot: serializeStats(player.stats),
             return { success: false, error: "Save has no version tag (too old to load)." };
         }
 
-        // ── Not in game yet — queue load and signal caller ─────────────────
         if (!gameIsReady()) {
             _pendingLoad = { slot, snapshot };
-            if (snapshot.worldSeed !== undefined) {
+            if (snapshot.worldSeed !== undefined && snapshot.gameMode !== "story") {
                 window.DoG_pendingWorldSeed = snapshot.worldSeed;
             }
-            console.log("[SaveSystem] Game not ready; load queued.");
+            console.log("[SaveSystem] Game not ready; load queued (mode:", snapshot.gameMode, ")");
             return { success: true, queued: true, snapshot };
         }
 
-        // ── In-game: apply immediately ──────────────────────────────────────
         _applySnapshot(snapshot);
         return { success: true, data: snapshot };
     }
 
     function _applySnapshot(snapshot) {
         // Order matters: cities before NPCs so NPC city-refs resolve.
-        if (snapshot.player)          applyPlayerData(snapshot.player);
-        if (snapshot.cities)          applyCitiesData(snapshot.cities);
+        if (snapshot.player)           applyPlayerData(snapshot.player);
+        if (snapshot.cities)           applyCitiesData(snapshot.cities);
         if (snapshot.factionRelations) applyFactionRelationsData(snapshot.factionRelations);
 
         if (typeof diplomacyTick !== "undefined" && snapshot.diplomacyTick !== undefined) {
@@ -709,29 +949,37 @@ stats_snapshot: serializeStats(player.stats),
             diplomacyTick = snapshot.diplomacyTick;
         }
 
-        if (snapshot.globalNPCs)    applyNPCData(snapshot.globalNPCs);
-        if (snapshot.activeSieges)  applyActiveSiegesData(snapshot.activeSieges);
+        if (snapshot.globalNPCs)   applyNPCData(snapshot.globalNPCs);
+        if (snapshot.activeSieges) applyActiveSiegesData(snapshot.activeSieges);
 
         if (snapshot.zoom !== undefined && typeof zoom !== "undefined") {
             // eslint-disable-next-line no-global-assign
             zoom = snapshot.zoom;
         }
 
-        // Force overworld mode — no mid-battle/city loads
+        // Force overworld mode
         if (typeof inBattleMode !== "undefined") inBattleMode = false;
         if (typeof inCityMode   !== "undefined") inCityMode   = false;
         if (typeof inParleMode  !== "undefined") inParleMode  = false;
 
-        // Restore world seed to the global (used by next save)
-        if (snapshot.worldSeed !== undefined) {
+        // Restore world seed (sandbox only — story seeds are irrelevant)
+        if (snapshot.worldSeed !== undefined && snapshot.gameMode !== "story") {
             window.DoG_worldSeed = snapshot.worldSeed;
         }
 
-        console.log(`[SaveSystem] Snapshot applied ✓ | seed: ${snapshot.worldSeed} | cities: ${snapshot.cities?.length}`);
+        // Restore game mode flag
+        if (snapshot.gameMode) {
+            window.__DoG_gameMode = snapshot.gameMode;
+        }
+
+        console.log(
+            `[SaveSystem] Snapshot applied ✓ | mode: ${snapshot.gameMode} | ` +
+            `seed: ${snapshot.worldSeed} | cities: ${snapshot.cities?.length}`
+        );
     }
 
-    function deleteSlot(slot) {
-        Storage.remove(getSaveKey(slot));
+    async function deleteSlot(slot) {
+        await Storage.remove(getSaveKey(slot));
     }
 
     // Pending-load state
@@ -746,66 +994,118 @@ stats_snapshot: serializeStats(player.stats),
     }
 
     // =========================================================================
-    // §10  LOAD-FROM-MAIN-MENU  (the critical new flow)
+    // §13  LOAD-FROM-MAIN-MENU
     // =========================================================================
     //
-    //  When the user is on the main menu and clicks "Load" in the save panel,
-    //  we must:
-    //    1. Store the pending load + seed.
-    //    2. Destroy the main menu DOM element (mirroring what destroyMenu() does
-    //       internally — we can't call that private closure function directly).
-    //    3. Show the Skyrim-style loading screen if available.
-    //    4. Wait a frame, then call initGame() (our patched version).
+    //  Routes to the correct engine entry point based on the save's gameMode.
     //
-    //  After initGame resolves, §5's post-init block fires _applySnapshot()
-    //  immediately with no delay.
+    //  "sandbox"  → initGame()          (standard sandbox world)
+    //  "story"    → initGame_story1()   (Bun'ei invasion; add more story modes here)
+    //  "custom"   → initGame()          (world cannot be restored; player stats only)
+    //                                    + a warning toast is shown
+    //
+    //  All guards (__DoG_drawLoopActive, __DoG_gameInitRunning, __gameStarted)
+    //  are reset before the call because we're launching from a clean menu state.
 
-function _triggerGameStartFromMenu() {
-        // Start AudioManager on Android (needs user-gesture unlock)
+    function _triggerGameStartFromMenu(gameMode) {
+        // Audio unlock
         if (typeof AudioManager !== "undefined") {
             try { AudioManager.init(); AudioManager.stopMP3(); } catch(e) {}
         }
 
-        // Show Skyrim-style loading screen if it exists
+        // Show loading screen
         if (typeof window.showLoadingScreen === "function") {
             window.showLoadingScreen();
         } else {
-            // Fallback
             const ld = document.getElementById("loading");
             if (ld) { ld.style.display = "block"; ld.innerText = "Loading save…"; }
         }
 
-        // SAFELY destroy the menu and kill the background CPU loop
+        // Destroy main menu
         if (typeof window.destroyMainMenuSafe === "function") {
             window.destroyMainMenuSafe();
         } else {
-            // Fallback if menu.js isn't updated
             const menu = document.getElementById("main-menu");
             if (menu) menu.style.display = "none";
         }
 
-        // Give the browser time to paint the loading screen, then start the engine
         setTimeout(async () => {
-            if (window.__DoG_gameInitRunning || window.__DoG_drawLoopActive) {
+            // If the game is already running, just apply the pending load directly.
+            if (window.__DoG_drawLoopActive) {
                 if (_pendingLoad && gameIsReady()) checkPendingLoad();
                 return;
             }
 
-            // Use the same safe starter that "Sandbox Game" uses
-            if (typeof window.startGameSafe === "function") {
-                window.startGameSafe();
-            } else if (typeof initGame === "function") {
-                window.__gameStarted = true;
-                await initGame();
+            // Reset all guards — we're starting fresh from the menu.
+            window.__DoG_gameInitRunning = false;
+            window.__DoG_drawLoopActive  = false;
+            window.__gameStarted         = false;
+
+            if (gameMode === "story") {
+                // ── Story mode load path ──────────────────────────────────
+                if (typeof window.initGame_story1 !== "function") {
+                    showToast("❌ Story mode engine not loaded — cannot restore story save.", 6000, true);
+                    return;
+                }
+                window.__DoG_gameMode = "story";
+                await window.initGame_story1();
+
+            } else if (gameMode === "custom") {
+                // ── Custom / scenario mode load path ─────────────────────
+                const snap = _pendingLoad?.snapshot;
+
+                if (snap?.scenarioDoc &&
+                    typeof window.ScenarioRuntime !== "undefined" &&
+                    typeof window.ScenarioRuntime.prepareRestore === "function") {
+
+                    // ✅ Full world restore path:
+                    // The save contains the scenario document.  Queue it to be
+                    // applied by ScenarioRuntime after initGame regenerates the
+                    // base sandbox world.  The normal post-init pending-save path
+                    // then layers the saved player/city/NPC state on top.
+                    // No warning needed — the world CAN be restored.
+                    console.log("[SaveSystem] Custom save has scenarioDoc — queueing full scenario restore.");
+                    window.ScenarioRuntime.prepareRestore(snap.scenarioDoc);
+                    if (typeof window.startGameSafe === "function") {
+                        window.startGameSafe();
+                    } else if (typeof window.initGame === "function") {
+                        window.__gameStarted = true;
+                        await window.initGame();
+                    }
+
+                } else {
+                    // ⚠️ Legacy save (pre-fix) — scenarioDoc was never stored.
+                    // Fall back: launch sandbox and apply player stats only.
+                    showToast(
+                        "⚠️ Legacy custom save — scenario world cannot be restored. " +
+                        "Starting Sandbox with your saved player stats.",
+                        7000, true
+                    );
+                    window.__DoG_gameMode = "sandbox";
+                    if (typeof window.startGameSafe === "function") {
+                        window.startGameSafe();
+                    } else if (typeof window.initGame === "function") {
+                        window.__gameStarted = true;
+                        await window.initGame();
+                    }
+                }
+
+            } else {
+                // ── Sandbox load path (default) ───────────────────────────
+                if (typeof window.startGameSafe === "function") {
+                    window.startGameSafe();
+                } else if (typeof window.initGame === "function") {
+                    window.__gameStarted = true;
+                    await window.initGame();
+                }
             }
         }, 150);
     }
 
     // =========================================================================
-    // §11  AUTO-SAVE
+    // §14  AUTO-SAVE
     // =========================================================================
 
-    const AUTO_SAVE_SLOT     = 0;
     const AUTO_SAVE_INTERVAL = 5 * 60 * 1000;
     let   _autoSaveTimer     = null;
 
@@ -814,13 +1114,13 @@ function _triggerGameStartFromMenu() {
         _autoSaveTimer = setInterval(async () => {
             if (gameIsReady() && window.__DoG_drawLoopActive) {
                 const r = await saveGame(AUTO_SAVE_SLOT);
-                if (r.success) showToast("Auto-saved.", 2000);
+                if (r.success) showToast(`Auto-saved (${_modeBadgeText(r.gameMode)}).`, 2000);
             }
         }, AUTO_SAVE_INTERVAL);
     }
 
     // =========================================================================
-    // §12  UI: TOAST
+    // §15  UI: TOAST
     // =========================================================================
 
     function showToast(message, duration = 3000, isError = false) {
@@ -829,24 +1129,24 @@ function _triggerGameStartFromMenu() {
             el = document.createElement("div");
             el.id = "save-toast";
             Object.assign(el.style, {
-                position:     "fixed",
-                bottom:       IS_MOBILE ? "80px" : "30px",
-                left:         "50%",
-                transform:    "translateX(-50%)",
-                background:   "rgba(20,10,5,0.95)",
-                color:        "#f5d76e",
-                border:       "1px solid #d4b886",
-                borderRadius: "6px",
-                padding:      IS_MOBILE ? "14px 22px" : "10px 20px",
-                fontSize:     IS_MOBILE ? "15px" : "14px",
-                fontFamily:   "Georgia, serif",
-                fontWeight:   "bold",
-                zIndex:       String(UI_Z + 10),
-                boxShadow:    "0 4px 16px rgba(0,0,0,0.8)",
-                pointerEvents:"none",
-                transition:   "opacity 0.35s ease",
-                textAlign:    "center",
-                maxWidth:     "90vw"
+                position:      "fixed",
+                bottom:        IS_MOBILE ? "80px" : "30px",
+                left:          "50%",
+                transform:     "translateX(-50%)",
+                background:    "rgba(20,10,5,0.95)",
+                color:         "#f5d76e",
+                border:        "1px solid #d4b886",
+                borderRadius:  "6px",
+                padding:       IS_MOBILE ? "14px 22px" : "10px 20px",
+                fontSize:      IS_MOBILE ? "15px" : "14px",
+                fontFamily:    "Georgia, serif",
+                fontWeight:    "bold",
+                zIndex:        String(UI_Z + 10),
+                boxShadow:     "0 4px 16px rgba(0,0,0,0.8)",
+                pointerEvents: "none",
+                transition:    "opacity 0.35s ease",
+                textAlign:     "center",
+                maxWidth:      "90vw"
             });
             document.body.appendChild(el);
         }
@@ -858,13 +1158,37 @@ function _triggerGameStartFromMenu() {
     }
 
     // =========================================================================
-    // §13  UI: SAVE / LOAD PANEL
+    // §16  UI: MODE BADGE HELPERS
+    // =========================================================================
+
+    function _modeBadgeText(mode) {
+        switch (mode) {
+            case "story":  return "📖 Story";
+            case "custom": return "🎯 Custom";
+            default:       return "🗺 Sandbox";
+        }
+    }
+
+    function _modeBadgeColor(mode) {
+        switch (mode) {
+            case "story":  return "#9c27b0";
+            case "custom": return "#0288d1";
+            default:       return "#2e7d32";
+        }
+    }
+
+    function _modeBadgeHTML(mode) {
+        if (!mode) mode = "sandbox";
+        return `<span class="sl-mode-badge" style="background:${_modeBadgeColor(mode)};">${_modeBadgeText(mode)}</span>`;
+    }
+
+    // =========================================================================
+    // §17  UI: SAVE / LOAD PANEL
     // =========================================================================
 
     function buildSaveUI() {
         if (document.getElementById("save-load-panel")) return;
 
-        // ── CSS ────────────────────────────────────────────────────────────
         const style = document.createElement("style");
         style.textContent = `
         #save-load-overlay {
@@ -877,7 +1201,7 @@ function _triggerGameStartFromMenu() {
         #save-load-panel {
             background:linear-gradient(to bottom,#1a0d0d,#0d0806);
             border:2px solid #d4b886; border-radius:10px;
-            padding:24px; width:min(620px,96vw);
+            padding:24px; width:min(660px,96vw);
             max-height:92vh; overflow-y:auto;
             font-family:Georgia,serif; color:#d4b886;
             box-shadow:0 10px 40px rgba(0,0,0,.92);
@@ -917,19 +1241,28 @@ function _triggerGameStartFromMenu() {
             font-size:clamp(11px,3vw,13px);
         }
         .sl-btn-close:hover { border-color:#d4b886; color:#d4b886; }
+
         .sl-autosave-badge {
             font-size:10px; background:#4a0a0a; color:#ff7043;
             border-radius:3px; padding:1px 5px; margin-left:6px;
+        }
+        .sl-mode-badge {
+            display:inline-block; font-size:10px; color:#fff;
+            border-radius:3px; padding:1px 6px; margin-left:4px;
+            font-family:Georgia,serif; font-weight:bold;
         }
         .sl-seed-badge {
             font-size:10px; background:#1a3a0a; color:#8bc34a;
             border-radius:3px; padding:1px 5px; margin-left:6px;
             font-family:monospace;
         }
+        .sl-mode-warn {
+            font-size:12px; color:#ff9800; margin-top:4px;
+            border:1px solid #ff9800; border-radius:3px; padding:4px 8px;
+        }
         `;
         document.head.appendChild(style);
 
-        // ── Overlay + panel ─────────────────────────────────────────────────
         const overlay    = document.createElement("div");
         overlay.id       = "save-load-overlay";
         overlay.onclick  = e => { if (e.target === overlay) closePanel(); };
@@ -946,75 +1279,108 @@ function _triggerGameStartFromMenu() {
         renderPanel();
     }
 
-function closePanel() {
+    function closePanel() {
         const ov = document.getElementById("save-load-overlay");
         if (ov) ov.classList.remove("open");
-        
-        // SURGERY: Unhide main menu buttons when returning from the load screen
+        // Unhide main menu buttons when returning from the load screen
         const menuUI = document.getElementById("main-menu-ui-container");
         if (menuUI) menuUI.style.display = "flex";
     }
-	
+
     function renderPanel() {
         const panel = document.getElementById("save-load-panel");
         if (!panel) return;
 
-        const onMenu  = isOnMainMenu();
-        const canSave = gameIsReady() && !onMenu;
+        const onMenu   = isOnMainMenu();
+        const canSave  = gameIsReady() && !onMenu;
+        const currMode = detectGameMode();
+
+        // Title reflects context: loading from menu vs saving in-game
+        const panelTitle = onMenu ? "💾 Load Game" : "💾 Save Game";
 
         let html = `
-            <h2>💾 Save / Load Game</h2>
+            <h2>${panelTitle}</h2>
             <div class="sl-platform">
                 Platform: ${getPlatformLabel()} &nbsp;|&nbsp; Version: ${SAVE_VERSION}
-                ${window.DoG_worldSeed ? `&nbsp;|&nbsp; World Seed: <code style="color:#8bc34a">${window.DoG_worldSeed >>> 0}</code>` : ""}
+                ${window.DoG_worldSeed && currMode !== "story"
+                    ? `&nbsp;|&nbsp; World Seed: <code style="color:#8bc34a">${window.DoG_worldSeed >>> 0}</code>` : ""}
+                ${canSave ? `&nbsp;|&nbsp; Current mode: ${_modeBadgeHTML(currMode)}` : ""}
                 ${USE_CAPACITOR_STORAGE ? "&nbsp;|&nbsp; <span style='color:#8bc34a'>Capacitor Storage</span>" : ""}
             </div>
         `;
 
         if (onMenu) {
             html += `<div style="color:#8bc34a;font-size:13px;margin-bottom:12px;border:1px solid #8bc34a;border-radius:4px;padding:8px;">
-                ℹ️ <b>Load-from-Menu mode.</b> Clicking ▶ Load will launch the game and restore your save automatically.
+                ℹ️ <b>Load Game.</b> Select a save slot to launch the game and restore your progress automatically.
+                Story saves launch the story engine; Sandbox saves launch the sandbox.
             </div>`;
         } else if (!canSave) {
             html += `<div style="color:#ff5252;font-size:13px;margin-bottom:12px;border:1px solid #ff5252;border-radius:4px;padding:8px;">
                 ⚠️ Return to the overworld before saving (no mid-battle or city saves).
             </div>`;
+        } else {
+            // In-game save panel: loading must be done from the main menu
+            html += `<div style="color:#4fc3f7;font-size:clamp(12px,3.5vw,14px);margin-bottom:12px;border:1px solid #4fc3f7;border-radius:4px;padding:10px;text-align:center;line-height:1.5;">
+                🔒 To <b>load</b> a save, return to the <b>Main Menu</b> first.
+            </div>`;
         }
 
         for (let i = 0; i < NUM_SLOTS; i++) {
-            const meta    = getSlotMetaSync(i);
-            const isAuto  = (i === AUTO_SAVE_SLOT);
-            const label   = isAuto
-                ? `Auto-Save <span class="sl-autosave-badge">AUTO</span>`
-                : `Slot ${i + 1}`;
+            const meta   = getSlotMetaSync(i);
+            const isAuto = (i === AUTO_SAVE_SLOT);
+            const isQS   = (i === QUICK_SAVE_SLOT);
+
+            let slotLabel = `Slot ${i + 1}`;
+            if (isAuto) slotLabel = `Auto-Save <span class="sl-autosave-badge">AUTO</span>`;
+            else if (isQS) slotLabel = `Slot 2 <span class="sl-autosave-badge" style="background:#1a3a5c;color:#4fc3f7;">F5</span>`;
 
             html += `<div class="sl-slot">`;
-            html += `<div class="sl-slot-header"><span class="sl-slot-title">${label}</span></div>`;
+            html += `<div class="sl-slot-header"><span class="sl-slot-title">${slotLabel}</span></div>`;
 
             if (meta) {
-                const dtStr = new Date(meta.timestamp).toLocaleString();
-                const raw   = StorageLs.get(getSaveKey(i));
-                const kb    = raw ? (new Blob([raw]).size / 1024).toFixed(1) : "?";
-                const seed  = meta.worldSeed !== undefined
-                    ? `<span class="sl-seed-badge">🌱${meta.worldSeed >>> 0}</span>` : "";
+                const dtStr    = new Date(meta.timestamp).toLocaleString();
+                const raw      = StorageLs.get(getSaveKey(i));
+                const kb       = raw ? (new Blob([raw]).size / 1024).toFixed(1) : "?";
+
+                // Seed / scenario badge
+                let seedTxt = "";
+                if (meta.gameMode === "story") {
+                    seedTxt = ""; // story maps are deterministic — no seed displayed
+                } else if (meta.gameMode === "custom" && meta.hasScenario) {
+                    seedTxt = `<span class="sl-seed-badge" style="background:#1a2a3a;color:#4fc3f7;">🗺 Full Restore</span>`;
+                } else if (meta.gameMode === "custom") {
+                    seedTxt = `<span class="sl-seed-badge" style="background:#3a1a0a;color:#ff9800;">⚠ Legacy</span>`;
+                } else if (meta.worldSeed !== undefined) {
+                    seedTxt = `<span class="sl-seed-badge">🌱${meta.worldSeed >>> 0}</span>`;
+                }
 
                 html += `<div class="sl-slot-meta">
-                    📅 ${dtStr}<br>
-                    🖥️ ${meta.platform} &nbsp;|&nbsp; v${meta.version} ${seed}<br>
+                    📅 ${dtStr}  ${_modeBadgeHTML(meta.gameMode)}<br>
+                    🖥️ ${meta.platform} &nbsp;|&nbsp; v${meta.version} ${seedTxt}<br>
                     📍 Coords: (${meta.playerX}, ${meta.playerY})<br>
-                    💰 Gold: ${Math.floor(meta.playerGold)} &nbsp;|&nbsp; ⚔️ Troops: ${meta.playerTroops}<br>
-                    🏙️ Cities: ${meta.cityCount} &nbsp;|&nbsp; 🚶 NPCs: ${meta.npcCount} &nbsp;|&nbsp; 📦 ${kb} KB
+                    💰 Gold: ${Math.floor(meta.playerGold)} &nbsp;|&nbsp;
+                    ⚔️ Troops: ${meta.playerTroops} &nbsp;|&nbsp;
+                    🏙️ Cities: ${meta.cityCount} &nbsp;|&nbsp;
+                    🚶 NPCs: ${meta.npcCount} &nbsp;|&nbsp; 📦 ${kb} KB
                 </div>`;
 
-                const saveDisabled = canSave ? "" : "disabled";
-                html += `
-                    <button class="sl-btn" onclick="window.SaveSystem.saveAndRefresh(${i})" ${saveDisabled}>💾 Overwrite</button>
-                    <button class="sl-btn sl-btn-load" onclick="window.SaveSystem.loadAndRefresh(${i})">▶ Load</button>
-                    <button class="sl-btn sl-btn-del"  onclick="window.SaveSystem.deleteAndRefresh(${i})">✕ Delete</button>
-                `;
+                if (onMenu) {
+                    // Main menu: Load + Delete only — no Save/Overwrite from menu
+                    html += `
+                        <button class="sl-btn sl-btn-load" onclick="window.SaveSystem.loadAndRefresh(${i})">▶ Load</button>
+                        <button class="sl-btn sl-btn-del"  onclick="window.SaveSystem.deleteAndRefresh(${i})">✕ Delete</button>
+                    `;
+                } else {
+                    // In-game: Save + Delete only — no Load button, no Overwrite label
+                    const saveDisabled = canSave ? "" : "disabled";
+                    html += `
+                        <button class="sl-btn" onclick="window.SaveSystem.saveAndRefresh(${i})" ${saveDisabled}>💾 Save Game</button>
+                        <button class="sl-btn sl-btn-del"  onclick="window.SaveSystem.deleteAndRefresh(${i})">✕ Delete</button>
+                    `;
+                }
             } else {
                 html += `<div class="sl-slot-empty">— Empty slot —</div>`;
-                if (!isAuto) {
+                if (!isAuto && !onMenu) {
                     html += `<button class="sl-btn" onclick="window.SaveSystem.saveAndRefresh(${i})" ${canSave ? "" : "disabled"}>💾 Save Here</button>`;
                 }
             }
@@ -1027,7 +1393,7 @@ function closePanel() {
     }
 
     // =========================================================================
-    // §14  PUBLIC API  (called from inline onclick handlers & external code)
+    // §18  PUBLIC API
     // =========================================================================
 
     const _public = {
@@ -1035,7 +1401,8 @@ function closePanel() {
         async saveAndRefresh(slot) {
             const r = await saveGame(slot);
             if (r.success) {
-                showToast(`✅ Saved to ${slot === 0 ? "Auto-Save" : "Slot " + (slot + 1)}! (${(r.bytes / 1024).toFixed(1)} KB)`);
+                const label = slot === AUTO_SAVE_SLOT ? "Auto-Save" : `Slot ${slot + 1}`;
+                showToast(`✅ Saved to ${label} ${_modeBadgeText(r.gameMode)} (${(r.bytes / 1024).toFixed(1)} KB)`);
             } else {
                 showToast(`❌ Save failed: ${r.error}`, 5000, true);
             }
@@ -1043,7 +1410,16 @@ function closePanel() {
         },
 
         async loadAndRefresh(slot) {
-            // ── A) Load while on main menu ─────────────────────────────────
+            // ── Guard: loading is only allowed from the main menu ───────────
+            if (!isOnMainMenu() && window.__DoG_drawLoopActive) {
+                showToast(
+                    "🔒 Return to the Main Menu to load a save.",
+                    4000, true
+                );
+                return;
+            }
+
+            // ── A) Load while on main menu (or draw loop not active) ────────
             if (isOnMainMenu() || !window.__DoG_drawLoopActive) {
                 const raw = StorageLs.get(getSaveKey(slot));
                 if (!raw) { showToast("No save in this slot.", 3000, true); return; }
@@ -1052,36 +1428,51 @@ function closePanel() {
                 try { snapshot = JSON.parse(raw); }
                 catch(e) { showToast("Save file corrupted.", 3000, true); return; }
 
-                const slotLabel = slot === 0 ? "Auto-Save" : `Slot ${slot + 1}`;
+                const slotLabel = slot === AUTO_SAVE_SLOT ? "Auto-Save" : `Slot ${slot + 1}`;
+                const saveMode  = snapshot.gameMode || "sandbox";
+
                 const ok = window.confirm(
-                    `Load ${slotLabel}?\n\n` +
+                    `Load ${slotLabel}? ${_modeBadgeText(saveMode)}\n\n` +
                     `The game will start and your save will be restored automatically.\n` +
-                    `World seed: ${snapshot.worldSeed ?? "legacy (no seed)"}`
+                    (saveMode === "story"
+                        ? "This will launch Story Mode."
+                        : saveMode === "custom"
+                            ? (snapshot.scenarioDoc
+                                ? "✅ Scenario world and player stats will be fully restored."
+                                : "⚠ Legacy save — only player stats can be restored (scenario world lost).")
+                            : `World seed: ${snapshot.worldSeed ?? "legacy (no seed)"}`)
                 );
                 if (!ok) return;
 
-                // Queue the load and start the engine
                 _pendingLoad = { slot, snapshot };
-                if (snapshot.worldSeed !== undefined) {
+                if (snapshot.worldSeed !== undefined && saveMode !== "story") {
                     window.DoG_pendingWorldSeed = snapshot.worldSeed;
                 }
 
                 closePanel();
-                showToast("⏳ Starting game and restoring save…", 5000);
-                _triggerGameStartFromMenu();
+                showToast(`⏳ Starting ${_modeBadgeText(saveMode)} and restoring save…`, 5000);
+                _triggerGameStartFromMenu(saveMode);
                 return;
             }
 
-            // ── B) In-game load ────────────────────────────────────────────
-            const slotLabel = slot === 0 ? "Auto-Save" : `Slot ${slot + 1}`;
-            const ok = window.confirm(`Load ${slotLabel}?\n\nUnsaved progress will be lost.`);
+            // ── B) In-game load ─────────────────────────────────────────────
+            const slotLabel = slot === AUTO_SAVE_SLOT ? "Auto-Save" : `Slot ${slot + 1}`;
+            const meta      = getSlotMetaSync(slot);
+            const saveMode  = meta?.gameMode || "sandbox";
+            const currMode  = detectGameMode();
+
+            let confirmMsg = `Load ${slotLabel}? (${_modeBadgeText(saveMode)})\n\nUnsaved progress will be lost.`;
+            if (saveMode !== currMode) {
+                confirmMsg += `\n\n⚠️ This save is from ${_modeBadgeText(saveMode)} mode. You are currently in ${_modeBadgeText(currMode)} mode. Proceed with caution.`;
+            }
+
+            const ok = window.confirm(confirmMsg);
             if (!ok) return;
 
             const r = await loadGame(slot);
             if (r.success && !r.queued) {
-                showToast(`✅ Game loaded from ${slotLabel}!`);
+                showToast(`✅ Loaded from ${slotLabel} ${_modeBadgeText(saveMode)}!`);
                 closePanel();
-                // Refresh diplomacy UI if open
                 setTimeout(() => {
                     if (typeof renderDiplomacyMatrix === "function") {
                         const dp = document.getElementById("diplomacy-panel");
@@ -1091,7 +1482,7 @@ function closePanel() {
             } else if (r.queued) {
                 showToast(`⏳ Load queued — starting game…`, 4000);
                 closePanel();
-                _triggerGameStartFromMenu();
+                _triggerGameStartFromMenu(saveMode);
             } else {
                 showToast(`❌ Load failed: ${r.error}`, 5000, true);
                 renderPanel();
@@ -1099,80 +1490,98 @@ function closePanel() {
         },
 
         async deleteAndRefresh(slot) {
-            if (!window.confirm(`Delete ${slot === 0 ? "Auto-Save" : "Slot " + (slot + 1)}? This cannot be undone.`)) return;
+            const label = slot === AUTO_SAVE_SLOT ? "Auto-Save" : `Slot ${slot + 1}`;
+            if (!window.confirm(`Delete ${label}? This cannot be undone.`)) return;
             await deleteSlot(slot);
-            showToast(`🗑️ ${slot === 0 ? "Auto-Save" : "Slot " + (slot + 1)} deleted.`, 2000);
+            showToast(`🗑️ ${label} deleted.`, 2000);
             renderPanel();
         },
 
-        // ── Keyboard quick-save/load helpers ──────────────────────────────
-        async quickSave()  { if (gameIsReady()) await this.saveAndRefresh(1); },
-        async quickLoad()  { await this.loadAndRefresh(1); },
+        // ── Keyboard quick-save/load (always targets QUICK_SAVE_SLOT) ────────
+        async quickSave() { if (gameIsReady()) await this.saveAndRefresh(QUICK_SAVE_SLOT); },
+        async quickLoad() { await this.loadAndRefresh(QUICK_SAVE_SLOT); },
 
-        // ── Expose internals for console debugging ─────────────────────────
+        // ── Expose internals ──────────────────────────────────────────────────
         openPanel,
         closePanel,
         saveGame,
         loadGame,
         showToast,
         getSlotMetaSync,
+        detectGameMode,
 
-        /** Return the current world seed (useful for sharing reproducible worlds) */
         get worldSeed() { return window.DoG_worldSeed ?? null; },
 
-        /** Force-reset all duplicate-launch guards (call from console if stuck) */
+        /**
+         * resetGuards() — emergency console command if the game gets stuck.
+         * Call window.SaveSystem.resetGuards() then manually call initGame()
+         * (or initGame_story1() for story mode).
+         */
         resetGuards() {
             window.__DoG_gameInitRunning = false;
             window.__DoG_drawLoopActive  = false;
+            window.__gameStarted         = false;
             _pendingLoad = null;
-            console.log("[SaveSystem] Guards reset. Call initGame() to relaunch if needed.");
+            console.log("[SaveSystem] All guards reset. Call initGame() or initGame_story1() to relaunch.");
         }
     };
 
     // =========================================================================
-    // §16  BOOTSTRAP
+    // §19  BOOTSTRAP
     // =========================================================================
 
     function bootstrap() {
-        // 1. Build DOM structure
+        // 1. Ensure post-init callback array exists (may have been set earlier
+        //    by scenario_update.js pushing a callback before this script ran).
+        if (!Array.isArray(window.__DoG_postInitCallbacks)) {
+            window.__DoG_postInitCallbacks = [];
+        }
+
+        // 2. Build DOM structure
         buildSaveUI();
 
-        // 2. Patch initGame() — must run after sandbox_overworld.js has defined it
+        // 3. Patch initGame() — sandbox mode
         patchInitGame();
 
-        // 3. Start auto-save
+        // 4. Patch initGame_story1() — story mode.
+        //    story1_map_and_update.js may not be loaded yet at DOMContentLoaded,
+        //    so we try now and retry after the window "load" event if needed.
+        if (!patchInitGame_story1()) {
+            window.addEventListener("load", function _story1PatchRetry() {
+                patchInitGame_story1();
+                window.removeEventListener("load", _story1PatchRetry);
+            });
+        }
+
+        // 5. Start auto-save
         startAutoSave();
 
-        // 4. Keyboard shortcuts
+        // 6. Keyboard shortcuts
         window.addEventListener("keydown", e => {
             if (e.target?.tagName === "INPUT" || e.target?.tagName === "TEXTAREA") return;
-
-            if (e.key === "F5") {
-                e.preventDefault();
-                _public.quickSave();
-            }
-            if (e.key === "F9") {
-                e.preventDefault();
-                _public.quickLoad();
-            }
+            if (e.key === "F5") { e.preventDefault(); _public.quickSave(); }
+            if (e.key === "F9") { e.preventDefault(); _public.quickLoad(); }
         });
 
-        // 5. Android: prevent back-button from killing the game
+        // 7. Android: back-button → save panel
         if (IS_ANDROID && IS_CAPACITOR) {
             document.addEventListener("backbutton", e => {
                 e.preventDefault();
-                if (gameIsReady()) {
-                    openPanel(); // Show save panel on back-press instead of exiting
-                }
+                if (gameIsReady()) openPanel();
             }, false);
         }
+
+        // 8. Poll every second for pending loads that weren't caught by the
+        //    immediate post-init path (e.g. if gameIsReady() was false at the
+        //    exact moment initGame finished).
+        setInterval(checkPendingLoad, 1000);
 
         console.log(
             `[SaveSystem] v${SAVE_VERSION} loaded ✓\n` +
             `  Platform: ${getPlatformLabel()}\n` +
             `  Storage:  ${USE_CAPACITOR_STORAGE ? "@capacitor/preferences" : "localStorage"}\n` +
-            `  F5 = Quick Save (Slot 2) | F9 = Quick Load (Slot 2)\n` +
-            `  Auto-save every 5 min → Auto-Save slot\n` +
+            `  Slots: ${NUM_SLOTS} (0=Auto, 1=QuickSave F5/F9, 2-${NUM_SLOTS-1}=Manual)\n` +
+            `  Game modes: sandbox | story | custom\n` +
             `  window.SaveSystem.resetGuards() — if a load gets stuck`
         );
     }
@@ -1195,52 +1604,58 @@ function closePanel() {
 //  ───────────────
 //  F5                → Quick Save to Slot 2
 //  F9                → Quick Load from Slot 2
-//  Android back btn  → Opens Save/Load panel (vs exiting app)
+//  Android back btn  → Opens Save/Load panel
 //  Auto-save         → Every 5 minutes into Slot 1 (Auto-Save)
 //
-//  SLOT MAP
-//  ────────
-//  Slot 1 (index 0) = Auto-Save  — overwritten automatically
-//  Slot 2 (index 1) = Quick Save — F5 / F9 shortcut
-//  Slot 3 (index 2) = Manual     — panel only
-//
-//  SEEDED WORLD GENERATION  (FIX-1 / FIX-2)
-//  ─────────────────────────────────────────
-//  On every fresh game, a Mulberry32 seed is generated from crypto.getRandomValues.
-//  This seed is saved in the JSON and restored before generateMap() runs on load.
-//  Result: cities appear at identical positions, terrain decorations look the same.
-//  The seed is visible in the Save/Load panel and as window.DoG_worldSeed.
-//
-//  ANDROID CAPACITOR  (FIX-6)
+//  SLOT MAP (v4.0 — 5 slots)
 //  ──────────────────────────
-//  Default (USE_CAPACITOR_STORAGE = false): uses localStorage, which works on
-//  the standard Capacitor https://localhost WebView origin.
+//  Slot 0 (index 0) = Auto-Save  — overwritten automatically every 5 min
+//  Slot 1 (index 1) = Quick Save — F5 (write) / F9 (read)
+//  Slot 2 (index 2) = Manual A   — panel only
+//  Slot 3 (index 3) = Manual B   — panel only
+//  Slot 4 (index 4) = Manual C   — panel only
 //
-//  To enable Capacitor Preferences (for file:// origin or extra durability):
-//    1. Set USE_CAPACITOR_STORAGE = true at line ~59
-//    2. npm install @capacitor/preferences
-//    3. npx cap sync
-//    4. capacitor.config.json: add "Preferences" to the plugins list
-//  Saves are mirrored to localStorage for fast UI reads either way.
+//  GAME MODES
+//  ──────────
+//  "sandbox"  — standard sandbox world; world restored via worldSeed
+//  "story"    — story chapter save; world rebuilt by running initGame_story1()
+//               on load (polygon-based map, always identical)
+//  "custom"   — scenario/custom campaign save; scenario world document is NOT
+//               stored in the player save, so the world cannot be restored.
+//               Only player stats (gold, troops, roster, inventory, etc.) are
+//               preserved. The player loads into a fresh Sandbox world.
+//               Future improvement: store a reference to the scenario filename
+//               so the user can re-load it manually before restoring.
 //
-//  ALTERNATIVE SQLITE STORAGE (for files > 5 MB):
-//  Swap the bodies of StorageCap.get/set/remove to use:
-//    capacitor-community/sqlite — https://github.com/capacitor-community/sqlite
-//  The interface is identical; only the async method calls change.
+//  SCENARIO EDITOR ISOLATION
+//  ──────────────────────────
+//  The scenario editor (scenario_editor.js) saves campaign maps as local
+//  JSON file downloads.  It does NOT use localStorage, so there is ZERO
+//  key-namespace collision with DoG_Save_N player saves.
+//  Do NOT add localStorage writes to scenario_editor.js — keep these two
+//  save systems completely separate.
 //
-//  DUPLICATE WORLD BUG  (FIX-4)
-//  ─────────────────────────────
-//  initGame() is monkey-patched to block concurrent calls.  If you see the
-//  game stuck (black screen, no cities), run in console:
-//    window.SaveSystem.resetGuards()
-//  then manually call initGame().
+//  COOPERATIVE initGame PATCHING
+//  ──────────────────────────────
+//  save_system.js is the ONLY module that wraps window.initGame or
+//  window.initGame_story1.  If you need to run code after engine init:
+//
+//      window.__DoG_postInitCallbacks.push(function myPostInit() {
+//          // your code here — runs after initGame resolves, before save restore
+//      });
+//
+//  Callbacks are one-shot (consumed on fire).  Push a new one each time
+//  you need another run.  See scenario_update.js _ensurePostInitHook().
 //
 //  CONSOLE DEBUGGING
 //  ─────────────────
-//  window.SaveSystem.worldSeed         → current world seed
-//  window.SaveSystem.getSlotMetaSync(0) → metadata for slot 0
-//  window.DoG_worldSeed                → raw seed (numeric)
-//  window.__DoG_drawLoopActive         → true once draw() is running
-//  window.__DoG_gameInitRunning        → true while initGame() is in progress
+//  window.SaveSystem.worldSeed          → current world seed (null in story)
+//  window.SaveSystem.detectGameMode()   → "sandbox" | "story" | "custom"
+//  window.SaveSystem.getSlotMetaSync(0) → metadata for auto-save slot
+//  window.DoG_worldSeed                 → raw seed (numeric)
+//  window.__DoG_drawLoopActive          → true once draw() is running
+//  window.__DoG_gameInitRunning         → true while initGame/story1 in progress
+//  window.__DoG_gameMode                → "sandbox" | "story" | "custom"
+//  window.__DoG_postInitCallbacks       → array of one-shot callbacks
 //
 // ============================================================================

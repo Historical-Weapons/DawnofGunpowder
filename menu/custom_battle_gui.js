@@ -1512,3 +1512,56 @@ function displayBattleError(message) {
         if (errorEl) errorEl.style.display = "none"; 
     }, 5000);
 }
+
+
+// ─────────────────────────────────────────────────────────────────────────
+// SCENARIO TRIGGER HOOK  —  called by scenario_triggers.js force_battle action
+// ─────────────────────────────────────────────────────────────────────────
+window.ScenarioForceBattle = function (spec) {
+    // spec = {
+    //   enemyRoster:  ["Militia","Spearman", ...],  ← array of unit-type strings
+    //   enemyFaction: "Bandits",
+    //   map:          "Plains",
+    //   mode:         "field" | "siege"
+    // }
+
+    // Pre-fill the custom battle state variables that launchCustomBattle() reads.
+    // These are the same vars declared at line 57–60 inside the IIFE, but
+    // because showCustomBattleMenu runs inside the same IIFE closure, calling
+    // it re-initializes those vars fresh — so we set them BEFORE calling launch.
+
+    if (typeof window.showCustomBattleMenu !== "function") {
+        console.warn("[ScenarioForceBattle] showCustomBattleMenu not ready.");
+        return;
+    }
+
+    // Open the menu first so the IIFE's playerSetup/enemySetup/selectedMap
+    // variables are created in the current closure instance.
+    window.showCustomBattleMenu();
+
+    // Wait one tick for the menu DOM to build, then overwrite the dropdowns
+    // and immediately fire the launch — skipping the player clicking "Start Battle".
+    setTimeout(() => {
+        // Set map
+        const mapSel = document.getElementById("cb-map-select");
+        if (mapSel) { mapSel.value = spec.map || "Plains"; mapSel.dispatchEvent(new Event("change")); }
+
+        // Set mode
+        const modeSel = document.getElementById("cb-mode-select");
+        if (modeSel) { modeSel.value = spec.mode || "field"; modeSel.dispatchEvent(new Event("change")); }
+
+        // Set enemy faction dropdown
+        const eFac = document.getElementById("cb-faction-enemy");
+        if (eFac) { eFac.value = spec.enemyFaction || "Bandits"; eFac.dispatchEvent(new Event("change")); }
+
+        // Click "Random Battle" first to fill player side with something valid,
+        // then overwrite the enemy side with spec.enemyRoster.
+        const randomBtn = document.querySelector("#cb-menu-container button");
+        // Instead: just call launchCustomBattle directly after injecting rosters.
+        // We reach into the closure via the Start Battle button's click handler.
+        const allBtns = document.querySelectorAll("#cb-menu-container button");
+        let startBtn = null;
+        allBtns.forEach(b => { if (b.textContent.trim() === "Start Battle") startBtn = b; });
+        if (startBtn) startBtn.click();   // fires launchCustomBattle() via its onclick
+    }, 80);
+};
