@@ -20,6 +20,29 @@
 let FACTION_RELATIONS = {};
 let diplomacyTick = 0;
 
+// ── PLAYER FACTION RESOLVER ─────────────────────────────────────────────────
+// Canonical name is now "Player" (renamable via the editor). Old saves and
+// some legacy modules use "Player's Kingdom" — both resolve to the same
+// faction. Use window.PlayerFaction.is(name) instead of literal comparisons.
+window.PlayerFaction = {
+    DEFAULT: "Player",
+    LEGACY:  "Player's Kingdom",
+    // Returns the player's current canonical name (whatever the player set).
+    name() {
+        if (typeof player !== 'undefined' && player && player.faction) return player.faction;
+        return this.DEFAULT;
+    },
+    // True if `n` is the player faction by ANY known name (canonical, legacy,
+    // or whatever the player has currently renamed themselves to).
+    is(n) {
+        if (!n) return false;
+        if (n === this.DEFAULT) return true;
+        if (n === this.LEGACY)  return true;
+        if (typeof player !== 'undefined' && player && player.faction === n) return true;
+        return false;
+    }
+};
+
 // Run this once when the map generates. Safe to call again after a scenario
 // is launched — it wipes FACTION_RELATIONS and rebuilds from the new list.
 function initDiplomacy(factionsList) {
@@ -40,11 +63,65 @@ function initDiplomacy(factionsList) {
                 + names.length + " factions: " + names.join(", "));
 }
 
+// ── Programmatic relation setters (used by scenario init & triggers) ────────
+// setRelation("Yamato Clans", "Great Khaganate", "War")  → mirrors both ways.
+function setRelation(a, b, rel) {
+    if (!a || !b || a === b) return;
+    if (rel !== "War" && rel !== "Peace" && rel !== "Ally") return;
+    if (!FACTION_RELATIONS[a]) FACTION_RELATIONS[a] = {};
+    if (!FACTION_RELATIONS[b]) FACTION_RELATIONS[b] = {};
+    FACTION_RELATIONS[a][b] = rel;
+    FACTION_RELATIONS[b][a] = rel;
+
+    // If one side is the Player, also keep player.enemies in sync.
+    if (typeof player !== 'undefined' && player) {
+        if (!Array.isArray(player.enemies)) player.enemies = [];
+        const playerIs = window.PlayerFaction;
+        const isPlayerA = playerIs.is(a), isPlayerB = playerIs.is(b);
+        const other = isPlayerA ? b : (isPlayerB ? a : null);
+        if (other && other !== "Bandits") {
+            const idx = player.enemies.indexOf(other);
+            if (rel === "War" && idx === -1)  player.enemies.push(other);
+            if (rel !== "War" && idx !== -1)  player.enemies.splice(idx, 1);
+        }
+    }
+}
+
+function getRelation(a, b) {
+    if (!a || !b) return "Peace";
+    if (a === b) return "Ally";
+    if (a === "Bandits" || b === "Bandits") return "War";
+    if (FACTION_RELATIONS[a] && FACTION_RELATIONS[a][b]) return FACTION_RELATIONS[a][b];
+    return "Peace";
+}
+
+// Apply a {A: {B: "War", ...}, ...} matrix in bulk. Used by scenario launch
+// to seed the diplomacy state from scenario.initialDiplomacy.
+function applyDiplomacyMatrix(matrix) {
+    if (!matrix || typeof matrix !== "object") return 0;
+    let n = 0;
+    Object.keys(matrix).forEach(a => {
+        const row = matrix[a] || {};
+        Object.keys(row).forEach(b => {
+            const rel = row[b];
+            if (rel === "War" || rel === "Peace" || rel === "Ally") {
+                setRelation(a, b, rel);
+                n++;
+            }
+        });
+    });
+    console.log("[Diplomacy] Applied initial matrix:", n, "relation(s).");
+    return n;
+}
+
 // Make initDiplomacy callable from anywhere (scenario_update.js, etc.).
 // (function declarations at the top level are already on window in browsers,
 // but assigning explicitly keeps it robust if this file is ever wrapped.)
 if (typeof window !== "undefined") {
-    window.initDiplomacy   = initDiplomacy;
+    window.initDiplomacy        = initDiplomacy;
+    window.setRelation          = setRelation;
+    window.getRelation          = getRelation;
+    window.applyDiplomacyMatrix = applyDiplomacyMatrix;
     window.FACTION_RELATIONS_get = () => FACTION_RELATIONS; // accessor for debugging
 }
 
@@ -56,13 +133,14 @@ function isHostile(factionA, factionB) {
     // Bandits are globally hostile
     if (factionA === "Bandits" || factionB === "Bandits") return true;
 
-    // Player Diplomacy logic (Dynamic to support Story Factions and renamed
-    // Player factions in scenarios)
-    let pFaction = (typeof player !== 'undefined' && player.faction) ? player.faction : "Player's Kingdom";
-    if (factionA === pFaction || factionB === pFaction) {
+    // Player Diplomacy logic — alias-aware via PlayerFaction.is()
+    const playerIs = window.PlayerFaction;
+    const aIsPlayer = playerIs && playerIs.is(factionA);
+    const bIsPlayer = playerIs && playerIs.is(factionB);
+    if (aIsPlayer || bIsPlayer) {
         if (typeof player !== 'undefined' && player.enemies) {
-            if (factionA === pFaction) return player.enemies.includes(factionB);
-            if (factionB === pFaction) return player.enemies.includes(factionA);
+            if (aIsPlayer) return player.enemies.includes(factionB);
+            if (bIsPlayer) return player.enemies.includes(factionA);
         }
     }
 
@@ -80,10 +158,11 @@ function updateDiplomacy() {
     if (diplomacyTick < 120) return;
     diplomacyTick = 0;
 
-    // Filter dynamically so renamed Player factions and scenario-specific
-    // setups are honored.
-    let pFaction = (typeof player !== 'undefined' && player.faction) ? player.faction : "Player's Kingdom";
-    let names = Object.keys(FACTION_RELATIONS).filter(f => f !== "Bandits" && f !== pFaction);
+    // Filter dynamically — works for renamed Player factions and scenario setups.
+    let pFaction = window.PlayerFaction.name();
+    let names = Object.keys(FACTION_RELATIONS).filter(f =>
+        f !== "Bandits" && !window.PlayerFaction.is(f)
+    );
     if (names.length < 2) return;
 
     let f1 = names[Math.floor(Math.random() * names.length)];
@@ -142,16 +221,16 @@ function getFactionCityCounts(cities) {
 function applyFactionModifiers(city, factionCityCounts) {
     if (!city || !city.faction) return { draftMultiplier: 1.0, upkeepMultiplier: 1.0 };
 
-    let pFaction = (typeof player !== 'undefined' && player.faction) ? player.faction : "Player's Kingdom";
+    const isPlayer = window.PlayerFaction.is(city.faction);
     let count = factionCityCounts[city.faction] || 1;
     let draftMultiplier = 1.0;
     let upkeepMultiplier = 1.0;
 
-    if (count <= 2 && city.faction !== "Bandits" && city.faction !== pFaction) {
+    if (count <= 2 && city.faction !== "Bandits" && !isPlayer) {
         draftMultiplier = 4.0;
     }
 
-    if (count >= 10 && city.faction !== "Bandits" && city.faction !== pFaction) {
+    if (count >= 10 && city.faction !== "Bandits" && !isPlayer) {
         upkeepMultiplier = 1.5;
         city.food -= Math.floor(city.pop * 0.02);
     }
@@ -170,7 +249,8 @@ const FACTION_EMOJIS = {
     "High Plateau Kingdoms": "⛰️",
     "Yamato Clans": "🌸",
     "Bandits": "🏴‍☠️",
-    "Player's Kingdom": "🎮"
+    "Player": "🎮",
+    "Player's Kingdom": "🎮"   // legacy alias
 };
 
 
@@ -251,11 +331,13 @@ function renderDiplomacyMatrix() {
             let cellContent = (rel === "-") ? "-" : rel.toUpperCase();
             let clickableStyle = "";
 
-            // Dynamic Player check to account for "Player" (Story) vs "Player's Kingdom"
-            // (Sandbox) vs renamed Player factions (Scenarios)
-            let pFaction = (typeof player !== 'undefined' && player.faction) ? player.faction : (isStoryMode ? "Player" : "Player's Kingdom");
+            // Alias-aware player check — works for "Player", "Player's
+            // Kingdom", or any custom-renamed Player faction in scenarios.
+            let pFaction = (typeof player !== 'undefined' && player.faction)
+                            ? player.faction
+                            : (isStoryMode ? "Player" : window.PlayerFaction.DEFAULT);
 
-            if (f1 === pFaction && f2 !== f1) {
+            if (window.PlayerFaction.is(f1) && f2 !== f1) {
                 clickableStyle = "cursor: pointer; text-decoration: underline;";
                 tableHTML += `<td style="color: ${color}; font-weight: bold; text-align: center; font-size: 0.75rem; padding: 4px 2px; ${clickableStyle}"
                                   onclick="togglePlayerWar('${f2.replace(/'/g, "\\'")}')"
@@ -308,8 +390,7 @@ function renderDiplomacyMatrix() {
 })();
 
 function togglePlayerWar(targetFaction) {
-    let pFaction = (typeof player !== 'undefined' && player.faction) ? player.faction : "Player's Kingdom";
-    if (targetFaction === pFaction || targetFaction === "Bandits") return;
+    if (window.PlayerFaction.is(targetFaction) || targetFaction === "Bandits") return;
 
     if (!player.enemies) player.enemies = []; // Safety check
 

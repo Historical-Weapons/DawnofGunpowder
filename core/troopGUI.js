@@ -138,6 +138,18 @@ recruitDirectly(unitType, cost) {
         if (typeof player !== 'undefined') {
             player.troops = (player.troops || 0) + 1;
         }
+
+        // GARRISON DEDUCTION: One soldier leaves the city to join the player's roster
+        // This mirrors the same deduction done in recruitMilitiaFromCity() for regular militia.
+        if (typeof activeCity !== 'undefined' && activeCity) {
+            activeCity.troops = Math.max(0, (activeCity.troops || 0) - 1);
+            activeCity.pop    = Math.max(0, (activeCity.pop    || 0) - 1);
+            // Refresh city panel if visible
+            const garEl = document.getElementById('city-garrison');
+            const popEl = document.getElementById('city-pop');
+            if (garEl) garEl.innerText = Math.floor(activeCity.troops).toLocaleString();
+            if (popEl) popEl.innerText = Math.floor(activeCity.pop).toLocaleString();
+        }
         
         // Lookup faction and basic role (default to gunner for Uniques)
         const currentFaction = this.getCurrentFaction();
@@ -156,7 +168,11 @@ recruitDirectly(unitType, cost) {
     upgradeUnit(oldType, newType, cost) {
         if (player.gold < cost) {
             if(typeof AudioManager !== 'undefined') AudioManager.playSound('error');
-            alert("Not enough gold, Commander!");
+            if (typeof showGameToast === 'function') {
+                showGameToast(`Need ${cost}g to upgrade to ${newType}! (Have ${Math.floor(player.gold)}g)`, true);
+            } else {
+                alert("Not enough gold, Commander!");
+            }
             return;
         }
 
@@ -174,7 +190,16 @@ recruitDirectly(unitType, cost) {
         if(typeof AudioManager !== 'undefined') AudioManager.playSound('gold_buy');
         player.gold -= cost;
         player.roster[unitIndex].type = newType; 
-        player.roster[unitIndex].name = newType; 
+        player.roster[unitIndex].name = newType;
+
+        // CITY TREASURY: The gold spent on upgrades goes to the settlement providing
+        // the training/equipment. Garrison pop is NOT reduced (no new conscripts;
+        // this is an existing soldier being retrained and re-equipped).
+        if (typeof activeCity !== 'undefined' && activeCity) {
+            activeCity.gold = (activeCity.gold || 0) + cost;
+            const goldEl = document.getElementById('city-gold');
+            if (goldEl) goldEl.innerText = Math.floor(activeCity.gold).toLocaleString();
+        }
         
         this.renderMenu();
     },

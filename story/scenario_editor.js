@@ -67,7 +67,7 @@ const DEFAULT_FACTIONS = {
     "High Plateau Kingdoms": { color: "#8d6e63", geoWeight: { north: 0.10, south: 0.90, west: 0.98, east: 0.02 }, enabled: true, cityCount: 4, uniqueTroop: "Slinger" },
     "Yamato Clans":          { color: "#c2185b", geoWeight: { north: 0.15, south: 0.65, west: 0.02, east: 0.98 }, enabled: true, cityCount: 4, uniqueTroop: "Glaiveman" },
     "Bandits":               { color: "#222222", geoWeight: { north: 0.50, south: 0.50, west: 0.50, east: 0.50 }, enabled: true, cityCount: 0, uniqueTroop: "" },
-    "Player's Kingdom":      { color: "#FFFFFF", geoWeight: { north: 0.45, south: 0.45, west: 0.30, east: 0.70 }, enabled: true, cityCount: 1, uniqueTroop: "", locked: true }
+    "Player":      { color: "#FFFFFF", geoWeight: { north: 0.45, south: 0.45, west: 0.30, east: 0.70 }, enabled: true, cityCount: 1, uniqueTroop: "", locked: true }
 };
 
 // Biome painting targets. Painting "Plains" pushes e/m toward (0.45, 0.50).
@@ -148,7 +148,7 @@ const NAME_SYLLABLES = {
     "High Plateau Kingdoms": ["Lha","Tse","Nor","Gar","Ri","Do","Shar","Lang","Zang","Yul","Cham","Phu"],
     "Yamato Clans":          ["Aki","Naga","Hara","Kawa","Matsu","Yama","Saka","Taka","Kiri","Shima","Oka"],
     "Bandits":               ["Black","Red","Iron","Crow","Wolf","Bone","Ash","Razor","Cinder"],
-    "Player's Kingdom":      ["Tsim","Sha","Tsui","Mong","Kok","Sham","Shui","Po","Kwun","Tong","Yuen","Long"]
+    "Player":      ["Tsim","Sha","Tsui","Mong","Kok","Sham","Shui","Po","Kwun","Tong","Yuen","Long"]
 };
 function _genCityName(faction) {
     const pool = NAME_SYLLABLES[faction] || NAME_SYLLABLES["Hong Dynasty"];
@@ -193,37 +193,54 @@ const state = {
 function _newScenarioDoc(opts) {
     // Default scenario document. opts is the form data from setup screen.
     const doc = {
-        version: 2,
+        version: 3,   // Step 11: now at v3 (movies + storyQuests + parlerLines)
         meta: {
             name: opts.name || "Untitled Scenario",
             created: new Date().toISOString(),
             author: opts.author || "Unknown",
             description: opts.description || ""
         },
-        // Logical tile grid dimensions (NOT pixel dimensions)
         dimensions: { tilesX: opts.tilesX, tilesY: opts.tilesY },
-
-        // Per-faction config. Now stores order (for reorder UI), cityCount,
-        // and uniqueTroop alongside the original color / geo / enabled fields.
         factions: {},
-
-        // Cities: each city is { name, faction, x, y, pop, geoPref?, custom: bool }
         cities: [],
-
-        // Tile grid: 2D array of tile objects (only e, m, isRiver — biome derived)
         tiles: [],
-
-        // Triggers (placeholder — add structure later)
         triggers: [],
-
-        // Map data type used during initial generation: "blank" | "random"
         mapData: opts.mapData || "blank",
-
-        // City placement strategy: "random" | "prioritize_top" | "none"
         cityStrategy: opts.cityStrategy || "random",
+        seed: Math.floor(Math.random() * 1e9),
 
-        // Randomization seed (reserved)
-        seed: Math.floor(Math.random() * 1e9)
+        // ── Step 1: Initial diplomacy matrix ──────────────────────────────────
+        initialDiplomacy: opts.initialDiplomacy || {},
+
+        // ── Step 4: Movies (cinematics) array ────────────────────────────────
+        // movies[0] is the boot intro; others fire via play_movie trigger action.
+        movies: [],
+        // Legacy storyIntro kept for backwards-compat; movies[] is canonical.
+        storyIntro: {
+            enabled: false, fadeMs: 1200, fadeColor: "#000000",
+            titleCard: { title: "", subtitle: "", ms: 3500 },
+            art: "", artMs: 5000, kenburns: false,
+            lines: [], letterbox: true, typewriterCps: 0
+        },
+
+        // ── Step 7: Story quest catalogue ────────────────────────────────────
+        // Each entry: { id, title, description, x, y, radius,
+        //               triggerOnArrive, varOnArrive, isMain, autoActivate, dependsOn }
+        storyQuests: [],
+
+        // ── Step 10: Per-role Parler greeting lines ───────────────────────────
+        // Falls through to RandomDialogue when a role's array is empty.
+        parlerLines: { Civilian:[], Patrol:[], Military:[], Trader:[], Bandit:[], Special:[] },
+
+        // ── Scenario logic ────────────────────────────────────────────────────
+        scenarioVars: {},
+        winLose: { winRules: [], loseRules: [] },
+        timeline: [],
+
+        // ── Entity setup ──────────────────────────────────────────────────────
+        importantNpcs:        [],
+        playerSetup:          {},
+        proceduralAITendency: {}
     };
 
     // opts.factionsArr is the ordered array from the setup screen. If not
@@ -303,7 +320,7 @@ function _factionForLocation(scenario, x01, y01) {
     let best = null, bestScore = Infinity;
     for (const [name, data] of _orderedFactions(scenario)) {
         if (!data.enabled) continue;
-        if (name === "Bandits" || name === "Player's Kingdom") continue;
+        if (name === "Bandits" || name === "Player") continue;
         let dx = x01 - data.geoWeight.east;
         let dy = y01 - data.geoWeight.south;
         let dist = Math.sqrt(dx*dx + dy*dy);
@@ -333,13 +350,13 @@ function _autoPopulateCities(scenario, opts) {
     const Y = scenario.dimensions.tilesY;
 
     // Build the placement list, honoring order, enabled flag, and excluding
-    // Bandits (which never get cities). Player's Kingdom DOES get cities now,
+    // Bandits (which never get cities). Player DOES get cities now,
     // since the setup screen lets the user set their own count (default 1).
     const ordered = _orderedFactions(scenario)
         .filter(([n, d]) => d.enabled && n !== "Bandits");
 
     // Find the "top" non-player faction for prioritize_top
-    const topFaction = ordered.find(([n]) => n !== "Player's Kingdom")?.[0];
+    const topFaction = ordered.find(([n]) => n !== "Player")?.[0];
 
     ordered.forEach(([fName, fData]) => {
         let count = (typeof fData.cityCount === "number") ? fData.cityCount : 4;
@@ -455,7 +472,7 @@ function _buildSetupScreen() {
           <p style="color:#8aa;font-size:0.9em;margin-top:0;">
             Rename, rearrange (▲▼), enable/disable, and add custom factions.
             Set a unique troop type and starting city count per faction.
-            Player's Kingdom and Bandits cannot be deleted, but their settings can be changed.
+            All factions including Player and Bandits can be deleted.
             Color is set later inside the editor (kept off this screen to keep things simple).
           </p>
           <div id="se-fac-list" style="display:flex;flex-direction:column;gap:6px;"></div>
@@ -510,8 +527,8 @@ function _buildSetupScreen() {
     //   ║      Geo: N[0.40] S[0.60] W[0.40] E[0.60]                         ║
     //   ╚════════════════════════════════════════════════════════════════════╝
     // ────────────────────────────────────────────────────────────────────────
-    function isLocked(f) { return f.name === "Player's Kingdom"; }
-    function isUndeletable(f) { return f.name === "Player's Kingdom" || f.name === "Bandits"; }
+    function isLocked(f) { return false; }          // no faction is name-locked in setup
+    function isUndeletable(f) { return false; }     // all factions (incl. Player & Bandits) are deletable
 
     function renderFactionList() {
         // Re-stamp .order so the array index matches order each time
@@ -547,7 +564,7 @@ function _buildSetupScreen() {
                 <label style="font-size:0.85em;color:#8aa;">
                   <input type="checkbox" data-field="enabled" ${f.enabled ? "checked" : ""} ${isLocked(f) ? "disabled" : ""}> Enabled
                 </label>
-                <button data-act="del" ${isUndeletable(f) ? "disabled" : ""}
+                <button data-act="del"
                         style="padding:2px 8px;background:#3a1a1a;color:#ffaaaa;border:1px solid #7a3a3a;cursor:pointer;font-weight:bold;">✗</button>
               </div>
               <!-- MIDDLE ROW: unique troop, city count -->
@@ -585,7 +602,6 @@ function _buildSetupScreen() {
                 renderFactionList();
             };
             row.querySelector('[data-act="del"]').onclick = () => {
-                if (isUndeletable(f)) return;
                 if (!confirm(`Delete faction "${f.name}"?`)) return;
                 setupState.factionsArr.splice(idx, 1);
                 renderFactionList();
@@ -664,9 +680,13 @@ function _buildSetupScreen() {
                     const raw = JSON.parse(reader.result);
                     // 1. Populate state.scenario with the loaded data
                     _restoreScenarioFromCompact(raw);
-                    // 2. Kill the setup screen
+                    // 2. Ensure new-format fields exist so ScenarioToolsPanel never crashes
+                    if (!Array.isArray(state.scenario.importantNpcs))    state.scenario.importantNpcs = [];
+                    if (!state.scenario.playerSetup || typeof state.scenario.playerSetup !== "object") state.scenario.playerSetup = {};
+                    if (!state.scenario.proceduralAITendency || typeof state.scenario.proceduralAITendency !== "object") state.scenario.proceduralAITendency = {};
+                    // 3. Kill the setup screen
                     wrap.remove();
-                    // 3. Boot the editor workspace (it will naturally draw what is in state.scenario)
+                    // 4. Boot the editor workspace (it will naturally draw what is in state.scenario)
                     _buildEditor();
                 } catch (e) {
                     alert("Failed to parse scenario file:\n" + e.message);
@@ -688,10 +708,10 @@ function _buildSetupScreen() {
     wrap.querySelector("#se-setup-create").onclick = () => {
         // Validate: must have at least one non-Player non-Bandits faction
         const realFactions = setupState.factionsArr.filter(f =>
-            f.enabled && f.name !== "Bandits" && f.name !== "Player's Kingdom"
+            f.enabled && f.name !== "Bandits" && f.name !== "Player"
         );
         if (realFactions.length === 0) {
-            alert("You need at least one enabled faction (besides Player's Kingdom and Bandits).");
+            alert("You need at least one enabled faction (besides Player and Bandits).");
             return;
         }
         // Re-stamp order
@@ -1119,7 +1139,39 @@ function _makeMenu(label, items) {
         "## Data Panels",
         { label: "Factions Panel",   toggle: true, initChecked: true, action: () => _panelToggle("se-win-factions") },
         { label: "Cities Panel",     toggle: true, initChecked: true, action: () => _panelToggle("se-win-cities") },
-        { label: "Triggers Panel",   toggle: true, initChecked: true, action: () => _panelToggle("se-win-triggers") }
+        { label: "Triggers Panel",   toggle: true, initChecked: true, action: () => _panelToggle("se-win-triggers") },
+        { label: "⚔ Diplomacy Panel", toggle: true, initChecked: true, action: () => _panelToggle("se-win-diplomacy") },
+        "## Entity Panels",
+        {
+            label: "👤 Story NPCs…",
+            action: () => {
+                if (window.ScenarioToolsPanel && window.ScenarioToolsPanel.openStoryNpcPanel) {
+                    window.ScenarioToolsPanel.openStoryNpcPanel();
+                } else {
+                    alert("Scenario Tools Panel not loaded.\nAdd <script src=\"story/scenario_tools_panel.js\"> after scenario_editor.js in index.html.");
+                }
+            }
+        },
+        {
+            label: "🎮 Player Setup…",
+            action: () => {
+                if (window.ScenarioToolsPanel && window.ScenarioToolsPanel.openDropPlayer) {
+                    window.ScenarioToolsPanel.openDropPlayer(0.5, 0.5);
+                } else {
+                    alert("Scenario Tools Panel not loaded.");
+                }
+            }
+        },
+        {
+            label: "🤖 Procedural AI…",
+            action: () => {
+                if (window.ScenarioToolsPanel && window.ScenarioToolsPanel.openProceduralAI) {
+                    window.ScenarioToolsPanel.openProceduralAI();
+                } else {
+                    alert("Scenario Tools Panel not loaded.");
+                }
+            }
+        }
     ]);
 
     // ── VIEW menu ───────────────────────────────────────────────────────────
@@ -1203,14 +1255,16 @@ function _snapPanelsToEdges() {
     const brushH = Math.max(60,  AVAIL - toolsH);
     const facH   = Math.max(100, Math.floor(AVAIL * 0.38));
     const cityH  = Math.max(80,  Math.floor(AVAIL * 0.34));
-    const trigH  = Math.max(50,  AVAIL - facH - cityH);
+    const trigH  = Math.max(50,  Math.floor(AVAIL * 0.10));
+    const dipH   = Math.max(80,  AVAIL - facH - cityH - trigH);
 
     const ids = {
-        tools:    { id: "se-win-tools",    x: 0,   y: TOP,             w: LW, h: toolsH },
-        brush:    { id: "se-win-brush",    x: 0,   y: TOP + toolsH,    w: LW, h: brushH },
-        factions: { id: "se-win-factions", x: RX,  y: TOP,             w: RW, h: facH   },
-        cities:   { id: "se-win-cities",   x: RX,  y: TOP + facH,      w: RW, h: cityH  },
-        triggers: { id: "se-win-triggers", x: RX,  y: TOP + facH + cityH, w: RW, h: trigH }
+        tools:    { id: "se-win-tools",     x: 0,   y: TOP,                        w: LW, h: toolsH },
+        brush:    { id: "se-win-brush",     x: 0,   y: TOP + toolsH,               w: LW, h: brushH },
+        factions: { id: "se-win-factions",  x: RX,  y: TOP,                        w: RW, h: facH   },
+        cities:   { id: "se-win-cities",    x: RX,  y: TOP + facH,                 w: RW, h: cityH  },
+        triggers: { id: "se-win-triggers",  x: RX,  y: TOP + facH + cityH,         w: RW, h: trigH  },
+        diplomacy:{ id: "se-win-diplomacy", x: RX,  y: TOP + facH + cityH + trigH, w: RW, h: dipH   }
     };
     Object.values(ids).forEach(({ id, x, y, w, h }) => {
         const el = document.getElementById(id);
@@ -1226,7 +1280,7 @@ function _snapPanelsLeft() {
     const W = window.innerWidth, H = window.innerHeight;
     const TOP = MENU_H, BOT = 22, AVAIL = H - TOP - BOT;
     const PW = Math.min(210, Math.floor(W * 0.20));
-    const visIds = ["se-win-tools","se-win-brush","se-win-factions","se-win-cities","se-win-triggers"]
+    const visIds = ["se-win-tools","se-win-brush","se-win-factions","se-win-cities","se-win-triggers","se-win-diplomacy"]
         .filter(id => { const el = document.getElementById(id); return el && el.style.display !== "none"; });
     const perH = Math.floor(AVAIL / (visIds.length || 1));
     visIds.forEach((id, i) => {
@@ -1240,7 +1294,7 @@ function _snapPanelsRight() {
     const TOP = MENU_H, BOT = 22, AVAIL = H - TOP - BOT;
     const PW = Math.min(270, Math.floor(W * 0.22));
     const RX = W - PW;
-    const visIds = ["se-win-tools","se-win-brush","se-win-factions","se-win-cities","se-win-triggers"]
+    const visIds = ["se-win-tools","se-win-brush","se-win-factions","se-win-cities","se-win-triggers","se-win-diplomacy"]
         .filter(id => { const el = document.getElementById(id); return el && el.style.display !== "none"; });
     const perH = Math.floor(AVAIL / (visIds.length || 1));
     visIds.forEach((id, i) => {
@@ -1250,7 +1304,7 @@ function _snapPanelsRight() {
 }
 
 function _resetPanelPositions() {
-    ["se-win-tools","se-win-brush","se-win-factions","se-win-cities","se-win-triggers"].forEach(id => {
+    ["se-win-tools","se-win-brush","se-win-factions","se-win-cities","se-win-triggers","se-win-diplomacy"].forEach(id => {
         const el = document.getElementById(id);
         if (el) el.style.display = "flex";
     });
@@ -1363,6 +1417,14 @@ function _buildEditor() {
         content: _buildTriggersPanel()
     });
     root.appendChild(trigWin.root);
+
+    // Diplomacy panel (right, below triggers) — set launch-time faction relations
+    const dipWin = WindowManager.create({
+        id: "se-win-diplomacy", title: "⚔ Diplomacy",
+        x: window.innerWidth - 270, y: MENU_H + 680, w: 270, h: 260,
+        content: _buildDiplomacyPanel()
+    });
+    root.appendChild(dipWin.root);
 
     // Navigation panel — mobile D-pad + zoom buttons
     const navWin = WindowManager.create({
@@ -1521,8 +1583,8 @@ function _renderFactionPanel(wrap) {
         const row = document.createElement("div");
         row.style.cssText = "border-bottom:1px dotted #444;padding:5px 0;";
         const cnt = state.scenario.cities.filter(c => c.faction === fName).length;
-        const isLocked = fName === "Player's Kingdom";
-        const isUndeletable = isLocked || fName === "Bandits";
+        const isLocked = false;        // no faction is name-locked in the editor
+        const isUndeletable = false;   // all factions including Player & Bandits are deletable
 
         const uniqueOpts = ['<option value="">— None —</option>']
             .concat(ALL_TROOP_TYPES.map(u =>
@@ -1539,7 +1601,7 @@ function _renderFactionPanel(wrap) {
                 <input type="color" data-fac-color="${fName}" value="${fData.color}" style="width:24px;height:18px;border:0;background:transparent;cursor:pointer;" title="Pick faction colour (architecture auto-matches nearest built-in style)">
                 <input type="text" data-fac-rename="${fName}" value="${_escapeAttr(fName)}" ${isLocked ? "disabled" : ""}
                        style="flex:1;font-weight:bold;font-size:11px;background:#0e1218;color:#f5d76e;border:1px solid #4a8fa8;padding:1px 3px;">
-                <button data-act="del" ${isUndeletable ? "disabled" : ""}
+                <button data-act="del"
                         style="padding:0 5px;background:#3a1a1a;color:#ffaaaa;border:1px solid #7a3a3a;cursor:pointer;font-size:10px;">✗</button>
             </div>
             <div style="display:flex;align-items:center;gap:6px;font-size:10px;color:#8aa;margin-top:3px;">
@@ -1588,14 +1650,22 @@ function _renderFactionPanel(wrap) {
             state.scenario.cities.forEach(c => { if (c.faction === oldName) c.faction = newName; });
             // FIX: keep live window.FACTIONS in sync so rename is immediately
             // visible in the diplomacy table without requiring a full launch.
-            if (window.FACTIONS && window.FACTIONS[oldName] && oldName !== "Bandits" && oldName !== "Player's Kingdom") {
+            if (window.FACTIONS && window.FACTIONS[oldName]) {
                 window.FACTIONS[newName] = window.FACTIONS[oldName];
                 delete window.FACTIONS[oldName];
                 if (typeof window.initDiplomacy === 'function') {
                     window.initDiplomacy(window.FACTIONS);
                 }
             }
-            _renderFactionPanel(); _renderCityPanel();
+            // Migrate initialDiplomacy keys
+            if (state.scenario.initialDiplomacy) {
+                const dip = state.scenario.initialDiplomacy;
+                if (dip[oldName]) { dip[newName] = dip[oldName]; delete dip[oldName]; }
+                Object.keys(dip).forEach(k => {
+                    if (dip[k][oldName] !== undefined) { dip[k][newName] = dip[k][oldName]; delete dip[k][oldName]; }
+                });
+            }
+            _renderFactionPanel(); _renderCityPanel(); _renderDiplomacyPanel();
         };
     });
     wrap.querySelectorAll("select[data-fac-unique]").forEach(sel => {
@@ -1637,19 +1707,21 @@ function _renderFactionPanel(wrap) {
             if (!confirm(`Delete faction "${fName}" and all of its cities?`)) return;
             delete state.scenario.factions[fName];
             state.scenario.cities = state.scenario.cities.filter(c => c.faction !== fName);
-            // FIX: keep live window.FACTIONS in sync so the diplomacy table
-            // immediately reflects the deletion without requiring a full launch.
-            if (window.FACTIONS && fName !== "Bandits" && fName !== "Player's Kingdom") {
-                delete window.FACTIONS[fName];
-                if (typeof window.initDiplomacy === 'function') {
-                    window.initDiplomacy(window.FACTIONS);
-                }
+            // Remove this faction from initialDiplomacy too
+            if (state.scenario.initialDiplomacy) {
+                delete state.scenario.initialDiplomacy[fName];
+                Object.values(state.scenario.initialDiplomacy).forEach(row => delete row[fName]);
             }
-            _renderFactionPanel(); _renderCityPanel();
+            // Keep live window.FACTIONS in sync
+            if (window.FACTIONS && window.FACTIONS[fName]) {
+                delete window.FACTIONS[fName];
+                if (typeof window.initDiplomacy === 'function') window.initDiplomacy(window.FACTIONS);
+            }
+            _renderFactionPanel(); _renderCityPanel(); _renderDiplomacyPanel();
         };
     });
 
-    // Action buttons
+
     const actions = document.createElement("div");
     actions.style.cssText = "margin-top:8px;display:flex;flex-direction:column;gap:4px;";
     actions.innerHTML = `
@@ -1673,7 +1745,7 @@ function _renderFactionPanel(wrap) {
             cityCount: 4,
             uniqueTroop: ""
         };
-        _renderFactionPanel();
+        _renderFactionPanel(); _renderDiplomacyPanel();
     };
     actions.querySelector("#se-fac-repop").onclick = () => {
         if (confirm("This will REPLACE all cities with a fresh auto-population. Continue?")) {
@@ -1684,7 +1756,147 @@ function _renderFactionPanel(wrap) {
     };
 }
 
-// ── CITY PANEL ──────────────────────────────────────────────────────────────
+// ── DIPLOMACY PANEL ─────────────────────────────────────────────────────────
+// Shows every unique faction pair with an Ally / Neutral / Enemy dropdown.
+// Reads/writes state.scenario.initialDiplomacy.
+// Re-rendered by _renderFactionPanel() so it stays in sync after rename/add/delete.
+function _buildDiplomacyPanel() {
+    const wrap = document.createElement("div");
+    wrap.id = "se-diplomacy-panel-body";
+    _renderDiplomacyPanel(wrap);
+    return wrap;
+}
+
+// Map display values ↔ stored values (mirrors faction_dynamics.js relations)
+function _dipDisplayToRaw(display) {
+    if (display === "Ally")   return "Ally";
+    if (display === "Enemy")  return "War";
+    return "Peace"; // Neutral
+}
+function _dipRawToDisplay(raw) {
+    if (raw === "Ally") return "Ally";
+    if (raw === "War")  return "Enemy";
+    return "Neutral";
+}
+function _getDipRel(a, b) {
+    const d = state.scenario.initialDiplomacy || {};
+    const raw = (d[a] && d[a][b]) || (d[b] && d[b][a]) || "Peace";
+    return _dipRawToDisplay(raw);
+}
+function _setDipRel(a, b, display) {
+    if (!state.scenario.initialDiplomacy) state.scenario.initialDiplomacy = {};
+    const raw = _dipDisplayToRaw(display);
+    if (!state.scenario.initialDiplomacy[a]) state.scenario.initialDiplomacy[a] = {};
+    if (!state.scenario.initialDiplomacy[b]) state.scenario.initialDiplomacy[b] = {};
+    state.scenario.initialDiplomacy[a][b] = raw;
+    state.scenario.initialDiplomacy[b][a] = raw;
+}
+
+function _renderDiplomacyPanel(wrap) {
+    if (!wrap) wrap = document.getElementById("se-diplomacy-panel-body");
+    if (!wrap) return;
+    wrap.innerHTML = "";
+
+    if (!state.scenario) {
+        wrap.innerHTML = '<div style="color:#8aa;font-size:10px;padding:4px;">No scenario loaded.</div>';
+        return;
+    }
+
+    const factions = _orderedFactions(state.scenario);
+    if (factions.length < 2) {
+        wrap.innerHTML = '<div style="color:#8aa;font-size:10px;padding:4px;">Need at least 2 factions.</div>';
+        return;
+    }
+
+    const hint = document.createElement("div");
+    hint.style.cssText = "color:#8aa;font-size:10px;padding:2px 0 6px 0;";
+    hint.textContent = "Set starting diplomacy at scenario launch. Bandits are always hostile.";
+    wrap.appendChild(hint);
+
+    const REL_COLORS = { Ally: "#4aafd8", Neutral: "#8aa", Enemy: "#d44" };
+
+    // Generate every unique pair (i < j)
+    for (let i = 0; i < factions.length; i++) {
+        for (let j = i + 1; j < factions.length; j++) {
+            const [nameA, dataA] = factions[i];
+            const [nameB, dataB] = factions[j];
+
+            const curRel = _getDipRel(nameA, nameB);
+
+            const row = document.createElement("div");
+            row.style.cssText = "display:flex;align-items:center;gap:4px;padding:3px 2px;border-bottom:1px dotted #333;";
+
+            // Faction A dot + name
+            const dotA = document.createElement("span");
+            dotA.style.cssText = `width:8px;height:8px;background:${dataA.color};border:1px solid #000;display:inline-block;flex-shrink:0;`;
+            const lblA = document.createElement("span");
+            lblA.style.cssText = "font-size:10px;max-width:70px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
+            lblA.title = nameA;
+            lblA.textContent = nameA;
+
+            const sep = document.createElement("span");
+            sep.style.cssText = "font-size:9px;color:#5a7a9a;flex-shrink:0;";
+            sep.textContent = "↔";
+
+            // Faction B dot + name
+            const dotB = document.createElement("span");
+            dotB.style.cssText = `width:8px;height:8px;background:${dataB.color};border:1px solid #000;display:inline-block;flex-shrink:0;`;
+            const lblB = document.createElement("span");
+            lblB.style.cssText = "font-size:10px;max-width:70px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;";
+            lblB.title = nameB;
+            lblB.textContent = nameB;
+
+            // Relation select
+            const sel = document.createElement("select");
+            sel.style.cssText = `background:#0e1218;color:${REL_COLORS[curRel]};border:1px solid #4a8fa8;font-size:10px;padding:1px 2px;flex-shrink:0;`;
+            ["Ally", "Neutral", "Enemy"].forEach(opt => {
+                const o = document.createElement("option");
+                o.value = opt;
+                o.textContent = opt;
+                o.style.color = REL_COLORS[opt];
+                if (opt === curRel) o.selected = true;
+                sel.appendChild(o);
+            });
+            sel.onchange = () => {
+                _setDipRel(nameA, nameB, sel.value);
+                sel.style.color = REL_COLORS[sel.value] || "#cfd8dc";
+            };
+
+            row.appendChild(dotA); row.appendChild(lblA);
+            row.appendChild(sep);
+            row.appendChild(dotB); row.appendChild(lblB);
+            row.appendChild(sel);
+            wrap.appendChild(row);
+        }
+    }
+
+    // Quick-set buttons
+    const quickRow = document.createElement("div");
+    quickRow.style.cssText = "display:flex;gap:4px;margin-top:8px;flex-wrap:wrap;";
+    [
+        { label: "All Neutral", action: () => {
+            factions.forEach(([a], i) => factions.slice(i+1).forEach(([b]) => _setDipRel(a, b, "Neutral")));
+            _renderDiplomacyPanel();
+        }},
+        { label: "All Ally",    action: () => {
+            factions.forEach(([a], i) => factions.slice(i+1).forEach(([b]) => _setDipRel(a, b, "Ally")));
+            _renderDiplomacyPanel();
+        }},
+        { label: "All Enemy",   action: () => {
+            factions.forEach(([a], i) => factions.slice(i+1).forEach(([b]) => _setDipRel(a, b, "Enemy")));
+            _renderDiplomacyPanel();
+        }}
+    ].forEach(({ label, action }) => {
+        const btn = document.createElement("button");
+        btn.textContent = label;
+        btn.style.cssText = "padding:3px 8px;background:#1a3a5c;color:#cfd8dc;border:1px solid #4a8fa8;cursor:pointer;font-size:10px;";
+        btn.onclick = action;
+        quickRow.appendChild(btn);
+    });
+    wrap.appendChild(quickRow);
+}
+
+
 function _buildCityPanel() {
     const wrap = document.createElement("div");
     wrap.id = "se-city-panel-body";
@@ -1848,50 +2060,25 @@ function _buildNavPanel() {
     return wrap;
 }
 
-function _buildTriggersPanel() {
-    const wrap = document.createElement("div");
-    wrap.innerHTML = `
-        <button id="se-trig-open" style="width:100%;padding:5px;background:#1a3a5c;color:#cfd8dc;border:1px solid #4a8fa8;cursor:pointer;">
-            Open Triggers Editor (placeholder)
-        </button>
-    `;
-    setTimeout(() => {
-        wrap.querySelector("#se-trig-open").onclick = () => {
-            // Placeholder modal for future trigger logic
-            const m = document.createElement("div");
-            Object.assign(m.style, {
-                position: "fixed", inset: "0", background: "rgba(0,0,0,0.7)",
-                display: "flex", alignItems: "center", justifyContent: "center",
-                zIndex: "20000"
-            });
-            m.innerHTML = `
-                <div style="background:#262e3a;color:#cfd8dc;padding:20px;border:2px solid #4a8fa8;width:560px;max-width:90vw;font-family:Tahoma,sans-serif;">
-                    <h2 style="color:#f5d76e;margin-top:0;">Trigger Editor</h2>
-                    <p>Triggers will let you script in-game events (e.g. "When player enters region X, spawn army Y").
-                       This panel is a placeholder — trigger logic will be added in a future patch.</p>
-                    <p style="color:#8aa;font-size:0.9em;">Triggers are stored in <code>scenario.triggers[]</code>
-                       and saved with the rest of the document. The runtime hook in
-                       <code>scenario_update.js</code> already calls <code>ScenarioRuntime.fireTrigger(name, ctx)</code>
-                       — connect your logic there.</p>
-                    <textarea id="se-trig-raw" rows="6" style="width:100%;font-family:monospace;font-size:11px;">${JSON.stringify(state.scenario.triggers, null, 2)}</textarea>
-                    <div style="text-align:right;margin-top:10px;">
-                        <button id="se-trig-save" style="padding:6px 14px;background:#1a3a5c;color:#a8d8ea;border:1px solid #4a8fa8;cursor:pointer;">Save</button>
-                        <button id="se-trig-close" style="padding:6px 14px;background:#444;color:#fff;border:1px solid #666;cursor:pointer;">Close</button>
-                    </div>
-                </div>
-            `;
-            document.body.appendChild(m);
-            m.querySelector("#se-trig-save").onclick = () => {
-                try {
-                    state.scenario.triggers = JSON.parse(m.querySelector("#se-trig-raw").value);
-                    m.remove();
-                } catch (e) { alert("Invalid JSON: " + e.message); }
-            };
-            m.querySelector("#se-trig-close").onclick = () => m.remove();
-        };
-    }, 0);
-    return wrap;
-}
+  function _buildTriggersPanel() {
+              const wrap = document.createElement("div");
+              wrap.innerHTML = `
+                  <button id="se-trig-open" style="width:100%;padding:8px;
+                      background:#1a3a5c;color:#cfd8dc;border:1px solid #4a8fa8;
+                     cursor:pointer;font-weight:bold;">
+                     ⚡ Open Trigger Editor
+                 </button>`;
+             setTimeout(() => {
+                 wrap.querySelector("#se-trig-open").onclick = () => {
+                     if (window.ScenarioTriggers && window.ScenarioTriggers.openEditor) {
+                          window.ScenarioTriggers.openEditor(window.ScenarioEditor._state.scenario);
+                      } else {
+                          alert("ScenarioTriggers module not loaded.");
+                      }
+                  };
+              }, 0);
+              return wrap;
+          }
 
 // ╔══════════════════════════════════════════════════════════════════════════╗
 // ║ PAINTING / RENDERING                                                     ║
@@ -2330,6 +2517,14 @@ function _drawEditor() {
         ctx.stroke();
     }
 
+    // ── Post-draw hook: scenario_tools_panel.js registers here so its NPC/Player
+    //    overlay renders INSIDE this save/scale/translate block (same coordinate
+    //    space as cities above) rather than racing via a separate setInterval.
+    if (typeof state._postDrawHook === "function") {
+        try { state._postDrawHook(ctx, state.cam); }
+        catch (_e) { /* silently ignore overlay errors so editor never freezes */ }
+    }
+
     ctx.restore();
 }
 
@@ -2375,6 +2570,16 @@ function _load() {
                 _paintAllTiles();
                 _renderFactionPanel();
                 _renderCityPanel();
+                _renderDiplomacyPanel();
+                // FIX (Bug 2): Ensure new scenario fields are initialised so
+                // ScenarioToolsPanel can immediately read importantNpcs / playerSetup.
+                if (!Array.isArray(state.scenario.importantNpcs))    state.scenario.importantNpcs = [];
+                if (!state.scenario.playerSetup || typeof state.scenario.playerSetup !== "object") state.scenario.playerSetup = {};
+                if (!state.scenario.proceduralAITendency || typeof state.scenario.proceduralAITendency !== "object") state.scenario.proceduralAITendency = {};
+                if (!state.scenario.initialDiplomacy || typeof state.scenario.initialDiplomacy !== "object") state.scenario.initialDiplomacy = {};
+                // Update menu title to reflect newly loaded scenario name
+                const titleEl = document.getElementById("se-title-text");
+                if (titleEl) titleEl.textContent = "Scenario: " + (state.scenario.meta.name || "—");
                 // Center camera at default zoom
                 {
                     const mapW = state.scenario.dimensions.tilesX * TILE_PX;
@@ -2383,7 +2588,9 @@ function _load() {
                     state.cam.x = (mapW / 2) - (state.canvas.width  / 2 / state.cam.zoom);
                     state.cam.y = (mapH / 2) - (state.canvas.height / 2 / state.cam.zoom);
                 }
-                console.log("[ScenarioEditor] Loaded:", state.scenario.meta.name);
+                console.log("[ScenarioEditor] Loaded:", state.scenario.meta.name,
+                            "— importantNpcs:", state.scenario.importantNpcs.length,
+                            "— playerSetup:", JSON.stringify(state.scenario.playerSetup).slice(0,80));
             } catch (e) {
                 alert("Failed to parse scenario file:\n" + e.message);
             }
@@ -2416,7 +2623,8 @@ function _restoreScenarioFromCompact(raw) {
     });
 
     state.scenario = {
-        version: raw.version || 1,
+        // Bump to 3 so scenario_update.js doesn't re-migrate on launch.
+        version: Math.max(raw.version || 1, 3),
         meta: raw.meta || { name: "Loaded Scenario" },
         dimensions: raw.dimensions,
         factions: migratedFactions,
@@ -2425,7 +2633,29 @@ function _restoreScenarioFromCompact(raw) {
         triggers: raw.triggers || [],
         mapData: raw.mapData || "blank",
         cityStrategy: raw.cityStrategy || "random",
-        seed: raw.seed
+        seed: raw.seed,
+        // ── Story & cinematics (Step 4, Step 7, Step 10) ─────────────────────
+        // These were silently dropped in older saves. Every field is explicitly
+        // preserved so the editor round-trips cleanly.
+        movies:               Array.isArray(raw.movies)           ? raw.movies          : [],
+        storyIntro:           (raw.storyIntro && typeof raw.storyIntro === "object") ? raw.storyIntro : {
+                                  enabled: false, fadeMs: 1200, fadeColor: "#000000",
+                                  titleCard: { title: "", subtitle: "", ms: 3500 },
+                                  art: "", artMs: 5000, kenburns: false, lines: [],
+                                  letterbox: true, typewriterCps: 0 },
+        storyQuests:          Array.isArray(raw.storyQuests)      ? raw.storyQuests     : [],
+        parlerLines:          (raw.parlerLines && typeof raw.parlerLines === "object") ? raw.parlerLines
+                                : { Civilian:[], Patrol:[], Military:[], Trader:[], Bandit:[], Special:[] },
+        // ── Scenario logic ────────────────────────────────────────────────────
+        scenarioVars:         (raw.scenarioVars && typeof raw.scenarioVars === "object") ? raw.scenarioVars : {},
+        winLose:              (raw.winLose && typeof raw.winLose === "object") ? raw.winLose : { winRules:[], loseRules:[] },
+        timeline:             Array.isArray(raw.timeline)         ? raw.timeline        : [],
+        // ── Entity setup ──────────────────────────────────────────────────────
+        importantNpcs:        Array.isArray(raw.importantNpcs)    ? raw.importantNpcs   : [],
+        playerSetup:          (raw.playerSetup && typeof raw.playerSetup === "object") ? raw.playerSetup : {},
+        proceduralAITendency: (raw.proceduralAITendency && typeof raw.proceduralAITendency === "object") ? raw.proceduralAITendency : {},
+        // ── Diplomacy (Step 1) ─────────────────────────────────────────────────
+        initialDiplomacy:     (raw.initialDiplomacy && typeof raw.initialDiplomacy === "object") ? raw.initialDiplomacy : {}
     };
 }
 
@@ -2574,8 +2804,50 @@ console.log("[ScenarioEditor] scenario_menu_adder.js — module ready.");
                             i++;
                         });
 
-                        const scenario = { ...raw, tiles, factions: migratedFactions,
-                                           cityStrategy: raw.cityStrategy || "random" };
+                        // ── Pre-expand the player roster ─────────────────────────────────
+                        // The JSON stores a compact CSV blueprint: ["Spearman","Archer"].
+                        // A secondary _applyPlayerSetup safety-net in scenario_update.js
+                        // re-applies playerSetup after initGame and, without expansion,
+                        // would literally set player.troops = roster.length (= 2 instead
+                        // of 80). We expand here so the scenario passed to ScenarioRuntime
+                        // already carries the full {type,exp}[] army array.
+                        let playerSetupResolved = raw.playerSetup || {};
+                        if (
+                            playerSetupResolved &&
+                            typeof window._expandScenarioRoster === "function"
+                        ) {
+                            const ps = playerSetupResolved;
+                            const rawTypes = (Array.isArray(ps.roster) ? ps.roster : [])
+                                .map(t => (t && typeof t === "object" && t.type)
+                                    ? t.type : String(t || "").trim())
+                                .filter(Boolean);
+                            if (rawTypes.length > 0) {
+                                const total = (typeof ps.troops === "number" && ps.troops > 0)
+                                    ? ps.troops : rawTypes.length;
+                                const expanded = window._expandScenarioRoster(
+                                    rawTypes, total, ps.rosterMode || "distribute"
+                                );
+                                if (expanded && expanded.length > 0) {
+                                    playerSetupResolved = {
+                                        ...ps,
+                                        roster: expanded,
+                                        troops: expanded.length
+                                    };
+                                    console.log(
+                                        "[ScenarioEditor] Player roster pre-expanded:",
+                                        expanded.length, "troops | mode:", ps.rosterMode || "distribute"
+                                    );
+                                }
+                            }
+                        }
+
+                        const scenario = {
+                            ...raw,
+                            tiles,
+                            factions: migratedFactions,
+                            cityStrategy: raw.cityStrategy || "random",
+                            playerSetup: playerSetupResolved
+                        };
 
                         // Hide menu UI, show loading screen
                         const menuUI = document.getElementById("main-menu-ui-container");

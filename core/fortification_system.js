@@ -1,4 +1,3 @@
-
 // ============================================================================
 // GLOBAL DATA STORAGE
 // ============================================================================
@@ -307,6 +306,26 @@ if (minDistToEdge <= wallThick - 3) {
             for (let iy = ry; iy < ry + towerSize; iy++) {
                 if (!grid[ix] || grid[ix][iy] === undefined) continue;
                 grid[ix][iy] = 7; 
+            }
+        }
+
+        // ── FIX: EXTEND TILE-7 NORTH TO COVER VISUAL ROOF OVERHANG ──
+        // renderDynamicTowers shifts the entire tower draw UP by zBase=22px (≈3 tiles at
+        // CITY_TILE_SIZE=8). The grid only marks tile-7 over [ry..ry+towerSize-1], leaving
+        // tile-8/9 rows just north of ry visually covered by the roof but physically
+        // passable. Marking those rows tile-7 here gives the grid-level secondary defence
+        // (isCityCollision's pixel check above is the primary fix).
+        // Only overwrite walkable wall tiles (8, 9, 12) — never stone (6) or ground (0/1/5).
+        {
+            const roofOverhangTiles = Math.ceil(22 / CITY_TILE_SIZE); // zBase=22 → 3 tiles
+            for (let extra = 1; extra <= roofOverhangTiles; extra++) {
+                for (let ix = rx; ix < rx + towerSize; ix++) {
+                    let iy = ry - extra;
+                    if (!grid[ix] || grid[ix][iy] === undefined) continue;
+                    if (grid[ix][iy] === 8 || grid[ix][iy] === 9 || grid[ix][iy] === 12) {
+                        grid[ix][iy] = 7;
+                    }
+                }
             }
         }
 

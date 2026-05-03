@@ -1,4 +1,3 @@
-
 function drawCavalryUnit(ctx, x, y, moving, frame, factionColor, isAttacking, type, side, unitName, isFleeing, cooldown, unitAmmo, unit, reloadProgress) {
 	
 	if (!unit || !unit.stats) {
@@ -43,6 +42,10 @@ function drawCavalryUnit(ctx, x, y, moving, frame, factionColor, isAttacking, ty
   
 	
     if (unitName === "PLAYER" || unitName === "Commander") armorVal = Math.max(armorVal, 10);
+
+    // Scenario 1 (Hakata Bay): player-side units use Japanese visuals regardless of factionColor.
+    // Mirrors the same flag used for the Yumi bow. Has zero effect in sandbox.
+    const isJapan = (factionColor === "#c2185b") || (window.__campaignStory1Active && unit && unit.side === 'player');
 
     let animFrame = frame || (Date.now() / 100);
     // dir is always 1 — ctx.scale(facingDir) above handles all mirroring.
@@ -693,8 +696,8 @@ ctx.stroke();
             ctx.beginPath(); ctx.moveTo(1.5, i); ctx.lineTo(1.5, i+2); ctx.stroke();
         }
         
-        // Square Pauldrons for Cavalry Rider
-        ctx.fillStyle = factionColor; 
+        // Square Pauldrons for Cavalry Rider — crimson if Japanese scenario player unit
+        ctx.fillStyle = isJapan ? "#c2185b" : factionColor; 
         ctx.strokeStyle = "#1a1a1a"; ctx.lineWidth = 1;
         ctx.fillRect(-5.5, -8.5, 2.5, 3.5); ctx.strokeRect(-5.5, -8.5, 2.5, 3.5); // Left
         ctx.fillRect(3, -8.5, 2.5, 3.5); ctx.strokeRect(3, -8.5, 2.5, 3.5);       // Right
@@ -710,8 +713,8 @@ ctx.stroke();
         ctx.beginPath(); ctx.moveTo(-3, -1); ctx.lineTo(3, -1); ctx.lineTo(2, -8); ctx.lineTo(-2, -8);
         ctx.closePath(); ctx.fill(); ctx.stroke();
 
-        // Square Pauldrons for Medium Rider (Faction Color, No Lines)
-        ctx.fillStyle = factionColor; 
+        // Square Pauldrons for Medium Rider — crimson if Japanese scenario player unit
+        ctx.fillStyle = isJapan ? "#c2185b" : factionColor; 
         ctx.strokeStyle = "#1a1a1a"; ctx.lineWidth = 1;
         ctx.fillRect(-5, -8, 2, 3); ctx.strokeRect(-5, -8, 2, 3); // Left
         ctx.fillRect(3, -8, 2, 3); ctx.strokeRect(3, -8, 2, 3);   // Right
@@ -732,6 +735,8 @@ if (isCommander) {
     ctx.beginPath(); ctx.moveTo(-2.5, -12); ctx.lineTo(2.5, -12); ctx.lineTo(2.5, -8); ctx.lineTo(-2.5, -8); ctx.fill();
 
     let cmdColor = (factionColor || "").toLowerCase();
+    // Scenario 1 (Hakata Bay): player commanders wear the Yamato Kabuto regardless of faction.
+    if (isJapan) cmdColor = "#c2185b";
 
     // Reusable subtle shadow for depth instead of cartoon outlines
     ctx.strokeStyle = "rgba(0,0,0,0.35)"; 
@@ -1146,7 +1151,8 @@ break;
 
     } else if (armorVal >= 25) {
         // High Tier Heavy Helmets
-        if (factionColor === "#c2185b") { 
+        if (factionColor === "#c2185b" || isJapan) { 
+            // Yamato / Hakata Bay player → Kabuto with gold horn accents
             ctx.fillStyle = "#212121"; ctx.beginPath(); ctx.arc(0, -12, 3.5, Math.PI, 0); ctx.fill();
             ctx.fillRect(-4, -12, 8, 1.5);
             ctx.strokeStyle = "#fbc02d"; ctx.lineWidth = 1;
@@ -1438,7 +1444,7 @@ ctx.save();
 ctx.translate(-5, 0 + b);
 ctx.rotate(Math.PI / 6);
 
-let isJapan = (factionColor === "#c2185b");
+// isJapan already declared at top of function
 
 if (isJapan) {
     // Japan: Long asymmetrical Yumi slung on the back
@@ -1554,7 +1560,7 @@ ctx.translate(handX, handY);
 ctx.rotate(bowKhatra); 
 ctx.translate(-handX, -handY);
 
-let isJapan = (factionColor === "#c2185b");
+// isJapan already declared at top of function
 
 // Asymmetric sizing for Yumi vs Symmetric for Nomad bows
 let topTipY = isJapan ? handY - 24 : handY - 8; 
@@ -1920,5 +1926,4 @@ let gLegSwing = moving ? Math.sin(animFrame * 0.4) * 2 : 0;
 
     ctx.restore(); // 2. Restores the Rider's 'bob' and elevation layer 
 
-}  
- 
+}

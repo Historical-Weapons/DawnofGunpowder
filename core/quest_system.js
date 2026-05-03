@@ -1387,6 +1387,91 @@ window.QuestSystem = (function () {
             </div>`;
         }
 
+        // ── Story Objectives section: reads from StoryQuests (story_quest_patch.js) ──
+        // Shows the currently active story waypoint quest plus a history of
+        // completed ones from both the catalogue and the trigger-set stack.
+        let storyObjectivesHTML = "";
+        if (window.StoryQuests && typeof window.StoryQuests.current === "function") {
+            const sq = window.StoryQuests;
+            const activeStoryQ  = sq.current();
+            const catalogue     = (typeof sq.getCatalogue === "function") ? sq.getCatalogue() : [];
+            const completedIds  = new Set(
+                (typeof sq.list === "function") ? sq.list()
+                    .filter(e => e.event === "complete")
+                    .map(e => e.id) : []
+            );
+
+            // Build story objective cards
+            let storyCards = "";
+
+            // Active story waypoint (from ScenarioTriggers story_quest_set actions)
+            if (activeStoryQ) {
+                storyCards += `
+                <div style="background:rgba(0,0,0,0.45);
+                    border:1px solid rgba(244,215,110,0.25);
+                    border-left:3px solid #f5d76e;
+                    border-radius:4px;padding:10px 12px;margin-bottom:10px;">
+                    <div style="display:flex;justify-content:space-between;align-items:flex-start;">
+                        <div style="font-size:13px;font-weight:bold;color:#f5d76e;">
+                            🎯 ${activeStoryQ.title}
+                        </div>
+                        <div style="font-size:9px;color:#f5d76e;opacity:0.75;white-space:nowrap;margin-left:8px;">
+                            ACTIVE
+                        </div>
+                    </div>
+                    <div style="color:#d4b886;font-size:12px;margin-top:5px;line-height:1.4;">
+                        ${activeStoryQ.description || ""}
+                    </div>
+                    <div style="color:#888;font-size:11px;margin-top:5px;">
+                        📍 Waypoint: (${Math.round(activeStoryQ.x)}, ${Math.round(activeStoryQ.y)})
+                        &nbsp;·&nbsp; radius: ${activeStoryQ.radius} 
+                    </div>
+                </div>`;
+            }
+
+            // Catalogue quests (main + sub-quests from scenario.storyQuests[])
+            if (catalogue.length > 0) {
+                catalogue.forEach(q => {
+                    // Skip if already shown as the live active quest above
+                    if (activeStoryQ && q.id === activeStoryQ.id) return;
+                    const isDone = completedIds.has(q.id);
+                    const color  = isDone ? "#8bc34a" : "#888";
+                    const badge  = isDone ? "DONE"    : "PENDING";
+                    const icon   = q.isMain ? "⭐" : "📌";
+                    storyCards += `
+                    <div style="background:rgba(0,0,0,0.3);
+                        border:1px solid ${color}22;
+                        border-left:3px solid ${color};
+                        border-radius:4px;padding:9px 12px;margin-bottom:8px;opacity:${isDone?0.7:0.85};">
+                        <div style="display:flex;justify-content:space-between;align-items:flex-start;">
+                            <div style="font-size:12px;font-weight:bold;color:${color};">
+                                ${icon} ${q.title}
+                            </div>
+                            <div style="font-size:9px;color:${color};opacity:0.7;white-space:nowrap;margin-left:8px;">
+                                ${badge}
+                            </div>
+                        </div>
+                        ${q.description ? `<div style="color:#aaa;font-size:11px;margin-top:4px;line-height:1.35;">${q.description}</div>` : ""}
+                    </div>`;
+                });
+            }
+
+            if (!storyCards) {
+                storyCards = `<div style="color:#555;font-size:12px;padding:10px 0;">
+                    No story objectives active. Follow the scenario narrative.</div>`;
+            }
+
+            storyObjectivesHTML = `
+                <div style="font-size:10px;font-weight:bold;color:#f5d76e;
+                    text-transform:uppercase;letter-spacing:2px;
+                    border-bottom:1px solid #4a3a00;padding-bottom:6px;margin-bottom:12px;">
+                    ⭐ Story Objectives
+                </div>
+                ${storyCards}
+                <div style="height:1px;background:rgba(255,255,255,0.06);margin:14px 0 16px 0;"></div>
+            `;
+        }
+
         let activeHTML    = log.active.length === 0
             ? `<div style="color:#555;font-size:12px;padding:10px 0;">No active quests. Visit cities to find quest givers.</div>`
             : log.active.map(q => _card(q, "active")).join("");
@@ -1411,6 +1496,8 @@ window.QuestSystem = (function () {
             <!-- Body -->
             <div style="flex:1;overflow-y:auto;padding:16px;
                 scrollbar-width:thin;scrollbar-color:#5d4037 rgba(0,0,0,0.3);">
+
+                ${storyObjectivesHTML}
 
                 <div style="font-size:10px;font-weight:bold;color:#ffe600;
                     text-transform:uppercase;letter-spacing:2px;

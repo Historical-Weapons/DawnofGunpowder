@@ -41,26 +41,7 @@
 //        rewriting cities and re-skinning the worldMap tiles.
 //     4. save_system.js then applies any pending player save on top.
 //
-// OPTIONAL HOOK FOR FULL VISUAL FIDELITY
-//   To re-skin the bgCanvas (the rendered map image) when a scenario uses a
-//   custom-painted map, the engine needs to expose its bgCanvas.  Add this
-//   ONE LINE to `generateMap()` in `sandboxmode_overworld.js` near where it
-//   already exposes `cities_sandbox`:
-//
-//       window.__sandboxBgCanvas = bgCanvas;
-//       window.__sandboxBgCtx    = bgCtx;
-//
-//   (Both lines together are still effectively one tiny patch.)  Without this
-//   hook the worldMap collision/biome data still match the scenario, but the
-//   PAINTED background image will be the procedural one. Cities and faction
-//   borders will still be correct.
-//
-//   Example placement (overworld.js line ~1354):
-//       await setLoading(92, "Founding cities");
-//       window.__sandboxBgCanvas = bgCanvas;     // ← ADD
-//       window.__sandboxBgCtx    = bgCtx;        // ← ADD
-//       populateCities();
-//
+ 
 // =============================================================================
 
 window.ScenarioRuntime = (function () {
@@ -79,8 +60,79 @@ const rt = {
 };
 
 // ── Public: launch — main-menu and editor entry point ─────────────────────
+// ── Step 4: Scenario shape migration (v2 → v3) ──────────────────────────────
+// v2 had a single `storyIntro` field for the boot cinematic.
+// v3 introduces `movies[]` — an array of named movie sequences. movies[0]
+// is the boot intro by convention; others are triggered via `play_movie`.
+//
+// Migration logic:
+//   • If `movies` is missing or empty, build movies[0] from `storyIntro`.
+//   • storyIntro is preserved for back-compat with any external scenario
+//     module that still reads it. Both contain equivalent boot data.
+function _migrateScenarioShape(scenarioDoc) {
+    if (!scenarioDoc || typeof scenarioDoc !== "object") return;
+
+    // Only run once per scenario doc — flag in version.
+    if ((scenarioDoc.version | 0) >= 3) return;
+
+    const intro = scenarioDoc.storyIntro;
+    if (!Array.isArray(scenarioDoc.movies) || scenarioDoc.movies.length === 0) {
+        scenarioDoc.movies = [_movieFromLegacyIntro(intro || {}, "Intro")];
+        console.log("[ScenarioRuntime] Migration v2→v3: created movies[0] from legacy storyIntro " +
+                    "(" + (scenarioDoc.movies[0].items.length) + " item(s)).");
+    }
+    scenarioDoc.version = 3;
+}
+
+// Helper for migration. Mirrors scenario_triggers.js _movieFromLegacyIntro
+// in shape — kept duplicated here so the runtime module has no hard
+// dependency on the editor module being loaded first.
+function _movieFromLegacyIntro(intro, name) {
+    const m = {
+        id:       "movie_" + Date.now() + "_" + Math.floor(Math.random() * 9999),
+        name:     name || "Intro",
+        enabled:  intro && intro.enabled !== false,
+        items:    [],
+        letterbox:     intro && intro.letterbox !== false,
+        typewriterCps: (intro && typeof intro.typewriterCps === "number") ? intro.typewriterCps : 0,
+        fadeMs:        (intro && intro.fadeMs) || 1200,
+        fadeColor:     (intro && intro.fadeColor) || "#000000"
+    };
+    if (!intro) return m;
+    if (intro.fadeMs) {
+        m.items.push({ type: "fade", direction: "out", fadeMs: 0,
+                       fadeColor: intro.fadeColor || "#000000" });
+    }
+    if (intro.titleCard && intro.titleCard.title) {
+        m.items.push({ type: "title",
+                       title:    intro.titleCard.title,
+                       subtitle: intro.titleCard.subtitle || "",
+                       ms:       intro.titleCard.ms || 3500 });
+    }
+    if (intro.art) {
+        m.items.push({ type: "art",
+                       art:        intro.art,
+                       artMs:      intro.artMs || 5000,
+                       kenburns:   !!intro.kenburns,
+                       artCaption: intro.artCaption || "" });
+    }
+    if (Array.isArray(intro.lines)) {
+        intro.lines.forEach(ln => m.items.push(Object.assign({ type: "dialogue" }, ln)));
+    }
+    if (intro.fadeMs) {
+        m.items.push({ type: "fade", direction: "in",
+                       fadeMs: intro.fadeMs || 1200,
+                       fadeColor: intro.fadeColor || "#000000" });
+    }
+    return m;
+}
+
 function launch(scenarioDoc) {
     if (!scenarioDoc) { console.error("[ScenarioRuntime] No scenario provided."); return; }
+
+    // Step 4 migration: bump shape v2 → v3 and promote storyIntro → movies[0].
+    _migrateScenarioShape(scenarioDoc);
+
     rt.pending = scenarioDoc;
     rt.postInitHooked = false; // reset so _ensurePostInitHook always queues a fresh callback
 
@@ -219,9 +271,10 @@ function _applyToLiveEngine(scenarioDoc) {
         // diplomacy / NPC / troop systems.
         const scenarioFactionNames = new Set(Object.keys(scenarioDoc.factions));
         for (const existing of Object.keys(window.FACTIONS)) {
-            // Always preserve Bandits and Player's Kingdom even if the user
-            // disables them — many engine code paths assume they exist.
-            if (existing === "Bandits" || existing === "Player's Kingdom") continue;
+            // Always preserve Bandits and the Player faction (canonical "Player"
+            // OR legacy "Player's Kingdom") even if the user disables them —
+            // many engine code paths assume they exist.
+            if (existing === "Bandits" || existing === "Player" || existing === "Player's Kingdom") continue;
             if (!scenarioFactionNames.has(existing)) {
                 delete window.FACTIONS[existing];
             }
@@ -269,6 +322,28 @@ function _applyToLiveEngine(scenarioDoc) {
     _replaceCities(scenarioDoc, cities, W, H);
 
     // 5. Re-spawn NPCs from the new cities so traders/patrols come from scenario factions
+    // ── v3.1 FIX: Pre-apply startingNpcBans BEFORE initializeNPCs runs ──────
+    // initializeNPCs() already checks _isSpawnBanned() at every spawn call, BUT
+    // those bans are normally set by the t0_briefing trigger which fires AFTER
+    // NPC init. We read the scenario doc's startingNpcBans field (if present)
+    // and push it into window.__npcSpawnBans RIGHT NOW so the ban is active from
+    // the very first call to spawnNPCFromCity / spawnMongolHorde at init time.
+    if (scenarioDoc.startingNpcBans) {
+        if (!window.__npcSpawnBans) {
+            window.__npcSpawnBans = { factions: [], roles: [] };
+        }
+        const _sBans = scenarioDoc.startingNpcBans;
+        (_sBans.factions || []).forEach(f => {
+            if (!window.__npcSpawnBans.factions.includes(f))
+                window.__npcSpawnBans.factions.push(f);
+        });
+        (_sBans.roles || []).forEach(r => {
+            if (!window.__npcSpawnBans.roles.includes(r))
+                window.__npcSpawnBans.roles.push(r);
+        });
+        console.log("[ScenarioRuntime] Pre-init NPC spawn bans applied → factions:",
+            window.__npcSpawnBans.factions, "| roles:", window.__npcSpawnBans.roles);
+    }
     _respawnNPCsFromScenarioCities();
 
     // 6. Place player.
@@ -282,6 +357,16 @@ function _applyToLiveEngine(scenarioDoc) {
     if (typeof window.initDiplomacy === "function") {
         try { window.initDiplomacy(window.FACTIONS); }
         catch (err) { console.warn("[ScenarioRuntime] initDiplomacy failed:", err); }
+    }
+
+    // 6c. Apply the scenario's saved Initial Diplomacy matrix (Step 1).
+    //     This was set in the editor's Diplomacy panel: each cell is War/Peace/
+    //     Ally between two factions. setRelation() also keeps player.enemies
+    //     in sync when the player is on either side of the relation.
+    if (scenarioDoc.initialDiplomacy &&
+        typeof window.applyDiplomacyMatrix === "function") {
+        try { window.applyDiplomacyMatrix(scenarioDoc.initialDiplomacy); }
+        catch (err) { console.warn("[ScenarioRuntime] applyDiplomacyMatrix failed:", err); }
     }
 
     // 7. Save the active scenario for trigger lookup, etc.
@@ -892,7 +977,7 @@ const _ARCH_PALETTE = [
     { name: "High Plateau Kingdoms", hex: "#8d6e63" },
     { name: "Yamato Clans",          hex: "#c2185b" },
     { name: "Bandits",               hex: "#222222" },
-    { name: "Player's Kingdom",      hex: "#ffffff"  }
+    { name: "Player",                hex: "#ffffff"  }
 ];
 
 // Parse "#rrggbb" → [r, g, b] (0-255).  Handles 3- and 6-digit forms.
@@ -987,13 +1072,170 @@ function _respawnNPCsFromScenarioCities() {
 }
 
 // ── 6. Place player ─────────────────────────────────────────────────────────
+//
+// FIX (Story 1 player-not-updating bug):
+// This function originally ignored scenarioDoc.playerSetup entirely. It only
+// looked for a "Player's Kingdom" faction city and fell back to a random
+// land tile. That meant scenarios like Hakata Bay (which set PLAYER_SETUP
+// with explicit x/y/troops/faction) had their player overrides silently
+// dropped at world-apply time — the player ended up at Hakata City with
+// the sandbox-default 20 units, regardless of what the scenario said.
+//
+// Now we honor playerSetup FIRST. If the scenario specifies x/y, troops,
+// faction, or roster, we apply them directly to window.player here. Only
+// if no playerSetup is present do we fall back to the legacy city-anchor
+// behavior. This is the AUTHORITATIVE player setup — scenario_triggers.js
+// _applyPlayerSetup is the secondary safety-net that runs again later.
+// ╔══════════════════════════════════════════════════════════════════════════╗
+// ║ SHARED ROSTER EXPANSION HELPER                                           ║
+// ║                                                                          ║
+// ║ Converts a compact roster definition (unit-type list + total count) into ║
+// ║ the full {type, exp} array the engine expects.                           ║
+// ║                                                                          ║
+// ║ Two modes, controlled by ps.rosterMode:                                  ║
+// ║                                                                          ║
+// ║   "distribute" (default) — typeList defines the unit-type BLUEPRINT.     ║
+// ║     Unique types are extracted and the full `totalTroops` count is       ║
+// ║     filled with an even split ±20% random jitter.                       ║
+// ║     e.g. ["Archer","Spearman"] + troops=80 → ~40 Archers, ~40 Spearmen  ║
+// ║                                                                          ║
+// ║   "hard" — typeList is treated as the LITERAL exact roster.              ║
+// ║     Each entry in typeList = one troop.  Any gap between typeList.length ║
+// ║     and `totalTroops` is padded with Militia.                            ║
+// ║     e.g. ["Archer","Archer","Spearman"] + troops=80 → 3 explicit +      ║
+// ║     77 Militia.                                                           ║
+// ║                                                                          ║
+// ║ Returns an array of {type, exp:1} objects, or null if typeList is empty. ║
+// ║ Exposed as window._expandScenarioRoster so scenario_triggers.js can     ║
+// ║ use the same logic without duplicating it.                               ║
+// ╚══════════════════════════════════════════════════════════════════════════╝
+function _expandScenarioRoster(typeList, totalTroops, mode) {
+    if (!Array.isArray(typeList) || typeList.length === 0) return null;
+
+    // Normalize each entry to a plain string type name
+    const types = typeList
+        .map(t => (t && typeof t === "object" && t.type) ? t.type : String(t || "").trim())
+        .filter(Boolean);
+    if (types.length === 0) return null;
+
+    const total = Math.max(1, totalTroops || types.length);
+
+    // ── Hard mode: literal CSV → pad remainder with Militia ─────────────────
+    if (mode === "hard") {
+        const result = types.map(t => ({ type: t, exp: 1 }));
+        const need = total - result.length;
+        for (let i = 0; i < need; i++) result.push({ type: "Militia", exp: 1 });
+        if (result.length > total) result.splice(total);
+        return result;
+    }
+
+    // ── Distribute mode: extract unique types, fill evenly with ±20% jitter ─
+    const uniqueTypes = [...new Set(types)];
+    const n = uniqueTypes.length;
+    const base = Math.floor(total / n);
+
+    // Assign counts with jitter, clamp to ≥ 1
+    const counts = uniqueTypes.map(t => {
+        const jitter = Math.round(base * 0.2 * (Math.random() * 2 - 1));
+        return { type: t, count: Math.max(1, base + jitter) };
+    });
+
+    // Normalise sum to exactly `total`
+    let diff = total - counts.reduce((a, c) => a + c.count, 0);
+    for (let idx = 0; diff !== 0; idx = (idx + 1) % n) {
+        if (diff > 0) { counts[idx].count++; diff--; }
+        else if (counts[idx].count > 1) { counts[idx].count--; diff++; }
+    }
+
+    // Interleave types for variety (Archer, Spearman, Archer, Spearman, …)
+    const result = [];
+    const maxCount = Math.max(...counts.map(c => c.count));
+    for (let slot = 0; slot < maxCount; slot++) {
+        counts.forEach(c => {
+            if (slot < c.count) result.push({ type: c.type, exp: 1 });
+        });
+    }
+
+    // Final safety trim / pad (shouldn't be needed but guards edge cases)
+    while (result.length > total) result.pop();
+    while (result.length < total) {
+        result.push({ type: uniqueTypes[result.length % n], exp: 1 });
+    }
+    return result;
+}
+// Expose so scenario_triggers.js can use the same expansion logic
+window._expandScenarioRoster = _expandScenarioRoster;
+
 function _placePlayer(scenarioDoc, W, H) {
     if (typeof window.player === "undefined") return; // sandbox not loaded yet
-    const cities = window.cities_sandbox || [];
 
-    // Prefer Player's Kingdom city if one exists
-    let target = cities.find(c => c.faction === "Player's Kingdom");
+    const ps = (scenarioDoc && scenarioDoc.playerSetup) || null;
+
+    // ── Path A: scenario provides explicit playerSetup ─────────────────────
+    if (ps) {
+        // Editor saves xPct/yPct (0-1 fraction). Convert to world pixels using
+        // live world dimensions if absolute x/y are not already present.
+        if (typeof ps.x !== "number" && typeof ps.xPct === "number") {
+            ps.x = ps.xPct * W;
+        }
+        if (typeof ps.y !== "number" && typeof ps.yPct === "number") {
+            ps.y = ps.yPct * H;
+        }
+        if (typeof ps.x === "number") window.player.x = ps.x;
+        if (typeof ps.y === "number") window.player.y = ps.y;
+        if (typeof ps.faction === "string" && ps.faction) {
+            window.player.faction = ps.faction;
+        }
+        if (typeof ps.gold === "number")      window.player.gold      = ps.gold;
+        if (typeof ps.food === "number")      window.player.food      = ps.food;
+        if (typeof ps.hp === "number")        window.player.hp        = ps.hp;
+        if (typeof ps.maxHealth === "number") window.player.maxHealth = ps.maxHealth;
+        if (Array.isArray(ps.enemies)) window.player.enemies = ps.enemies.slice();
+
+        // ── Roster expansion ───────────────────────────────────────────────
+        // Normalise roster to a type-string array regardless of source format
+        // (array-of-strings, array-of-{type}-objects, or CSV string).
+        let rawTypes = null;
+        if (Array.isArray(ps.roster) && ps.roster.length > 0) {
+            rawTypes = ps.roster.map(r =>
+                (typeof r === "string") ? r :
+                (r && r.type)          ? r.type : "Militia"
+            );
+        } else if (typeof ps.roster === "string" && ps.roster.trim()) {
+            rawTypes = ps.roster.split(",").map(s => s.trim()).filter(Boolean);
+        }
+
+        if (rawTypes && rawTypes.length > 0) {
+            // Use the shared expansion helper (distribute vs hard mode)
+            const totalTroops = (typeof ps.troops === "number" && ps.troops > 0)
+                                ? ps.troops : rawTypes.length;
+            const rosterArr = _expandScenarioRoster(rawTypes, totalTroops, ps.rosterMode);
+            if (rosterArr && rosterArr.length > 0) {
+                window.player.roster = rosterArr;
+                window.player.troops = rosterArr.length;
+            }
+        } else if (typeof ps.troops === "number" && ps.troops > 0) {
+            // Blank roster → just set the count; keep whatever unit mix exists
+            window.player.troops = ps.troops;
+        }
+
+        console.log("[ScenarioRuntime] _placePlayer applied playerSetup:",
+                    "pos=(" + window.player.x + "," + window.player.y + ")",
+                    "troops=" + window.player.troops,
+                    "faction=" + window.player.faction,
+                    "rosterMode=" + (ps.rosterMode || "distribute"));
+        return;
+    }
+
+    // ── Path B: legacy fallback — anchor on a city ─────────────────────────
+    const cities = window.cities_sandbox || [];
+    // Alias-aware: accept "Player" canonical OR legacy "Player's Kingdom"
+    let target = cities.find(c =>
+        c.faction === "Player" || c.faction === "Player's Kingdom" ||
+        (window.PlayerFaction && window.PlayerFaction.is(c.faction))
+    );
     if (!target && cities.length > 0) target = cities[0];
+
 
     if (target) {
         window.player.x = target.x + (Math.random() - 0.5) * 60;

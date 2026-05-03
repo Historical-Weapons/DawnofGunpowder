@@ -661,7 +661,7 @@ html += `
 			const maxHp      = p.maxHealth || 100;
             const gold       = Math.floor(p.gold || 0);
             const food       = Math.floor(p.food || 0);
-            const troops     = p.troops || 0;
+            const troops     = (p.roster && p.roster.length > 0) ? p.roster.length : (p.troops || 0);
             const cohesion   = p.cohesion !== undefined ? Math.floor(p.cohesion) : 70; // NEW COHESION STAT
 
             html += `
@@ -708,35 +708,54 @@ html += `
 
             // Build dynamic troop groups from roster (same logic as player_overlay_system.js)
             if (p.roster && p.roster.length > 0) {
+                // Derive the authoritative troop total directly from the roster array,
+                // not from p.troops which may be stale after scenario launch.
+                const rosterTotal = p.roster.reduce((sum, t) => sum + (t.count !== undefined ? t.count : 1), 0);
+
                 const groups = {};
                 p.roster.forEach(t => {
-                    if ((t.count || 1) > 0) {
-                        const key = (t.type || t.name || "Unit") + "_" + (t.lvl || 1);
-                        if (!groups[key]) {
-                            groups[key] = {
-                                type: t.type || t.name || "Unit",
-                                count: 0,
-                                lvl: t.lvl || 1,
-                                exp: t.exp || 0
-                            };
-                        }
-                        groups[key].count += (t.count !== undefined ? t.count : 1);
+                    // Guard: skip zero-count entries
+                    const entryCount = t.count !== undefined ? t.count : 1;
+                    if (entryCount <= 0) return;
+                    const key = (t.type || t.name || "Unit") + "_" + (t.lvl || t.experienceLevel || 1);
+                    if (!groups[key]) {
+                        groups[key] = {
+                            type: t.type || t.name || "Unit",
+                            count: 0,
+                            lvl: t.lvl || t.experienceLevel || 1,
+                            exp: t.exp || 0
+                        };
                     }
+                    groups[key].count += entryCount;
                 });
 
                 const entries = Object.values(groups).sort((a, b) => a.type.localeCompare(b.type));
                 if (entries.length === 0) {
                     html += `<div class="mob-hint-block" style="color:#888">No troops in roster.</div>`;
                 } else {
+                    // Roster total banner
+                    html += `<div class="mob-stat-row" style="margin-bottom:6px;font-weight:bold;">
+                        <span>Total in Roster</span><span style="color:#ffca28">${rosterTotal}</span>
+                    </div>`;
                     entries.forEach(u => {
-                        const expPct = typeof u.exp === "number"
-                            ? (u.exp % 1 !== 0 ? ((u.exp % 1) * 100).toFixed(0) : u.exp)
-                            : u.exp;
+                        // exp field is ambiguous: scenario troops use exp:1 (integer level),
+                        // sandbox troops may use a 0-N XP float.
+                        // Normalise: if exp is a whole number ≥ 1, display as "Lvl N";
+                        // if it's a 0–1 decimal, show as a percentage.
+                        let expDisplay;
+                        if (typeof u.exp !== "number" || u.exp === 0) {
+                            expDisplay = "Lvl 1";
+                        } else if (Number.isInteger(u.exp) || u.exp % 1 === 0) {
+                            expDisplay = "Lvl " + Math.max(1, u.exp);
+                        } else {
+                            // Fractional XP progress (0–1 range)
+                            expDisplay = Math.round(u.exp * 100) + "% XP";
+                        }
                         html += `
                             <div class="mob-troop-group">
                                 <div>
                                     <div class="mob-troop-type">${u.type.toUpperCase()}</div>
-                                    <div class="mob-troop-meta">Lvl ${u.lvl} &nbsp;|&nbsp; EXP ${expPct}%</div>
+                                    <div class="mob-troop-meta">${expDisplay}</div>
                                 </div>
                                 <div class="mob-troop-count">×${u.count}</div>
                             </div>
@@ -1330,6 +1349,3 @@ window.mobileUI = {
     }
 
 })();
-
-
- 

@@ -102,7 +102,7 @@ BattleAudio.playSiegeMovement(ram.x, ram.y, true);
                 ram.isBreaking = true;
                 
                 if (Math.random() > 0.99) { 
-                    ram.targetGate.gateHP -= 15;  //sloooooow
+                    ram.targetGate.gateHP -= 35;  //slow
 BattleAudio.playRamHit(ram.x, ram.y);
                     
                     if (ram.targetGate.gateHP <= 0) {

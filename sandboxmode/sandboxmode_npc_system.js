@@ -30,7 +30,7 @@ window.FACTIONS = {
     "Bandits":               { color: "#222222", geoWeight: { north: 0.50, south: 0.50, west: 0.50, east: 0.50 } }, 
 
     // 11. PLAYER: Yellow Sea Anchor
-    "Player's Kingdom":      { color: "#FFFFFF", geoWeight: { north: 0.45, south: 0.45, west: 0.30, east: 0.70 } } 
+    "Player":      { color: "#FFFFFF", geoWeight: { north: 0.45, south: 0.45, west: 0.30, east: 0.70 } } 
 };
 
 var FACTIONS = window.FACTIONS;
@@ -80,7 +80,13 @@ var SYLLABLE_POOLS = window.SYLLABLE_POOLS;
 
 
 const NPC_CARRY_CAPACITY_PER_UNIT = 2; // Each person/soldier can carry 20 units of goods
-let globalNPCs = [];
+// FIX (scenario triggers): top-level `let` is NOT bridged to window.* in a script.
+// scenario_triggers.js (spawn_important_npc, NPC kill detector, _liveImportantNpcs)
+// and scenario_update.js read `window.globalNPCs`. Using `var` makes the binding
+// a property of the global object so reassignments here (lines below: clear on
+// initializeNPCs, filter() in updateNPCs) automatically stay in sync with
+// window.globalNPCs. DO NOT change this back to `let`.
+var globalNPCs = [];
 let worldMapRef = null; 
 let tSize = 16;
 let maxCols = 0, maxRows = 0;
@@ -88,6 +94,30 @@ let lastBattleTime = 0;
 const MAX_GARRISON = 1000;          ///////////DEBUG LOW NUMBER
 const BATTLE_COOLDOWN = 2000;  
 const MAX_GLOBAL_NPCS = 100; // NEW: Hard cap to save CPU
+
+// ── Procedural NPC spawn ban list ────────────────────────────────────────────
+// Scenario triggers write to window.__npcSpawnBans to block specific factions
+// and/or roles from ever spawning procedurally (via spawnNPCFromCity,
+// spawnMongolHorde, or the rolling tick spawner in updateNPCs).
+//
+// Shape:  window.__npcSpawnBans = {
+//   factions: ["Yuan Dynasty Coalition", ...],  // block ALL roles for these factions
+//   roles:    ["Commerce", "Patrol", ...]        // block these roles for ALL factions
+// }
+//
+// Checked via _isSpawnBanned(faction, role) below.  Writing is done via the
+// "set_npc_spawn_ban" trigger action in scenario_triggers.js.
+// ─────────────────────────────────────────────────────────────────────────────
+function _isSpawnBanned(faction, role) {
+    const bans = window.__npcSpawnBans;
+    if (!bans) return false;
+    // Faction ban: blocks any role spawned for that faction
+    if (Array.isArray(bans.factions) && bans.factions.includes(faction)) return true;
+    // Role ban: blocks that role for every faction
+    if (Array.isArray(bans.roles) && role && bans.roles.includes(role)) return true;
+    return false;
+}
+
 // ============================================================================
 // CORE HELPER FUNCTIONS
 // ============================================================================
@@ -266,6 +296,18 @@ function initializeCityData(city, worldWidth, worldHeight) {
     
     // SURGERY: Ensure 'pop' is a valid number, fallback to 1000 if broken
     city.pop = city.pop ? Math.floor(city.pop) : 1000;
+
+    // ── SETTLEMENT CLASSIFICATION ───────────────────────────────────────────
+    // Villages are unfortified settlements too small for stone walls.
+    // Threshold is randomised per-city in range 600–900 so the boundary feels
+    // organic. The guard preserves a pre-set value (e.g. from a saved game
+    // or a scenario doc that explicitly assigned isVillage already).
+   if (city.isVillage === undefined) {
+        // Cities need pop ≥ 5000–7000 to afford stone walls.
+        // Everything below this threshold is treated as a village (no walls).
+        const _wallThreshold = Math.floor(Math.random() * 2001) + 3000; // 3000–5000
+        city.isVillage = (city.pop < _wallThreshold);
+    }
     
     city.conscriptionRate = 0.04 + (Math.random() * 0.08);
     city.militaryPop = Math.min(MAX_GARRISON, Math.floor(city.pop * city.conscriptionRate));
@@ -417,7 +459,43 @@ function getWealthyCity(citiesArr, excludeCity) {
 
 function spawnNPCFromCity(city, role, citiesArr) {
     if (globalNPCs.length >= MAX_GLOBAL_NPCS) return; // ENFORCE CAP
-    
+
+    // ── Procedural spawn ban check ────────────────────────────────────────────
+    // Blocks factions and/or roles blacklisted by the current scenario via the
+    // "set_npc_spawn_ban" trigger action.  This runs before the AI-tendency
+    // filter so a banned faction is silently skipped with zero side effects.
+    if (_isSpawnBanned(city.faction, role)) return;
+
+    // ── Step 3: Procedural AI tendency — per-faction spawn rate / category
+    //           override. Set in the Scenario Editor's "AI Tendencies" window
+    //           and stored on scenario.proceduralAITendency. Only applies in
+    //           scenario mode (when window.__activeScenario is present); pure
+    //           sandbox sessions ignore it and use the default behavior.
+    const _scen = window.__activeScenario;
+    const _tend = _scen && _scen.proceduralAITendency &&
+                  _scen.proceduralAITendency[city.faction];
+    if (_tend) {
+        // Frequency multiplier: skip this spawn with probability (1 - freq).
+        // freq=1.0 => always spawn (default); freq=0.5 => 50% spawn rate;
+        // freq=2.0 => already-frequent calls hit the MAX_GLOBAL_NPCS cap so
+        // we just don't filter when freq>=1 (caller decides cadence).
+        const freq = (typeof _tend.frequency === "number") ? _tend.frequency : 1.0;
+        if (freq < 1.0 && Math.random() > freq) return;
+
+        // Category filter: if the faction is set to a specific category and
+        // this role doesn't match, skip. "mixed" means accept anything.
+        const cat = _tend.category || "mixed";
+        if (cat !== "mixed") {
+            // Category names match role names from the editor's Drop NPC modal:
+            // "patrol" | "military" | "trader" | "civilian"
+            const want = cat.toLowerCase();
+            const have = (role || "").toLowerCase();
+            // role values in this engine: "Patrol", "Military", "Trader",
+            // "Civilian" — case-insensitive match.
+            if (want !== have) return;
+        }
+    }
+
     let target = null; 
     let targetX = city.x; 
     let targetY = city.y;
@@ -560,7 +638,12 @@ if (target) { targetX = target.x; targetY = target.y; }
         battleTarget: null, 
         gold: carriedGold, 
         food: carriedFood,
-        decisionTimer: 0
+        decisionTimer: 0,
+        // Step 3: tendency hint copied at spawn time — the waypoint runtime
+        // looks at this when deciding what to do for non-default tendencies
+        // (aggressive / defensive / wanderer / repel).
+        proceduralTendency: (_tend && _tend.tendency) ? _tend.tendency : "default",
+        proceduralAvoid:    (_tend && _tend.avoidFactions) ? _tend.avoidFactions : ""
     });
 }
 
@@ -600,7 +683,9 @@ function spawnBandit(padX, padY) {
 function spawnMongolHorde(padX, padY) {
     // SAFETY LOCK: Only run if the Mongol faction actually exists in this game mode
     if (!FACTIONS["Yuan Dynasty Coalition"]) return; 
-    if (globalNPCs.length >= MAX_GLOBAL_NPCS) return; 
+    if (globalNPCs.length >= MAX_GLOBAL_NPCS) return;
+    // Ban check: scenario can suppress all Yuan procedural spawns
+    if (_isSpawnBanned("Yuan Dynasty Coalition", "Military")) return;
 
     let coords = getRandomLandCoordinate(padX, padY);
     let hordeCount = Math.floor(Math.random() * 40) + 20; 
@@ -632,7 +717,18 @@ function spawnMongolHorde(padX, padY) {
 }
 
 function initializeNPCs(cities, mapData, tileSize, cols, rows, padX, padY) {
-	
+
+    // SANDBOX SAFETY: clear stale scenario globals from a previous Story 1 session.
+    // Guard: only run when __campaignStory1Active is false/unset — i.e. we are NOT
+    // inside an active Scenario 1 campaign.  When Scenario 1 is active this is a
+    // no-op; hakata_bay_scenario.install() re-stamps __npcSpawnBans after this call
+    // anyway (it handles exactly this case in its own re-stamp comment).
+    if (!window.__campaignStory1Active) {
+        window.__npcSpawnBans        = null;
+        window.__activeScenario      = null;
+        window.__mongolWaveAllowed   = false;
+    }
+
     console.log("Drafting Dynamic Populations & Armies...");
     
     worldMapRef = mapData;
@@ -658,9 +754,14 @@ window._tradeTileSize = tileSize;
     cities.forEach(city => {
         let activityLevel = Math.floor(city.pop / 1500) + 1; 
         for(let i=0; i < activityLevel; i++) {
-            if (Math.random() < 0.15) spawnNPCFromCity(city, "Commerce", cities);
-            if (Math.random() < 0.15) spawnNPCFromCity(city, "Civilian", cities);
-            if (Math.random() < 0.15) spawnNPCFromCity(city, "Patrol", cities);
+            // Each role respects the ban list so a scenario can suppress specific
+            // roles or factions from the very first frame of the game.
+            if (Math.random() < 0.15 && !_isSpawnBanned(city.faction, "Commerce"))
+                spawnNPCFromCity(city, "Commerce", cities);
+            if (Math.random() < 0.15 && !_isSpawnBanned(city.faction, "Civilian"))
+                spawnNPCFromCity(city, "Civilian", cities);
+            if (Math.random() < 0.15 && !_isSpawnBanned(city.faction, "Patrol"))
+                spawnNPCFromCity(city, "Patrol", cities);
         }
     });
 
@@ -668,8 +769,37 @@ window._tradeTileSize = tileSize;
     let banditCount = Math.min(10, cities.length * 2);//<<<<<<<<<<<<<<<<<<<<10 bandits only for debugging
     for(let i=0; i<banditCount; i++) {
         spawnBandit(padX, padY);
-        spawnMongolHorde(padX, padY); // Will safely abort if not in Story 1
+        // ── Mongol hordes are scenario-gated: only spawn after the wave trigger ──
+        // DO NOT call spawnMongolHorde here at init. The trigger action
+        // "allow_mongol_waves" (sets window.__mongolWaveAllowed = true) must fire first.
+        // Any Yuan units that somehow exist at this point are purged below.
     }
+    // ── YUAN DYNASTY PURGE: remove any procedural Yuan units that slipped through
+    // (e.g. from ensureAllFactionsSpawned). Mongols only spawn after __mongolWaveAllowed.
+    const _preYuanCount = globalNPCs.length;
+    globalNPCs = globalNPCs.filter(n => n.faction !== "Yuan Dynasty Coalition");
+    const _purgedYuan = _preYuanCount - globalNPCs.length;
+    if (_purgedYuan > 0) console.log(`[NpcSystem] Purged ${_purgedYuan} pre-wave Yuan unit(s) at init.`);
+
+    // ── BANNED-ROLE PURGE (v3.1 safety net) ─────────────────────────────────
+    // scenario_update.js applies startingNpcBans before this function runs so
+    // _isSpawnBanned() already blocked most procedural spawns above.  This purge
+    // is a belt-and-suspenders sweep: it removes any NPC whose faction or role
+    // made it past the check anyway (e.g. from ensureAllFactionsSpawned which
+    // calls initializeCityData but never goes through spawnNPCFromCity).
+    if (window.__npcSpawnBans) {
+        const _bans = window.__npcSpawnBans;
+        const _preBanCount = globalNPCs.length;
+        globalNPCs = globalNPCs.filter(n => {
+            if (Array.isArray(_bans.factions) && _bans.factions.includes(n.faction)) return false;
+            if (Array.isArray(_bans.roles)    && _bans.roles.includes(n.role))       return false;
+            return true;
+        });
+        const _purgedBanned = _preBanCount - globalNPCs.length;
+        if (_purgedBanned > 0)
+            console.log(`[NpcSystem] Purged ${_purgedBanned} banned-role/faction NPC(s) at init.`);
+    }
+
     console.log(`Successfully deployed ${globalNPCs.length} dynamic NPCs across the map.`);
 }
 
@@ -695,6 +825,29 @@ function updateNPCs(cities) {
 
     for (let i = 0; i < globalNPCs.length; i++) {
         let npc = globalNPCs[i];
+
+        // ── Step 3: cannotDie clamp (must run BEFORE the count<=0 dead filter
+        //           in the next tick can sweep it). Editor-set NPCs with the
+        //           "Cannot Die" toggle stay alive at 1 troop minimum.
+        if (npc.cannotDie && npc.count < 1) npc.count = 1;
+
+        // ── Step 3: skip default sandbox AI if a story script / waypoint
+        //           override is currently driving this NPC. window.NpcWaypoints
+        //           sets npc.__aiOverride = true while it owns this NPC's
+        //           targetX/targetY (e.g. a waypoint queue is active OR a
+        //           customAI script returned an explicit waypoint). When the
+        //           runtime is done it clears the flag and default AI resumes.
+        //           Combat / collision logic still runs below — only the
+        //           "decide where to go next" branch is skipped.
+        if (npc.__aiOverride) {
+            // Run a minimal "advance toward target" step instead of the
+            // default decision tree. The lower section of updateNPCs (combat
+            // resolution + movement integrator) still runs because we don't
+            // `continue` — we just bypass the high-level brain by setting
+            // decisionTimer high so the brain doesn't override targetX/Y.
+            npc.decisionTimer = Math.max(npc.decisionTimer || 0, 30);
+        }
+
         if (npc.decisionTimer === undefined) npc.decisionTimer = 0;
         if (npc.decisionTimer > 0) npc.decisionTimer--;
 
@@ -1231,10 +1384,16 @@ function updateNPCs(cities) {
     //global spawn
     if (Math.random() < 0.03 && cities.length > 0) {
         let rc = cities[Math.floor(Math.random() * cities.length)];
-        if (Math.random() < 0.3 && rc.civilianPop > 20) spawnNPCFromCity(rc, "Commerce", cities);
-        else if (Math.random() < 0.2 && rc.civilianPop > 50) spawnNPCFromCity(rc, "Civilian", cities);
-        else if (Math.random() < 0.3 && rc.militaryPop > 30) spawnNPCFromCity(rc, "Patrol", cities);
-        else if (rc.pop > 500 && rc.militaryPop > 50 && Math.random() < 0.10) spawnNPCFromCity(rc, "Military", cities); //military spawn requirement
+        // Each role is checked against the ban list before attempting to spawn.
+        // _isSpawnBanned handles both faction-level and role-level bans.
+        if (Math.random() < 0.3 && rc.civilianPop > 20 && !_isSpawnBanned(rc.faction, "Commerce"))
+            spawnNPCFromCity(rc, "Commerce", cities);
+        else if (Math.random() < 0.2 && rc.civilianPop > 50 && !_isSpawnBanned(rc.faction, "Civilian"))
+            spawnNPCFromCity(rc, "Civilian", cities);
+        else if (Math.random() < 0.3 && rc.militaryPop > 30 && !_isSpawnBanned(rc.faction, "Patrol"))
+            spawnNPCFromCity(rc, "Patrol", cities);
+        else if (rc.pop > 500 && rc.militaryPop > 50 && Math.random() < 0.10 && !_isSpawnBanned(rc.faction, "Military"))
+            spawnNPCFromCity(rc, "Military", cities);
     }
     if (Math.random() < 0.005 && globalNPCs.filter(n => n.role === "Bandit").length < cities.length * 1.5) {
         if (typeof spawnBandit === 'function') spawnBandit(0, 0); 
@@ -1242,8 +1401,12 @@ function updateNPCs(cities) {
     
 
     // STORY 1 SURGERY: Spawn Mongol invaders periodically
-    if (FACTIONS["Yuan Dynasty Coalition"] && Math.random() < 0.003 && globalNPCs.filter(n => n.faction === "Yuan Dynasty Coalition").length < 15) {
-        spawnMongolHorde(0, 0);
+    // ── GATE: only spawn after the "allow_mongol_waves" trigger fires ──────────
+    if (window.__mongolWaveAllowed &&
+        FACTIONS["Yuan Dynasty Coalition"] &&
+        Math.random() < 0.003 &&
+        globalNPCs.filter(n => n.faction === "Yuan Dynasty Coalition").length < 15) {
+        spawnMongolHorde(0, 0);  // faction ban check is also inside spawnMongolHorde
     }
 	//end story 1
 	
@@ -1349,7 +1512,7 @@ let distSq = dx * dx + dy * dy;
             statusIcon = "🪜"; 
         }
 
-        let displayText = npc.role + statusIcon;
+        let displayText = (npc.isImportant ? "📜 " : "") + npc.role + statusIcon;
 
         // Draw shadow/outline
         ctx.fillStyle = "rgba(0,0,0,0.8)";

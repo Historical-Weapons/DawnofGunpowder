@@ -119,9 +119,24 @@ const CONDITIONS = {
     },
     "scenario_start":      {
         label: "Scenario Start",
-        desc:  "Fires once, on the first tick after scenario applies.",
+        desc:  "Fires once on the first tick AFTER the opening cinematic / intro "
+             + "fully completes (including the final fade-in that reveals the world). "
+             + "If the scenario has no intro, fires on the very first tick. "
+             + "Always mark triggers that use this condition with once:true so they "
+             + "fire exactly once per scenario boot.",
         params: [],
-        evaluate: (p, ctx) => ctx.tick === 1
+        // ── IMPORTANT ───────────────────────────────────────────────────────────
+        // We deliberately do NOT use `ctx.tick === 1` here.  The tick counter
+        // increments even while rt.storyPlaying is true (the condition evaluator
+        // just returns early), so by the time the intro ends tick is already
+        // in the 40-50 range and tick===1 would NEVER be true.
+        //
+        // Instead we gate on window.__DoG_introDone, which _maybePlayStoryIntro
+        // sets in its finally block after the last fadeIn completes.  For
+        // scenarios that have no intro, _maybePlayStoryIntro sets the flag
+        // immediately so the trigger fires on the next evaluation cycle.
+        // ──────────────────────────────────────────────────────────────────────
+        evaluate: (p, ctx) => ctx.introComplete
     },
     "timer_elapsed":       {
         label: "Timer (seconds elapsed)",
@@ -169,7 +184,7 @@ const CONDITIONS = {
             const cities = window.cities_sandbox || [];
             const c = cities.find(c => c.name === p.cityName);
             if (!c) return false;
-            return Math.hypot(window.player.x - c.x, window.player.y - c.y) <= (p.radius || 200);
+            return Math.hypot(window.player.x - c.x, window.player.y - c.y) <= (p.radius || 50);
         }
     },
     "player_in_city_mode": {
@@ -324,7 +339,7 @@ const CONDITIONS = {
         params: [{ key: "cityName", label: "City Name (blank = any)", type: "string", default: "" }],
         evaluate: (p, ctx) => ctx.history.some(h =>
             h.type === "city_captured" &&
-            h.byFaction === (window.player?.faction || "Player's Kingdom") &&
+            h.byFaction === (window.player?.faction || "Player") &&
             (!p.cityName || h.cityName === p.cityName)
         )
     },
@@ -424,7 +439,8 @@ const ACTIONS = {
         params: [
             { key: "url",      label: "Image URL / data: URI", type: "image",   default: "" },
             { key: "ms",       label: "Auto-dismiss ms (0=manual)", type: "number", default: 5000 },
-            { key: "kenburns", label: "Ken-Burns zoom",        type: "bool",    default: false }
+            { key: "kenburns", label: "Ken-Burns zoom",        type: "bool",    default: false },
+            { key: "caption",  label: "Caption text (shown below image)", type: "longtext", default: "" }
         ]
     },
     "show_title": {
@@ -434,6 +450,14 @@ const ACTIONS = {
             { key: "title",    label: "Title",    type: "string", default: "Chapter I" },
             { key: "subtitle", label: "Subtitle", type: "string", default: "" },
             { key: "ms",       label: "Hold ms",  type: "number", default: 3500 }
+        ]
+    },
+    "play_movie": {
+        label: "Play a Movie",
+        desc:  "Plays one of the scenario's movies (Story tab). Lookup by id, " +
+               "name, or numeric index. Use this for cutscenes that fire mid-game.",
+        params: [
+            { key: "movie", label: "Movie id, name, or index", type: "string", default: "Intro" }
         ]
     },
     "show_subtitle": {
@@ -544,6 +568,33 @@ const ACTIONS = {
             { key: "y",  label: "World Y",          type: "number", default: 1500 }
         ]
     },
+    "set_npc_spawn_ban": {
+        label: "Ban procedural NPC spawns",
+        desc:  "Block specific factions and/or roles from spawning procedurally "
+             + "for the rest of this scenario session. Comma-separated lists. "
+             + "Leave a field blank to leave it unchanged. Pass 'CLEAR' to a "
+             + "field to remove all bans for that category.",
+        params: [
+            { key: "factions", label: "Ban factions (csv, or CLEAR)",
+              type: "longtext",
+              default: "",
+              placeholder: "e.g. Yuan Dynasty Coalition, Great Khaganate" },
+            { key: "roles",    label: "Ban roles (csv, or CLEAR)",
+              type: "longtext",
+              default: "",
+              placeholder: "e.g. Commerce, Patrol" }
+        ]
+    },
+
+    // ── MONGOL WAVE GATE ──────────────────────────────────────────────────────
+    "allow_mongol_waves": {
+        label: "Allow Mongol wave spawning",
+        desc:  "Sets window.__mongolWaveAllowed = true so sandboxmode_npc_system.js "
+             + "starts periodic Yuan Dynasty Coalition spawn ticks. Call this once "
+             + "from the trigger that signals the Mongol invasion (e.g. the coastal "
+             + "landing cutscene). To re-ban, pair with set_npc_spawn_ban.",
+        params: []
+    },
 
     // ── BATTLES ────────────────────────────────────────────────────────────
     "force_battle": {
@@ -615,6 +666,36 @@ const ACTIONS = {
             { key: "title",    label: "Title",    type: "string", default: "Defeat" },
             { key: "subtitle", label: "Subtitle", type: "string", default: "Your scenario was lost." }
         ]
+    },
+
+    // ── STORY QUESTS ───────────────────────────────────────────────────────
+    "story_quest_set": {
+        label: "Set yellow waypoint marker",
+        desc:  "Show a pulsing yellow waypoint at (x,y) on the world map. " +
+               "When the player enters the radius, optionally fires a trigger " +
+               "or sets a variable. Replaces any existing story-quest waypoint.",
+        params: [
+            { key: "id",              label: "Quest ID",        type: "string", default: "" },
+            { key: "title",           label: "Banner title",    type: "string", default: "Objective" },
+            { key: "description",     label: "Banner subtext",  type: "longtext", default: "" },
+            { key: "x",               label: "World X",         type: "number", default: 2000 },
+            { key: "y",               label: "World Y",         type: "number", default: 1500 },
+            { key: "radius",          label: "Arrive radius",   type: "number", default: 320 },
+            { key: "triggerOnArrive", label: "Fire trigger on arrive (id)", type: "string", default: "" },
+            { key: "varOnArrive",     label: "Set var on arrive (name=value)", type: "string", default: "" }
+        ]
+    },
+    "story_quest_complete": {
+        label: "Complete a story quest",
+        desc:  "Hide the waypoint marker and log it as completed.",
+        params: [
+            { key: "id", label: "Quest ID (blank = current)", type: "string", default: "" }
+        ]
+    },
+    "story_quest_clear": {
+        label: "Clear all story quests",
+        desc:  "Removes any active story waypoint without marking complete.",
+        params: []
     },
 
     // ── CUSTOM ─────────────────────────────────────────────────────────────
@@ -692,12 +773,18 @@ function _logToGameLog(text, tag) {
 // Build the context object passed to evaluator functions.
 function _ctx() {
     return {
-        tick:        rt.tick,
-        elapsedSec:  rt.elapsedSec,
-        firedById:   rt.firedById,
-        history:     rt.history,
-        killedNpcs:  rt.killedNpcs,
-        vars:        rt.vars
+        tick:          rt.tick,
+        elapsedSec:    rt.elapsedSec,
+        firedById:     rt.firedById,
+        history:       rt.history,
+        killedNpcs:    rt.killedNpcs,
+        vars:          rt.vars,
+        // True once _maybePlayStoryIntro has fully completed (including the
+        // final fadeIn that reveals the world).  False during the intro and
+        // false before it has started.  Used by the scenario_start condition so
+        // t0_briefing and similar "fires once at game start" triggers only
+        // evaluate AFTER the player can actually see and control the game.
+        introComplete: !!window.__DoG_introDone
     };
 }
 
@@ -743,7 +830,8 @@ const ACTION_HANDLERS = {
         try {
             await window.StoryPresentation.showDialogue(p.lines || [], {
                 letterbox:     p.letterbox !== false,
-                typewriterCps: (typeof p.typewriterCps === "number") ? p.typewriterCps : 40
+                // Use typeof so typewriterCps:0 (instant text) is respected
+                typewriterCps: (typeof p.typewriterCps === "number") ? p.typewriterCps : 0
             });
         } finally {
             rt.storyPlaying = false;
@@ -771,7 +859,8 @@ const ACTION_HANDLERS = {
         try {
             await window.StoryPresentation.showArt(p.url, {
                 ms:       (typeof p.ms === "number") ? p.ms : 5000,
-                kenburns: !!p.kenburns
+                kenburns: !!p.kenburns,
+                caption:  p.caption || ""
             });
         } finally {
             rt.storyPlaying = false;
@@ -793,6 +882,27 @@ const ACTION_HANDLERS = {
     "show_subtitle": async (p) => {
         if (!window.StoryPresentation) return;
         await window.StoryPresentation.showSubtitle(p.text || "", p.ms || 4000, p.color);
+    },
+    "play_movie": async (p) => {
+        const s = window.__activeScenario;
+        if (!s || !Array.isArray(s.movies) || s.movies.length === 0) {
+            console.warn("[ScenarioTriggers] play_movie: scenario has no movies.");
+            return;
+        }
+        const ref = (p.movie || "").toString().trim();
+        let m = null;
+        // Numeric index?
+        if (/^\d+$/.test(ref)) {
+            m = s.movies[parseInt(ref, 10)] || null;
+        }
+        // Match by id, then by name
+        if (!m) m = s.movies.find(x => x && x.id === ref) || null;
+        if (!m) m = s.movies.find(x => x && x.name === ref) || null;
+        if (!m) {
+            console.warn("[ScenarioTriggers] play_movie: not found:", ref);
+            return;
+        }
+        await _playMovie(m);
     },
     "letterbox": (p) => {
         if (window.StoryPresentation) window.StoryPresentation.showLetterbox(!!p.on);
@@ -909,18 +1019,47 @@ const ACTION_HANDLERS = {
             console.warn("[ScenarioTriggers] globalNPCs not present yet.");
             return;
         }
-        // Build roster from CSV or count
+        // ── Roster expansion (FIX: respects troops count + rosterMode) ──────
+        // rosterMode "distribute" (default): CSV defines unit-type blueprint.
+        //   Engine fills `def.troops` slots with an even split of those types ±20%.
+        //   e.g. roster=["Archer","Spearman"], troops=80 → ~40 Archers, ~40 Spearmen.
+        // rosterMode "hard": CSV is the LITERAL roster; remaining slots padded with Militia.
+        //   e.g. roster=["Archer","Archer","Spearman"], troops=80 → 3 exact + 77 Militia.
         let roster = [];
-        let count = def.troops || 1;
-        if (def.roster && Array.isArray(def.roster)) {
-            roster = def.roster.map(t => ({ type: t, exp: 1 }));
-            count = roster.length;
-        } else if (typeof def.roster === "string" && def.roster.trim()) {
-            roster = def.roster.split(",").map(s => s.trim()).filter(Boolean)
-                              .map(t => ({ type: t, exp: 1 }));
-            count = roster.length;
-        } else {
-            // Fallback: militia-only roster
+        let count  = Math.max(1, def.troops || 1);
+
+        const rawTypeList = (() => {
+            if (Array.isArray(def.roster) && def.roster.length > 0) {
+                return def.roster.map(t => (typeof t === "string") ? t : (t.type || "Militia"));
+            }
+            if (typeof def.roster === "string" && def.roster.trim()) {
+                return def.roster.split(",").map(s => s.trim()).filter(Boolean);
+            }
+            return [];
+        })();
+
+        if (rawTypeList.length > 0 && typeof window._expandScenarioRoster === "function") {
+            // Use the shared roster expansion helper (defined in scenario_update.js)
+            roster = window._expandScenarioRoster(rawTypeList, count, def.rosterMode || "distribute");
+        } else if (rawTypeList.length > 0) {
+            // Fallback if helper not loaded (should never happen in normal usage)
+            if (def.rosterMode === "hard") {
+                roster = rawTypeList.map(t => ({ type: t, exp: 1 }));
+                const need = count - roster.length;
+                for (let i = 0; i < need; i++) roster.push({ type: "Militia", exp: 1 });
+                if (roster.length > count) roster.splice(count);
+            } else {
+                // distribute: fill count with evenly-split types from rawTypeList
+                const unique = [...new Set(rawTypeList)];
+                const base = Math.floor(count / unique.length);
+                for (let i = 0; i < count; i++) roster.push({ type: unique[i % unique.length], exp: 1 });
+            }
+        }
+
+        // Guard: never spawn with 0 count (updateNPCs filters count<=0 next tick)
+        count = Math.max(1, roster.length > 0 ? roster.length : count);
+        if (roster.length === 0) {
+            // Fallback: militia-only roster sized to count
             for (let i = 0; i < count; i++) roster.push({ type: "Militia", exp: 1 });
         }
         const factionColor = (window.FACTIONS && window.FACTIONS[def.faction]
@@ -938,10 +1077,40 @@ const ACTION_HANDLERS = {
             color:   factionColor,
             originCity: null,
             targetCity: null,
-            x: def.x || 2000,
-            y: def.y || 1500,
-            targetX: (typeof def.targetX === "number") ? def.targetX : (def.x || 2000),
-            targetY: (typeof def.targetY === "number") ? def.targetY : (def.y || 1500),
+            // ── Coordinate resolution: editor saves xPct/yPct (0-1 fraction of
+            //    map size). At spawn time, convert to absolute world pixels using
+            //    the live world dimensions. Falls back to def.x/def.y if set by
+            //    legacy JSON, then to a safe default (center of default map).
+            x: (function() {
+                if (typeof def.x === "number") return def.x;
+                if (typeof def.xPct === "number") {
+                    return def.xPct * (window.WORLD_WIDTH_sandbox  || 4000);
+                }
+                return 2000;
+            })(),
+            y: (function() {
+                if (typeof def.y === "number") return def.y;
+                if (typeof def.yPct === "number") {
+                    return def.yPct * (window.WORLD_HEIGHT_sandbox || 3000);
+                }
+                return 1500;
+            })(),
+            targetX: (function() {
+                if (typeof def.targetX === "number") return def.targetX;
+                if (typeof def.x === "number") return def.x;
+                if (typeof def.xPct === "number") {
+                    return def.xPct * (window.WORLD_WIDTH_sandbox  || 4000);
+                }
+                return 2000;
+            })(),
+            targetY: (function() {
+                if (typeof def.targetY === "number") return def.targetY;
+                if (typeof def.y === "number") return def.y;
+                if (typeof def.yPct === "number") {
+                    return def.yPct * (window.WORLD_HEIGHT_sandbox || 3000);
+                }
+                return 1500;
+            })(),
             speed: 0.5,
             anim: 0,
             isMoving: !!def.targetX,
@@ -959,7 +1128,28 @@ const ACTION_HANDLERS = {
                 defense: def.defense || 10,
                 armor:   def.armor   || 10
             },
-            portraitUrl: def.portraitUrl || null
+            portraitUrl: def.portraitUrl || null,
+
+            // ── Step 3: per-NPC AI script and waypoint runtime hooks ────────
+            // customAI:      JS source string, executed every scriptIntervalMs
+            //                by window.NpcWaypoints. Available bindings inside
+            //                the script: npc, player, NpcWaypoints, NpcAI,
+            //                ScenarioTriggers, vars, dt, time.
+            // aiPreset:      "idle"|"patrol"|"repel"|"pathfind" — applied by
+            //                NpcAI when no customAI is set. Falls through to
+            //                sandbox default (existing AI in updateNPCs) when
+            //                aiPreset is empty/missing.
+            // cannotDie:     If true, count is clamped to ≥ 1 every tick.
+            // scriptIntervalMs: How often to re-run customAI (default 1000ms).
+            customAI:         def.customAI || "",
+            aiPreset:         def.aiPreset || "",
+            cannotDie:        !!def.cannotDie,
+            scriptIntervalMs: def.scriptIntervalMs || 1000,
+            // Waypoint queue lives on the NPC. Managed by window.NpcWaypoints.
+            // Each entry: { x, y, radius?, wait?, onArrive?, if?, label? }
+            waypointQueue:    [],
+            currentWaypoint:  null,
+            waypointStartedAt: 0
         };
         window.globalNPCs.push(npcObj);
         rt.spawnedNpcs[p.id] = npcObj;
@@ -991,7 +1181,68 @@ const ACTION_HANDLERS = {
         npc.waitTimer = 0;
     },
 
-    // ── BATTLES ────────────────────────────────────────────────────────────
+    // ── PROCEDURAL NPC SPAWN BANS ──────────────────────────────────────────
+    // Writes to window.__npcSpawnBans, which sandboxmode_npc_system.js reads
+    // at every spawn call (_isSpawnBanned helper).
+    //
+    // params.factions — comma-separated faction names to ban (additive).
+    //                   Pass "CLEAR" to wipe all faction bans.
+    // params.roles    — comma-separated role names to ban (additive).
+    //                   Pass "CLEAR" to wipe all role bans.
+    //
+    // Additive means repeated calls accumulate — e.g. you can ban "Commerce"
+    // in t0_briefing and ban "Patrol" in t1_mongols_landing without the second
+    // call overwriting the first.
+    "set_npc_spawn_ban": (p) => {
+        if (!window.__npcSpawnBans) {
+            window.__npcSpawnBans = { factions: [], roles: [] };
+        }
+        const bans = window.__npcSpawnBans;
+
+        // ── factions field ─────────────────────────────────────────────────
+        // FIX: accept either an Array (e.g. [CONFIG.factions.ENEMY]) or a
+        // comma-separated string (e.g. "Yuan Dynasty Coalition,Bandits").
+        // Previously only strings were handled, so array inputs silently
+        // failed because Array.prototype.trim is undefined.
+        const _toStrArray = (v) => {
+            if (!v) return [];
+            if (Array.isArray(v)) return v.map(s => String(s).trim()).filter(Boolean);
+            return String(v).split(",").map(s => s.trim()).filter(Boolean);
+        };
+
+        const factionsList = _toStrArray(p.factions);
+        if (factionsList.length === 1 && factionsList[0].toUpperCase() === "CLEAR") {
+            bans.factions = [];
+            console.log("[ScenarioTriggers] set_npc_spawn_ban: faction bans cleared.");
+        } else {
+            factionsList.forEach(f => {
+                if (!bans.factions.includes(f)) bans.factions.push(f);
+            });
+        }
+
+        // ── roles field ────────────────────────────────────────────────────
+        const rolesList = _toStrArray(p.roles);
+        if (rolesList.length === 1 && rolesList[0].toUpperCase() === "CLEAR") {
+            bans.roles = [];
+            console.log("[ScenarioTriggers] set_npc_spawn_ban: role bans cleared.");
+        } else {
+            rolesList.forEach(r => {
+                if (!bans.roles.includes(r)) bans.roles.push(r);
+            });
+        }
+
+        console.log("[ScenarioTriggers] set_npc_spawn_ban → factions:", bans.factions,
+                    "| roles:", bans.roles);
+    },
+    // ── allow_mongol_waves ────────────────────────────────────────────────────
+    // Unlocks the periodic Yuan Dynasty Coalition spawn tick in updateNPCs.
+    // This should be fired by the trigger that plays the Mongol landing
+    // cutscene — NOT at scenario start.  Pairs with set_npc_spawn_ban to
+    // keep Yuan units off the map until the story moment arrives.
+    "allow_mongol_waves": (_p) => {
+        window.__mongolWaveAllowed = true;
+        console.log("[ScenarioTriggers] allow_mongol_waves → Yuan Dynasty Coalition spawn tick ENABLED.");
+    },
     //
     //  We launch the existing custom battle by populating the same window
     //  references the Custom Battle GUI uses, then bypass the menu and call
@@ -1084,6 +1335,33 @@ const ACTION_HANDLERS = {
         stop();
     },
 
+    // ── STORY QUESTS (yellow waypoint markers — see story_quest_patch.js) ──
+    "story_quest_set": (p) => {
+        if (!window.StoryQuests || typeof window.StoryQuests.set !== "function") {
+            console.warn("[ScenarioTriggers] story_quest_set: StoryQuests not loaded — load story_quest_patch.js");
+            return;
+        }
+        window.StoryQuests.set({
+            id:              p.id || "story_quest_" + Date.now(),
+            title:           p.title || "Objective",
+            description:     p.description || "",
+            x:               +p.x || 0,
+            y:               +p.y || 0,
+            radius:          +p.radius || 320,
+            triggerOnArrive: p.triggerOnArrive || "",
+            varOnArrive:     p.varOnArrive || "",
+            noAutoComplete:  !!p.noAutoComplete
+        });
+    },
+    "story_quest_complete": (p) => {
+        if (!window.StoryQuests || typeof window.StoryQuests.complete !== "function") return;
+        window.StoryQuests.complete(p.id || null);
+    },
+    "story_quest_clear": () => {
+        if (!window.StoryQuests || typeof window.StoryQuests.clear !== "function") return;
+        window.StoryQuests.clear();
+    },
+
     // ── CUSTOM ─────────────────────────────────────────────────────────────
     "custom_js": async (p, trig) => {
         try {
@@ -1173,6 +1451,29 @@ async function _tick() {
     }
 }
 
+// ── Local sleep utility ─────────────────────────────────────────────────────
+// storymode_presentation.js defines _sleep inside its own closure, so we
+// need our own copy here for use in _maybePlayStoryIntro.
+function _sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+// ── Map-load progress helper ────────────────────────────────────────────────
+// Returns a 0–100 number if the load percentage is detectable, or -1 if
+// unknown (caller should treat unknown as "go ahead / already done").
+function _getMapLoadProgress() {
+    // Common global variable names used by the engine
+    if (typeof window.__mapLoadProgress === "number") return window.__mapLoadProgress;
+    if (typeof window.DoGLoadProgress   === "number") return window.DoGLoadProgress;
+    if (typeof window.__loadProgress    === "number") return window.__loadProgress;
+    // Parse the #loading div text  e.g. "Loading map... (87%)"
+    const el = document.getElementById("loading");
+    if (el) {
+        if (el.style.display === "none") return 100; // hidden → done
+        const m = el.textContent.match(/(\d+(?:\.\d+)?)\s*%/);
+        if (m) return parseFloat(m[1]);
+    }
+    return -1; // unknown — treat as complete so we don't block forever
+}
+
 // ╔══════════════════════════════════════════════════════════════════════════╗
 // ║ START / STOP                                                             ║
 // ╚══════════════════════════════════════════════════════════════════════════╝
@@ -1194,6 +1495,42 @@ function start(scenarioDoc) {
     rt.elapsedSec  = 0;
     rt.tick        = 0;
     rt.storyPlaying = false;
+
+    // Reset intro-gate flags so a scenario re-launch restarts the full guard
+    // sequence.  __DoG_introDone is what scenario_start's introComplete reads;
+    // __DoG_introEndTime drives the 3-second post-intro parle cooldown.
+    window.__DoG_introDone    = false;
+    window.__DoG_introEndTime = null;
+
+    // Reset the intro-done flag so a re-started scenario re-runs its guards
+    // correctly (e.g. when the player restarts a campaign from the menu).
+    window.__DoG_introDone = false;
+
+    // Immediately black the screen so the player NEVER sees NPCs/world in their
+    // default positions before the story intro plays.  Only fires once per
+    // scenario object (guard also prevents re-blacking if start() is called a
+    // second time by hakata_bay_scenario.install() while the intro is running).
+    // We wait until ≥95% of the map has loaded before applying the black screen
+    // so the player doesn't see a jarring instant-black before the map appears.
+    if (window.StoryPresentation && !scenarioDoc.__introPlayed) {
+        const _hasIntro =
+            (Array.isArray(scenarioDoc.movies) && scenarioDoc.movies.length > 0 &&
+             scenarioDoc.movies[0] && scenarioDoc.movies[0].enabled !== false &&
+             Array.isArray(scenarioDoc.movies[0].items) && scenarioDoc.movies[0].items.length > 0) ||
+            (scenarioDoc.storyIntro && scenarioDoc.storyIntro.enabled);
+        if (_hasIntro) {
+            const _fadeColor = (scenarioDoc.storyIntro && scenarioDoc.storyIntro.fadeColor) || "#000000";
+            // Poll until ≥95% loaded, then apply the pre-story black screen
+            (function _waitForLoad() {
+                const pct = _getMapLoadProgress();
+                if (pct < 0 || pct >= 95) {
+                    window.StoryPresentation.fadeOut(0, _fadeColor);
+                } else {
+                    setTimeout(_waitForLoad, 200);
+                }
+            })();
+        }
+    }
 
     // Reset "fired" flags on each trigger (in case scenario was relaunched)
     rt.triggers.forEach(t => {
@@ -1217,6 +1554,39 @@ function start(scenarioDoc) {
     // see scenario_start).  This is *separate* from triggers because it must
     // happen synchronously with world apply.
     _applyPlayerSetup(scenarioDoc);
+// Near the top of the start() function, after _applyPlayerSetup(scenarioDoc):
+window.__DoG_scenarioBootTime = Date.now();
+
+// Force-close any parle panel that leaked open from a previous session:
+if (typeof inParleMode !== 'undefined') inParleMode = false;
+const _staleParle = document.getElementById('parle-panel');
+if (_staleParle) _staleParle.style.display = 'none';
+    // Safety-net: enterOverworldMode() (called by initGame or the game-loop
+    // state machine) resets player.x = worldW * 0.5 AFTER initGame resolves.
+    // We re-apply the scenario's playerSetup 1.5 s later to guarantee the
+    // scenario position sticks, no matter when enterOverworldMode fires.
+setTimeout(() => _applyPlayerSetup(scenarioDoc), 200);
+
+    // ── Auto-spawn: NPCs placed via the scenario editor's "Drop NPC" tool are
+    //    marked autoSpawn:true. They appear immediately when the scenario loads
+    //    (the player placed them on the map intentionally). Trigger-gated NPCs
+    //    (autoSpawn not set) still require an explicit spawn_important_npc action.
+    //    Deferred slightly so globalNPCs is populated and the world is ready.
+    const _autoSpawnList = (scenarioDoc.importantNpcs || []).filter(n => n.autoSpawn);
+    if (_autoSpawnList.length) {
+        setTimeout(() => {
+            _autoSpawnList.forEach(n => {
+                try {
+                    // Call the handler directly — _executeAction is not a defined
+                    // function in this scope; ACTION_HANDLERS is the correct path.
+                    ACTION_HANDLERS["spawn_important_npc"]({ id: n.id }, {});
+                } catch (e) {
+                    console.warn("[ScenarioTriggers] auto-spawn failed for", n.id, e);
+                }
+            });
+            console.log("[ScenarioTriggers] Auto-spawned", _autoSpawnList.length, "editor-placed NPC(s).");
+        }, 800);   // 800ms: world fully painted, globalNPCs ready
+    }
 
     // Run the optional intro sequence (see Story tab in editor).  We do this
     // as a deferred async run so that the world is fully drawn first.
@@ -1249,6 +1619,16 @@ function _applyPlayerSetup(scenarioDoc) {
     const ps = scenarioDoc.playerSetup;
     if (!ps) return;
 
+    // The editor saves xPct/yPct (0-1 fraction of world size).
+    // _placePlayer in scenario_update.js mutates ps.x/ps.y at apply time,
+    // but _applyPlayerSetup may run before that conversion happens (or the
+    // mutation may have been overridden by enterOverworldMode). Convert here
+    // defensively so this function is always self-sufficient.
+    const _W = window.WORLD_WIDTH_sandbox  || 4000;
+    const _H = window.WORLD_HEIGHT_sandbox || 3000;
+    if (typeof ps.x !== "number" && typeof ps.xPct === "number") ps.x = ps.xPct * _W;
+    if (typeof ps.y !== "number" && typeof ps.yPct === "number") ps.y = ps.yPct * _H;
+
     if (typeof ps.x === "number")    window.player.x = ps.x;
     if (typeof ps.y === "number")    window.player.y = ps.y;
     if (typeof ps.troops === "number") window.player.troops = ps.troops;
@@ -1259,24 +1639,76 @@ function _applyPlayerSetup(scenarioDoc) {
     if (typeof ps.faction === "string" && ps.faction) window.player.faction = ps.faction;
     if (Array.isArray(ps.enemies))   window.player.enemies = ps.enemies.slice();
 
-    // Roster: array of unit-type strings or array of {type,exp}
+    // Roster: accept either an Array of strings/objects OR a CSV string.
+    // hakata_bay_scenario.js's _buildRoster() returns CSV; the editor's saves
+    // emit arrays. We handle both so neither shape silently drops the troops.
+    let rosterArr = null;
     if (Array.isArray(ps.roster)) {
-        window.player.roster = ps.roster.map(r =>
+        rosterArr = ps.roster.map(r =>
             (typeof r === "string") ? { type: r, exp: 1 } :
-            (r && r.type) ? { type: r.type, exp: r.exp || 1 } :
-            { type: "Militia", exp: 1 }
+            (r && r.type)           ? { type: r.type, exp: r.exp || 1 } :
+                                      { type: "Militia", exp: 1 }
         );
-        window.player.troops = window.player.roster.length;
+    } else if (typeof ps.roster === "string" && ps.roster.trim()) {
+        rosterArr = ps.roster.split(",")
+            .map(s => s.trim()).filter(Boolean)
+            .map(t => ({ type: t, exp: 1 }));
     }
+    if (rosterArr && rosterArr.length > 0) {
+        window.player.roster = rosterArr;
+        window.player.troops = rosterArr.length;
+    }
+
+    // ── Step 3: per-Player customScript and cannotDie ──────────────────────
+    // customScript = JS source pumped by window.NpcWaypoints every ~1s with
+    // bindings (player, vars, ScenarioTriggers, NpcWaypoints, time, dt).
+    // cannotDie    = clamp player.troops ≥ 1 every tick (engine death gate).
+    if (typeof ps.customScript === "string") {
+        window.player.customScript = ps.customScript;
+        window.player.scriptIntervalMs = ps.scriptIntervalMs || 1000;
+    }
+    if (typeof ps.cannotDie !== "undefined") {
+        window.player.cannotDie = !!ps.cannotDie;
+    }
+
     console.log("[ScenarioTriggers] PlayerSetup applied:",
                 window.player.x, window.player.y, "troops:", window.player.troops);
 }
 
 // ── Optional story intro ────────────────────────────────────────────────────
 async function _maybePlayStoryIntro(scenarioDoc) {
+    if (!window.StoryPresentation) {
+        // No presentation layer — treat as "no intro"
+        _onIntroDone();
+        return;
+    }
+
+    // Guard: prevent running twice if start() is called a second time (e.g.
+    // by hakata_bay_scenario.install()) while the first intro is still playing.
+    // We mark the scenarioDoc object itself so the flag survives the second
+    // start() call (which uses the same object reference).
+    if (scenarioDoc.__introPlayed) return;
+    scenarioDoc.__introPlayed = true;
+
+    // Step 4: Prefer the new movies[] format. movies[0] is the boot intro by
+    // convention. If the scenario has no movies, fall back to the legacy
+    // storyIntro shape so older scenarios keep working.
+    if (Array.isArray(scenarioDoc.movies) && scenarioDoc.movies.length > 0) {
+        const m = scenarioDoc.movies[0];
+        if (m && m.enabled !== false && Array.isArray(m.items) && m.items.length > 0) {
+            await _playMovie(m);
+            _onIntroDone("movies");
+            return;
+        }
+    }
+
     const intro = scenarioDoc.storyIntro;
-    if (!intro || !intro.enabled) return;
-    if (!window.StoryPresentation) return;
+    if (!intro || !intro.enabled) {
+        // No intro configured — signal immediately so scenario_start fires on
+        // the very next tick and nothing is ever blocked.
+        _onIntroDone("none");
+        return;
+    }
 
     rt.storyPlaying = true;
     try {
@@ -1292,15 +1724,86 @@ async function _maybePlayStoryIntro(scenarioDoc) {
             });
         }
         if (intro.art) {
-            await window.StoryPresentation.showArt(intro.art, {
-                ms:       intro.artMs || 5000,
-                kenburns: !!intro.kenburns
-            });
-        }
-        if (Array.isArray(intro.lines) && intro.lines.length > 0) {
+            const _hasLines = Array.isArray(intro.lines) && intro.lines.length > 0;
+
+            if (_hasLines) {
+                // ── Background-art mode ────────────────────────────────────────
+                // Show art WITHOUT auto-dismiss (ms:0, no click-advance).
+                // Ken-Burns zoom plays while we wait; dialogue runs on top
+                // (z-index 18004 > art 18002).
+                //
+                // Two-art support: if intro.art2 + intro.art2OnLine are defined,
+                // art1 plays for the opening lines, then at line art2OnLine we
+                // dismiss art1 and cross-fade to art2, so the visuals mirror the
+                // dialogue shift (e.g. "enemy fleet" → "your troops").
+                // background:true bypasses the FIFO queue so showArt and
+                // showDialogue can run concurrently (art behind dialogue).
+                window.StoryPresentation.showArt(intro.art, {
+                    ms:             0,
+                    background:     true,
+                    kenburns:       !!intro.kenburns,
+                    caption:        intro.artCaption || "",
+                    clickToAdvance: false
+                });
+                // Let the Ken-Burns zoom-in settle before opening dialogue
+                await _sleep(3000);
+
+                // Build optional mid-dialogue art-swap callback
+                var _onLineArtSwitch = null;
+                if (intro.art2 && typeof intro.art2OnLine === "number") {
+                    var _art2Shown = false;
+                    _onLineArtSwitch = function(lineIdx) {
+                        if (!_art2Shown && lineIdx === intro.art2OnLine) {
+                            _art2Shown = true;
+                            // Dismiss art1 — this starts the 1000ms CSS fade-out +
+                            // a 1000ms delayed cleanup in showArt's finish().
+                            window.StoryPresentation.dismissArt();
+                            // ── Cross-fade delay must exceed the 1000ms cleanup
+                            // timeout in showArt's finish() — otherwise Art 1's
+                            // stale cleanup timer fires AFTER Art 2's _begin() and
+                            // clears the new backgroundImage, blanking Art 2.
+                            // art2CrossfadeMs defaults to 1200ms for safety.
+                            var _xfadeMs = (typeof intro.art2CrossfadeMs === "number")
+                                           ? intro.art2CrossfadeMs : 1200;
+                            setTimeout(function() {
+                                window.StoryPresentation.showArt(intro.art2, {
+                                    ms:             0,
+                                    background:     true,
+                                    kenburns:       !!intro.kenburns,
+                                    caption:        intro.art2Caption || "",
+                                    clickToAdvance: false
+                                });
+                            }, _xfadeMs);
+                        }
+                    };
+                }
+
+                // Dialogue plays over the lingering art background
+                await window.StoryPresentation.showDialogue(intro.lines, {
+                    letterbox:     intro.letterbox !== false,
+                    typewriterCps: (typeof intro.typewriterCps === "number") ? intro.typewriterCps : 0,
+                    autoAdvanceMs: (typeof intro.autoAdvance === "number")   ? intro.autoAdvance   : 0,
+                    onLine:        _onLineArtSwitch
+                });
+
+                // Dialogue done → dismiss whichever art is still showing,
+                // then wait for the fade-out CSS transition to finish.
+                window.StoryPresentation.dismissArt();
+                await _sleep(900);
+            } else {
+                // No dialogue — art plays fully and auto-dismisses (original behaviour)
+                await window.StoryPresentation.showArt(intro.art, {
+                    ms:       intro.artMs || 5000,
+                    kenburns: !!intro.kenburns,
+                    caption:  intro.artCaption || ""
+                });
+            }
+        } else if (Array.isArray(intro.lines) && intro.lines.length > 0) {
+            // Art-less dialogue (e.g. text-only intro)
             await window.StoryPresentation.showDialogue(intro.lines, {
-                letterbox: intro.letterbox !== false,
-                typewriterCps: intro.typewriterCps || 40
+                letterbox:     intro.letterbox !== false,
+                typewriterCps: (typeof intro.typewriterCps === "number") ? intro.typewriterCps : 0,
+                autoAdvanceMs: (typeof intro.autoAdvance   === "number") ? intro.autoAdvance   : 0
             });
         }
         if (intro.fadeMs) {
@@ -1309,6 +1812,102 @@ async function _maybePlayStoryIntro(scenarioDoc) {
         }
     } finally {
         rt.storyPlaying = false;
+        _onIntroDone("storyIntro");
+    }
+}
+
+// ── Shared post-intro cleanup called by every _maybePlayStoryIntro exit path ──
+//
+// Sets the flags that gate scenario_start (introComplete), parle (3s buffer),
+// and city-panel (5s campaign guard).  Also hard-closes any parle session that
+// leaked open while the player's starting position was being settled during the
+// cinematic — proximity triggers near Imazu often fire a parle before the
+// intro has even shown the first frame.
+function _onIntroDone(source) {
+    source = source || "unknown";
+
+    // ── 1. Mark intro done so scenario_start evaluates to true ───────────────
+    window.__DoG_introDone    = true;
+    // ── 2. Stamp the end time so parle cooldown and city-panel guard can check ─
+    window.__DoG_introEndTime = Date.now();
+
+    console.log("[ScenarioTriggers] Intro done (" + source + ") — "
+                + "__DoG_introDone=true, __DoG_introEndTime=" + window.__DoG_introEndTime);
+
+    // ── 3. Hard-close any parle panel that leaked in during the cinematic ─────
+    // The player spawns at Imazu (right next to city/NPC proximity triggers).
+    // Those triggers may have opened the parle panel before the intro was done.
+    // We force everything shut here so the player starts with a clean slate.
+    try {
+        const _pp = document.getElementById('parle-panel');
+        if (_pp) {
+            _pp.style.display = 'none';
+            console.log("[ScenarioTriggers] Post-intro: force-closed parle panel.");
+        }
+        // Reset ALL parle state globals (defined at module scope in parler_system.js)
+        if (typeof window.inParleMode          !== 'undefined') window.inParleMode          = false;
+        if (typeof window.isDiplomacyProcessing !== 'undefined') window.isDiplomacyProcessing = false;
+        if (typeof window.currentParleNPC       !== 'undefined') window.currentParleNPC       = null;
+        if (typeof window.savedParleTile        !== 'undefined') window.savedParleTile        = null;
+
+        // ── 4. Un-pause player movement — intro may have left it paused ─────
+        if (window.player) {
+            window.player.isMapPaused = false;
+            // Stamp the time so the parle system's post-intro 3s cooldown starts NOW
+            window.__DoG_introEndTime = Date.now();
+        }
+
+        // ── 5. Ensure storyPlaying is clear so triggers tick normally ─────────
+        rt.storyPlaying = false;
+
+        // ── 6. Force StoryPresentation into a clean state ────────────────────
+        // clear() resets pointer-events on sp-root and hides all overlay layers
+        // so nothing from the cinematic blocks game-UI clicks.
+        if (window.StoryPresentation && typeof window.StoryPresentation.clear === 'function') {
+            window.StoryPresentation.clear();
+        }
+
+        // ── 7. Re-enable city-settlement and parler-system buttons ───────────
+        // In some code paths a button may have been left disabled (e.g. by a
+        // prior updateRecruitButton / updateBuyFoodButton call that ran while
+        // the player's gold/food was still being initialised).  We refresh both
+        // helpers so the buttons reflect the current player state, and we also
+        // strip any residual pointer-events:none or opacity:0.5 from the city
+        // panel and related containers so the player can click immediately.
+        try {
+            // Re-run the engine's own button-state helpers if available
+            if (typeof window.updateRecruitButton === 'function') window.updateRecruitButton();
+            if (typeof window.updateBuyFoodButton  === 'function') window.updateBuyFoodButton();
+
+            // Belt-and-suspenders: force-enable every named city/parle button
+            [
+                'recruit-militia-btn', 'buy-food-btn', 'trade-btn',
+                'siege-button', 'assault-button', 'peace-button',
+                'gui-continue-btn', 'gui-assault-btn', 'gui-leave-btn'
+            ].forEach(function(id) {
+                var el = document.getElementById(id);
+                if (!el) return;
+                // Only clear the disabled flag — don't override legitimate
+                // state that updateRecruitButton/updateBuyFoodButton just set.
+                // (Those helpers re-disable when the player genuinely can't afford.)
+                if (el.disabled && !el.dataset.scenarioDisabled) {
+                    el.disabled = false;
+                }
+                el.style.pointerEvents = '';
+                el.style.opacity       = '';
+            });
+
+            // Restore pointer-events on the city panel and UI sidebar so clicks
+            // are never swallowed by a lingering overlay from the cinematic.
+            ['city-panel', 'ui', 'recruit-box', 'hostile-box'].forEach(function(id) {
+                var el = document.getElementById(id);
+                if (el) el.style.pointerEvents = '';
+            });
+        } catch (e2) {
+            console.warn("[ScenarioTriggers] Post-intro button re-enable error:", e2);
+        }
+    } catch (e) {
+        console.warn("[ScenarioTriggers] Post-intro parle flush error:", e);
     }
 }
 
@@ -1477,11 +2076,198 @@ function openEditor(scenarioDoc) {
 }
 
 // Lazy-init scenario fields the editor uses
+
+// ── Step 4: Movie shape ────────────────────────────────────────────────────
+// A movie is an ordered sequence of cinematic items. Each item has a `type`
+// ("fade" | "title" | "art" | "dialogue") and the type-specific fields. The
+// player executes them in array order; reordering an item moves where it
+// runs in the cinematic. Fields not relevant to a type are ignored.
+//
+// Item shapes:
+//   { type: "fade",     fadeMs, fadeColor, direction: "in"|"out" }
+//   { type: "title",    title, subtitle, ms }
+//   { type: "art",      art, artMs, kenburns, artCaption }
+//   { type: "dialogue", name, text, side, portrait, color, narrator: bool }
+function _newMovie(name) {
+    return {
+        id:       "movie_" + Date.now() + "_" + Math.floor(Math.random() * 9999),
+        name:     name || "Movie",
+        enabled:  true,
+        items:    [],            // array of cinematic items (fade/title/art/dialogue)
+        // Per-movie playback options (read by the playback pipeline).
+        letterbox:     true,
+        typewriterCps: 0,       // 0 = instant text (no typewriter effect)
+        // (legacy) flat fadeMs/fadeColor used as defaults when "fade" items
+        // omit their own; not strictly required but kept for convenience.
+        fadeMs:        1200,
+        fadeColor:     "#000000"
+    };
+}
+
+// Convert the legacy storyIntro shape into a "movies[0]" entry. Order:
+// fade-out (start black) → title → art → dialogue → fade-in.
+function _movieFromLegacyIntro(intro, name) {
+    const m = _newMovie(name || "Intro");
+    m.enabled       = intro.enabled !== false;
+    m.letterbox     = intro.letterbox !== false;
+    m.typewriterCps = (typeof intro.typewriterCps === "number") ? intro.typewriterCps : 0;
+    m.fadeMs        = intro.fadeMs || 1200;
+    m.fadeColor     = intro.fadeColor || "#000000";
+
+    if (intro.fadeMs) {
+        m.items.push({ type: "fade", direction: "out", fadeMs: 0,
+                       fadeColor: intro.fadeColor || "#000000" });
+    }
+    if (intro.titleCard && intro.titleCard.title) {
+        m.items.push({ type: "title",
+                       title:    intro.titleCard.title,
+                       subtitle: intro.titleCard.subtitle || "",
+                       ms:       intro.titleCard.ms || 3500 });
+    }
+    if (intro.art) {
+        m.items.push({ type: "art",
+                       art:        intro.art,
+                       artMs:      intro.artMs || 5000,
+                       kenburns:   !!intro.kenburns,
+                       artCaption: intro.artCaption || "" });
+    }
+    if (Array.isArray(intro.lines)) {
+        intro.lines.forEach(ln => m.items.push(Object.assign({ type: "dialogue" }, ln)));
+    }
+    if (intro.fadeMs) {
+        m.items.push({ type: "fade", direction: "in",
+                       fadeMs: intro.fadeMs || 1200,
+                       fadeColor: intro.fadeColor || "#000000" });
+    }
+    return m;
+}
+
+// Play a movie with the StoryPresentation API. Used by both the boot intro
+// and the play_movie action.
+async function _playMovie(movie) {
+    if (!movie || !Array.isArray(movie.items) || movie.items.length === 0) return;
+    if (!window.StoryPresentation) return;
+    if (movie.enabled === false) return;
+    rt.storyPlaying = true;
+
+    // ── Default fade settings for auto-wrapping ──────────────────────────────
+    const _dfColor = movie.fadeColor || "#000000";
+    const _dfOutMs = movie.fadeMs   || 800;   // fade-to-black before each art
+    const _dfInMs  = movie.fadeMs   || 1000;  // fade-from-black after each art
+
+    // ── Helper: peek at the next ENABLED item ────────────────────────────────
+    const _nextEnabled = (fromIdx) => {
+        for (let k = fromIdx + 1; k < movie.items.length; k++) {
+            const nx = movie.items[k];
+            if (nx && nx.enabled !== false) return nx;
+        }
+        return null;
+    };
+
+    // ── Track whether the screen is currently faded-out (black) ─────────────
+    let _screenBlack = false;
+
+    try {
+        for (let i = 0; i < movie.items.length; i++) {
+            const it = movie.items[i];
+            if (!it || it.enabled === false) continue;
+            try {
+                if (it.type === "fade") {
+                    // ── Explicit fade item ──────────────────────────────────────
+                    if ((it.direction || "out") === "out") {
+                        await window.StoryPresentation.fadeOut(
+                            it.fadeMs || 0, it.fadeColor || _dfColor);
+                        _screenBlack = true;
+                    } else {
+                        await window.StoryPresentation.fadeIn(
+                            it.fadeMs || _dfInMs,
+                            it.fadeColor || _dfColor);
+                        _screenBlack = false;
+                    }
+
+                } else if (it.type === "title" && it.title) {
+                    // ── Title card ─────────────────────────────────────────────
+                    await window.StoryPresentation.showTitle({
+                        title:    it.title,
+                        subtitle: it.subtitle || "",
+                        ms:       it.ms || 3500
+                    });
+
+                } else if (it.type === "art" && it.art) {
+                    // ── Art card — auto fade-out BEFORE, fade-in AFTER ──────────
+                    //
+                    // Every art transition passes through black so images never
+                    // hard-cut to each other or to the game world.
+                    //
+                    // 1. Pre-fade: go black if we are not already
+                    if (!_screenBlack) {
+                        await window.StoryPresentation.fadeOut(_dfOutMs, _dfColor);
+                        _screenBlack = true;
+                    }
+
+                    // 2. Fade-IN to reveal the art
+                    await window.StoryPresentation.fadeIn(_dfInMs, _dfColor);
+                    _screenBlack = false;
+
+                    // 3. Show the art (blocks until dismissed or auto-closed)
+                    await window.StoryPresentation.showArt(it.art, {
+                        ms:       (typeof it.artMs === "number") ? it.artMs : 5000,
+                        kenburns: !!it.kenburns,
+                        caption:  it.artCaption || ""
+                    });
+
+                    // 4. Post-fade: always return to black after art closes
+                    //    so there is never a hard-cut to the next item.
+                    await window.StoryPresentation.fadeOut(_dfOutMs, _dfColor);
+                    _screenBlack = true;
+
+                    // 5. If the next item is dialogue (not art), lift the black
+                    //    now so dialogue appears over the world, not darkness —
+                    //    unless an explicit fade-in is coming right after.
+                    const _next = _nextEnabled(i);
+                    if (_next && _next.type === "dialogue") {
+                        await window.StoryPresentation.fadeIn(_dfInMs, _dfColor);
+                        _screenBlack = false;
+                    }
+
+                } else if (it.type === "dialogue") {
+                    // ── Dialogue line ──────────────────────────────────────────
+                    // If the screen is still black when we reach dialogue,
+                    // fade it in so the player can see the world behind the card.
+                    if (_screenBlack) {
+                        await window.StoryPresentation.fadeIn(_dfInMs, _dfColor);
+                        _screenBlack = false;
+                    }
+                    await window.StoryPresentation.showDialogue([it], {
+                        letterbox:     movie.letterbox !== false,
+                        typewriterCps: (typeof movie.typewriterCps === "number") ? movie.typewriterCps : 0,
+                        autoAdvanceMs: (typeof it.autoAdvanceMs   === "number") ? it.autoAdvanceMs
+                                     : (typeof movie.autoAdvanceMs === "number") ? movie.autoAdvanceMs : 0
+                    });
+                }
+            } catch (e) {
+                console.warn("[ScenarioTriggers] _playMovie item failed:", it, e);
+            }
+        }
+
+        // ── End of movie: lift any residual black screen ─────────────────────
+        if (_screenBlack) {
+            try {
+                await window.StoryPresentation.fadeIn(_dfInMs, _dfColor);
+            } catch (e) {
+                console.warn("[ScenarioTriggers] _playMovie end-fade-in failed:", e);
+            }
+        }
+    } finally {
+        rt.storyPlaying = false;
+    }
+}
+
 function _ensureScenarioFields(s) {
     if (!Array.isArray(s.triggers))       s.triggers       = [];
     if (!Array.isArray(s.importantNpcs))  s.importantNpcs  = [];
     if (!s.playerSetup)   s.playerSetup   = {
-        x: null, y: null, faction: "Player's Kingdom", troops: 20, gold: 500,
+        x: null, y: null, faction: "Player", troops: 20, gold: 500,
         food: 100, hp: 200, maxHealth: 200, enemies: ["Bandits"], roster: []
     };
     if (!s.storyIntro)    s.storyIntro    = {
@@ -1490,12 +2276,27 @@ function _ensureScenarioFields(s) {
         art: "", artMs: 5000, kenburns: false,
         lines: [], letterbox: true, typewriterCps: 40
     };
+
+    // ── Step 4: Movies array. Migrates legacy storyIntro → movies[0]. ───────
+    // A "movie" is an ordered sequence of cinematics: fades, title cards,
+    // art cards, and dialogue lines, all interleaved. The boot movie is
+    // movies[0] (named "Intro" by convention). Other movies are triggered
+    // explicitly via the play_movie action, so a scenario can have any
+    // number of cutscenes that fire mid-game.
+    if (!Array.isArray(s.movies) || s.movies.length === 0) {
+        // Build movie #0 from the legacy storyIntro fields. We preserve the
+        // top-level storyIntro for any code/scenario module that still reads
+        // it (back-compat); but the editor now writes to movies[0] instead.
+        const intro = s.storyIntro || {};
+        s.movies = [_movieFromLegacyIntro(intro, "Intro")];
+    }
     if (!s.scenarioVars)  s.scenarioVars  = {};
+    if (!s.initialDiplomacy) s.initialDiplomacy = {};
     if (!s.winLose)       s.winLose       = {
-        winRules: [],   // [{ type: "capture_city" | "eliminate_faction" | "survive_seconds" | "kill_npc", value }]
+        winRules: [],
         loseRules: []
     };
-    if (!s.timeline)      s.timeline      = []; // [{ atSec, kind: "trigger_id" | "show_subtitle"|..., refOrParams }]
+    if (!s.timeline)      s.timeline      = [];
 }
 
 // ╔══════════════════════════════════════════════════════════════════════════╗
@@ -1700,7 +2501,7 @@ function _injectEditorCss() {
 // ╔══════════════════════════════════════════════════════════════════════════╗
 // ║ CHROME — Tabs, Close, Body container                                     ║
 // ╚══════════════════════════════════════════════════════════════════════════╝
-const TABS = ["Story", "Player", "NPCs", "Triggers", "Win/Lose", "Timeline", "Code Export", "Help"];
+const TABS = ["Story", "Player", "NPCs", "Diplomacy", "Triggers", "Win/Lose", "Timeline", "Code Export", "Help"];
 
 function _buildEditorChrome(root) {
     root.innerHTML = `
@@ -1737,6 +2538,7 @@ function _switchTab(name) {
         case "Story":      _renderStoryTab(body); break;
         case "Player":     _renderPlayerTab(body); break;
         case "NPCs":       _renderNpcsTab(body); break;
+        case "Diplomacy":  _renderDiplomacyTab(body); break;
         case "Triggers":   _renderTriggersTab(body); break;
         case "Win/Lose":   _renderWinLoseTab(body); break;
         case "Timeline":   _renderTimelineTab(body); break;
@@ -1746,132 +2548,470 @@ function _switchTab(name) {
 }
 
 // ╔══════════════════════════════════════════════════════════════════════════╗
+// ║ DIPLOMACY TAB — set starting War / Peace / Ally between factions         ║
+// ╚══════════════════════════════════════════════════════════════════════════╝
+function _renderDiplomacyTab(host) {
+    const s = editorState.scenario;
+    if (!s.initialDiplomacy) s.initialDiplomacy = {};
+
+    // Collect enabled factions (excluding Bandits — always at war by engine rule)
+    const factions = Object.keys(s.factions || {}).filter(f =>
+        s.factions[f].enabled && f !== "Bandits"
+    );
+
+    // Normalise player faction name for matching
+    const isPlayer = (n) => n === "Player" || n === "Player's Kingdom" ||
+                            (typeof window !== "undefined" && window.PlayerFaction && window.PlayerFaction.is(n));
+
+    // Helper: get saved relation for pair (a, b), defaulting to Peace
+    const getRel = (a, b) => {
+        if (a === b) return "Self";
+        return (s.initialDiplomacy[a] && s.initialDiplomacy[a][b]) || "Peace";
+    };
+    const setRel = (a, b, rel) => {
+        if (!s.initialDiplomacy[a]) s.initialDiplomacy[a] = {};
+        if (!s.initialDiplomacy[b]) s.initialDiplomacy[b] = {};
+        s.initialDiplomacy[a][b] = rel;
+        s.initialDiplomacy[b][a] = rel;
+    };
+
+    const REL_OPTIONS = ["Peace", "War", "Ally"];
+    const REL_COLORS  = { "Peace": "#d4b886", "War": "#ff5252", "Ally": "#8bc34a", "Self": "#666" };
+
+    function renderTable() {
+        host.innerHTML = `
+            <fieldset>
+                <legend>Initial Faction Diplomacy</legend>
+                <p style="color:#8aa;font-size:11px;">
+                    Set the starting diplomatic relationship between every pair of factions.
+                    These values are applied when the scenario loads, before any triggers run.
+                    <br>• <strong style="color:#d4b886;">Peace</strong> — neutral (no combat between factions)
+                    <br>• <strong style="color:#ff5252;">War</strong> — hostile (NPCs attack each other on sight)
+                    <br>• <strong style="color:#8bc34a;">Ally</strong> — friendly (assist each other, won't attack)
+                    <br>Click a cell to cycle through states. The matrix is symmetric — changing A↔B also changes B↔A.
+                </p>
+                ${factions.length < 2 ? `<p style="color:#f5d76e;">⚠ Need at least 2 non-Bandit factions to configure diplomacy. Go to the scenario editor Factions panel and enable more factions.</p>` : ""}
+                <div style="overflow-x:auto;margin-top:12px;">
+                <table id="diplo-table" style="border-collapse:collapse;font-size:11px;">
+                    <thead>
+                        <tr>
+                            <th style="padding:4px 8px;text-align:right;color:#aaa;"></th>
+                            ${factions.map(f => `<th style="padding:4px 6px;text-align:center;color:#cfd8dc;max-width:80px;word-break:break-word;" title="${_esc(f)}">${_esc(f.length > 12 ? f.slice(0,11)+"…" : f)}</th>`).join("")}
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${factions.map(f1 => `
+                        <tr>
+                            <td style="padding:4px 8px;text-align:right;color:#cfd8dc;white-space:nowrap;">${_esc(f1)}</td>
+                            ${factions.map(f2 => {
+                                const rel = getRel(f1, f2);
+                                if (rel === "Self") {
+                                    return `<td style="background:#222;text-align:center;padding:4px 6px;color:#444;">—</td>`;
+                                }
+                                const color = REL_COLORS[rel] || "#d4b886";
+                                const pairKey = `${f1}|||${f2}`;
+                                return `<td data-pair="${_esc(pairKey)}"
+                                            style="text-align:center;padding:4px 6px;cursor:pointer;
+                                                   background:#1c2530;color:${color};font-weight:bold;
+                                                   border:1px solid #3a4456;"
+                                            title="Click to cycle: Peace → War → Ally → Peace">
+                                            ${rel.toUpperCase()}
+                                        </td>`;
+                            }).join("")}
+                        </tr>`).join("")}
+                    </tbody>
+                </table>
+                </div>
+            </fieldset>
+
+            <fieldset style="margin-top:10px;">
+                <legend>Quick Presets</legend>
+                <p style="color:#8aa;font-size:11px;">Apply a relationship between the Player and all other factions at once.</p>
+                <button class="st-btn" id="diplo-all-peace">All Factions → Peace</button>
+                <button class="st-btn danger" id="diplo-all-war">Player vs All → War</button>
+                <button class="st-btn primary" id="diplo-all-ally">Player + All → Ally</button>
+                <button class="st-btn" id="diplo-reset">Reset All to Default (Peace)</button>
+            </fieldset>
+        `;
+
+        // Cell click: cycle relation
+        const table = host.querySelector("#diplo-table");
+        if (table) {
+            table.addEventListener("click", e => {
+                const td = e.target.closest("[data-pair]");
+                if (!td) return;
+                const [f1, f2] = td.dataset.pair.split("|||");
+                const cur = getRel(f1, f2);
+                const next = REL_OPTIONS[(REL_OPTIONS.indexOf(cur) + 1) % REL_OPTIONS.length];
+                setRel(f1, f2, next);
+                renderTable(); // re-render to show new state
+            });
+        }
+
+        // Quick presets
+        const playerFaction = factions.find(isPlayer) || factions[0];
+        host.querySelector("#diplo-all-peace").onclick = () => {
+            for (let i = 0; i < factions.length; i++)
+                for (let j = i+1; j < factions.length; j++)
+                    setRel(factions[i], factions[j], "Peace");
+            renderTable();
+        };
+        host.querySelector("#diplo-all-war").onclick = () => {
+            if (!playerFaction) return;
+            factions.filter(f => f !== playerFaction).forEach(f => setRel(playerFaction, f, "War"));
+            renderTable();
+        };
+        host.querySelector("#diplo-all-ally").onclick = () => {
+            if (!playerFaction) return;
+            factions.filter(f => f !== playerFaction).forEach(f => setRel(playerFaction, f, "Ally"));
+            renderTable();
+        };
+        host.querySelector("#diplo-reset").onclick = () => {
+            s.initialDiplomacy = {};
+            renderTable();
+        };
+    }
+
+    renderTable();
+}
+
+// ╔══════════════════════════════════════════════════════════════════════════╗
 // ║ STORY TAB — intro art / dialogue / fade / title card                     ║
 // ╚══════════════════════════════════════════════════════════════════════════╝
 function _renderStoryTab(host) {
     const s = editorState.scenario;
-    const intro = s.storyIntro;
+    if (!Array.isArray(s.movies) || s.movies.length === 0) {
+        s.movies = [_movieFromLegacyIntro(s.storyIntro || {}, "Intro")];
+    }
+    if (typeof editorState.currentMovieIdx !== "number" ||
+        editorState.currentMovieIdx >= s.movies.length) {
+        editorState.currentMovieIdx = 0;
+    }
 
     host.innerHTML = `
-        <fieldset>
-            <legend>Story Intro</legend>
-            <label>
-                <input type="checkbox" id="si-enabled" ${intro.enabled ? "checked" : ""}>
-                Enable intro sequence at scenario start
-            </label>
-            <div style="margin-top:10px;color:#8aa;font-size:11px;">
-                Sequence order: Fade-in (from black) → Title card → Art card → Dialogue → Fade-out (to clear).<br>
-                Each section is optional; leave blank to skip that step.
-            </div>
-        </fieldset>
-
-        <fieldset>
-            <legend>Fade</legend>
-            <label>Fade duration (ms): <input id="si-fadeMs" type="number" min="0" value="${intro.fadeMs || 1200}" style="width:80px;"></label>
-            <label>Fade color: <input id="si-fadeColor" type="color" value="${intro.fadeColor || "#000000"}"></label>
-        </fieldset>
-
-        <fieldset>
-            <legend>Title Card</legend>
-            <label>Title:    <input id="si-title"    type="text" value="${_esc(intro.titleCard?.title    || "")}" style="width:300px;"></label>
-            <label>Subtitle: <input id="si-subtitle" type="text" value="${_esc(intro.titleCard?.subtitle || "")}" style="width:300px;"></label>
-            <label>Hold ms:  <input id="si-titleMs"  type="number" min="0" value="${intro.titleCard?.ms || 3500}" style="width:80px;"></label>
-        </fieldset>
-
-        <fieldset>
-            <legend>Art Card (full-screen image)</legend>
-            <div>
-                Art image (JPG/PNG):
-                <input type="file" id="si-art-file" accept="image/*" style="margin-left:8px;">
-                <button class="st-btn" id="si-art-clear">Clear</button>
-            </div>
-            <div style="margin-top:6px;">
-                <span id="si-art-preview-wrap"></span>
-            </div>
-            <div style="margin-top:10px;">
-                <label>Hold ms (0 = wait for click): <input id="si-artMs" type="number" min="0" value="${intro.artMs || 5000}" style="width:80px;"></label>
-                <label><input type="checkbox" id="si-kenburns" ${intro.kenburns ? "checked" : ""}> Ken-Burns zoom</label>
-            </div>
-        </fieldset>
-
-        <fieldset>
-            <legend>Dialogue Lines (intro)</legend>
-            <div id="si-lines-list"></div>
-            <button class="st-btn primary" id="si-add-line">+ Add Line</button>
-            <div style="margin-top:8px;color:#8aa;font-size:11px;">
-                Tip: portraits can be set per-line, or you can leave them blank and rely on the
-                NPC's registered portrait (set in the NPCs tab).
-            </div>
-            <div style="margin-top:10px;">
-                <label><input type="checkbox" id="si-letterbox" ${intro.letterbox !== false ? "checked" : ""}> Show cinematic bars during dialogue</label>
-                <label>Typewriter speed (cps): <input id="si-tcps" type="number" min="0" value="${intro.typewriterCps || 40}" style="width:60px;"></label>
-            </div>
-        </fieldset>
-
-        <button class="st-btn primary" id="si-save">Apply Story Settings</button>
-        <button class="st-btn" id="si-test">▶ Test Intro Now</button>
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px;flex-wrap:wrap;
+                    border-bottom:1px solid #3a4858;padding-bottom:6px;">
+            <strong style="color:#f5d76e;">Movies:</strong>
+            <div id="movies-tabbar" style="display:flex;gap:2px;flex-wrap:wrap;flex:1;"></div>
+            <button class="st-btn primary" id="movie-add">+ Movie</button>
+            <button class="st-btn"         id="movie-rename">Rename</button>
+            <button class="st-btn"         id="movie-dup">Duplicate</button>
+            <button class="st-btn danger"  id="movie-del">Delete</button>
+        </div>
+        <div id="movie-body"></div>
     `;
 
-    // Attach
-    const re = host;
-    function refresh() {
-        re.querySelector("#si-art-preview-wrap").innerHTML = intro.art
-            ? `<img src="${intro.art}" alt="art preview" style="max-width:240px;max-height:140px;border:2px solid #5a4220;background:#000;">`
-            : `<span style="color:#666;">(no art selected)</span>`;
-        // Dialogue lines list
-        const list = re.querySelector("#si-lines-list");
-        list.innerHTML = "";
-        (intro.lines || []).forEach((ln, idx) => {
-            list.appendChild(_buildDialogueLineEditor(ln, idx, () => {
-                intro.lines.splice(idx, 1);
-                refresh();
-            }));
+    function renderTabBar() {
+        const bar = host.querySelector("#movies-tabbar");
+        bar.innerHTML = "";
+        s.movies.forEach((m, i) => {
+            const btn = document.createElement("div");
+            btn.dataset.idx = i;
+            const active = (i === editorState.currentMovieIdx);
+            btn.style.cssText = `
+                padding:4px 10px;cursor:pointer;
+                border:1px solid ${active ? "#f5d76e" : "#4a8fa8"};
+                background:${active ? "#3a2a0a" : "#1a3a5c"};
+                color:${active ? "#f5d76e" : "#cfd8dc"};
+                border-radius:4px 4px 0 0;font-size:12px;font-weight:${active ? "bold" : "normal"};
+                user-select:none;
+            `;
+            btn.textContent = (m.enabled === false ? "⊘ " : "") + (m.name || `Movie ${i+1}`);
+            btn.title = `id: ${m.id}\n${m.items.length} item(s)\nClick to switch · double-click to rename`;
+            btn.onclick = () => {
+                editorState.currentMovieIdx = i;
+                render();
+            };
+            btn.ondblclick = (e) => { e.stopPropagation(); renameMovie(); };
+            bar.appendChild(btn);
         });
     }
-    refresh();
 
-    re.querySelector("#si-art-file").addEventListener("change", e => {
-        const f = e.target.files[0];
-        if (!f) return;
-        _readFileAsDataURL(f, (url) => { intro.art = url; refresh(); });
-    });
-    re.querySelector("#si-art-clear").addEventListener("click", () => {
-        intro.art = ""; refresh();
-    });
-    re.querySelector("#si-add-line").addEventListener("click", () => {
-        if (!Array.isArray(intro.lines)) intro.lines = [];
-        intro.lines.push({ name: "Narrator", text: "...", side: "left", portrait: "" });
-        refresh();
-    });
-    re.querySelector("#si-save").addEventListener("click", () => {
-        intro.enabled  = re.querySelector("#si-enabled").checked;
-        intro.fadeMs   = +re.querySelector("#si-fadeMs").value || 0;
-        intro.fadeColor = re.querySelector("#si-fadeColor").value;
-        intro.titleCard = {
-            title:    re.querySelector("#si-title").value,
-            subtitle: re.querySelector("#si-subtitle").value,
-            ms:       +re.querySelector("#si-titleMs").value || 0
-        };
-        intro.artMs    = +re.querySelector("#si-artMs").value || 0;
-        intro.kenburns = re.querySelector("#si-kenburns").checked;
-        intro.letterbox    = re.querySelector("#si-letterbox").checked;
-        intro.typewriterCps = +re.querySelector("#si-tcps").value || 40;
-        alert("Story Intro settings applied.");
-    });
-    re.querySelector("#si-test").addEventListener("click", async () => {
-        // Save first
-        re.querySelector("#si-save").click();
-        if (!window.StoryPresentation) {
-            alert("StoryPresentation not loaded. Add storymode_presentation.js before this file.");
+    function renameMovie() {
+        const m = s.movies[editorState.currentMovieIdx];
+        if (!m) return;
+        const nm = prompt("Movie name:", m.name || "");
+        if (nm == null) return;
+        m.name = nm.trim() || ("Movie " + (editorState.currentMovieIdx + 1));
+        render();
+    }
+
+    host.querySelector("#movie-add").onclick = () => {
+        const m = _newMovie("Movie " + (s.movies.length + 1));
+        s.movies.push(m);
+        editorState.currentMovieIdx = s.movies.length - 1;
+        render();
+    };
+    host.querySelector("#movie-rename").onclick = renameMovie;
+    host.querySelector("#movie-dup").onclick = () => {
+        const m = s.movies[editorState.currentMovieIdx];
+        if (!m) return;
+        const copy = JSON.parse(JSON.stringify(m));
+        copy.id   = "movie_" + Date.now() + "_" + Math.floor(Math.random() * 9999);
+        copy.name = (m.name || "Movie") + " (copy)";
+        s.movies.splice(editorState.currentMovieIdx + 1, 0, copy);
+        editorState.currentMovieIdx++;
+        render();
+    };
+    host.querySelector("#movie-del").onclick = () => {
+        if (s.movies.length <= 1) {
+            alert("At least one movie must exist. Disable it instead, or clear its items.");
             return;
         }
-        rt.storyPlaying = true;
-        try {
-            await _maybePlayStoryIntro(s);
-        } finally {
-            rt.storyPlaying = false;
+        const m = s.movies[editorState.currentMovieIdx];
+        if (!confirm(`Delete movie "${m.name}"? This cannot be undone.`)) return;
+        s.movies.splice(editorState.currentMovieIdx, 1);
+        editorState.currentMovieIdx = Math.min(editorState.currentMovieIdx, s.movies.length - 1);
+        render();
+    };
+
+    function render() {
+        renderTabBar();
+        renderBody();
+    }
+
+    function renderBody() {
+        const m = s.movies[editorState.currentMovieIdx];
+        const body = host.querySelector("#movie-body");
+        if (!m) { body.innerHTML = "<em style='color:#8aa'>No movie selected.</em>"; return; }
+
+        body.innerHTML = `
+            <fieldset>
+                <legend>${_esc(m.name)} — Settings</legend>
+                <label><input type="checkbox" id="mov-enabled" ${m.enabled !== false ? "checked" : ""}> Enabled</label>
+                <span style="margin-left:14px;color:#8aa;font-size:11px;">
+                    Movie #0 plays at scenario start; others play via the
+                    <code>play_movie</code> trigger action.
+                </span>
+                <div style="margin-top:8px;">
+                    <label><input type="checkbox" id="mov-letterbox" ${m.letterbox !== false ? "checked" : ""}> Letterbox during dialogue</label>
+                    <label style="margin-left:14px;">Typewriter cps:
+                        <input type="number" id="mov-tcps" value="${m.typewriterCps || 40}" min="0" style="width:60px;">
+                    </label>
+                    <label style="margin-left:14px;">Default fade ms:
+                        <input type="number" id="mov-fadems" value="${m.fadeMs || 1200}" min="0" style="width:80px;">
+                    </label>
+                    <label style="margin-left:14px;">Default fade color:
+                        <input type="color" id="mov-fadecolor" value="${m.fadeColor || "#000000"}">
+                    </label>
+                </div>
+            </fieldset>
+
+            <fieldset>
+                <legend>Items (${m.items.length}) — runs in order top → bottom</legend>
+                <div style="display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap;">
+                    <button class="st-btn primary" id="mov-add-fade">+ Fade</button>
+                    <button class="st-btn primary" id="mov-add-title">+ Title</button>
+                    <button class="st-btn primary" id="mov-add-art">+ Art</button>
+                    <button class="st-btn primary" id="mov-add-dlg">+ Dialogue</button>
+                    <span style="flex:1;"></span>
+                    <button class="st-btn" id="mov-test">▶ Test This Movie</button>
+                </div>
+                <div id="mov-items"></div>
+            </fieldset>
+        `;
+
+        body.querySelector("#mov-enabled").onchange   = e => { m.enabled = e.target.checked; renderTabBar(); };
+        body.querySelector("#mov-letterbox").onchange = e => { m.letterbox = e.target.checked; };
+        body.querySelector("#mov-tcps").oninput       = e => { m.typewriterCps = +e.target.value || 40; };
+        body.querySelector("#mov-fadems").oninput     = e => { m.fadeMs = +e.target.value || 0; };
+        body.querySelector("#mov-fadecolor").oninput  = e => { m.fadeColor = e.target.value; };
+
+        body.querySelector("#mov-add-fade").onclick  = () => addItem({ type:"fade", direction:"in", fadeMs: m.fadeMs || 1200, fadeColor: m.fadeColor || "#000000" });
+        body.querySelector("#mov-add-title").onclick = () => addItem({ type:"title", title:"Chapter I", subtitle:"", ms: 3500 });
+        body.querySelector("#mov-add-art").onclick   = () => addItem({ type:"art", art:"", artMs: 5000, kenburns: false, artCaption: "" });
+        body.querySelector("#mov-add-dlg").onclick   = () => addItem({ type:"dialogue", name: "Narrator", text: "...", side: "left", portrait: "", color: "#d4b886", narrator: true });
+        body.querySelector("#mov-test").onclick      = async () => {
+            if (!window.StoryPresentation) { alert("StoryPresentation not loaded."); return; }
+            await _playMovie(m);
+        };
+
+        renderItems();
+
+        function addItem(item) {
+            m.items.push(item);
+            renderItems();
         }
-    });
+
+        function renderItems() {
+            const list = body.querySelector("#mov-items");
+            list.innerHTML = "";
+            if (m.items.length === 0) {
+                list.innerHTML = '<div style="color:#666;padding:8px;">No items yet — use the buttons above to add Fade / Title / Art / Dialogue.</div>';
+                return;
+            }
+            m.items.forEach((it, idx) => list.appendChild(buildItemCard(it, idx)));
+        }
+
+        function buildItemCard(it, idx) {
+            const card = document.createElement("div");
+            card.className = "st-mov-item";
+            card.style.cssText = `
+                border:1px solid #4a8fa8;background:#0e1a26;
+                padding:6px 8px;margin:5px 0;border-radius:4px;
+            `;
+            const head = document.createElement("div");
+            head.style.cssText = "display:flex;align-items:center;gap:6px;flex-wrap:wrap;";
+            const isEnabled = it.enabled !== false;
+            head.innerHTML = `
+                <span style="background:#3a2a0a;color:#f5d76e;padding:1px 6px;border-radius:3px;font-size:11px;font-weight:bold;">
+                    #${idx + 1}
+                </span>
+                <span style="background:${_typeColor(it.type)};color:#fff;padding:1px 6px;border-radius:3px;font-size:11px;text-transform:uppercase;">
+                    ${it.type}
+                </span>
+                <span style="flex:1;color:${isEnabled ? "#cfd8dc" : "#666"};font-style:italic;">${_typeSummary(it)}</span>
+                <button class="st-btn st-mi-up"   ${idx === 0 ? "disabled" : ""} title="Move up">▲</button>
+                <button class="st-btn st-mi-down" ${idx === m.items.length - 1 ? "disabled" : ""} title="Move down">▼</button>
+                <button class="st-btn st-mi-dup"  title="Duplicate">⧉</button>
+                <button class="st-btn st-mi-en"   title="Toggle enabled">${isEnabled ? "✓" : "○"}</button>
+                <button class="st-btn danger st-mi-del" title="Delete">✕</button>
+            `;
+            card.appendChild(head);
+
+            const editor = document.createElement("div");
+            editor.style.cssText = "margin-top:6px;";
+            editor.appendChild(_buildMovieItemEditor(it, idx, () => renderItems()));
+            card.appendChild(editor);
+
+            head.querySelector(".st-mi-up").onclick   = () => { if (idx === 0) return; [m.items[idx-1], m.items[idx]] = [m.items[idx], m.items[idx-1]]; renderItems(); };
+            head.querySelector(".st-mi-down").onclick = () => { if (idx === m.items.length - 1) return; [m.items[idx+1], m.items[idx]] = [m.items[idx], m.items[idx+1]]; renderItems(); };
+            head.querySelector(".st-mi-dup").onclick  = () => { m.items.splice(idx + 1, 0, JSON.parse(JSON.stringify(it))); renderItems(); };
+            head.querySelector(".st-mi-en").onclick   = () => { it.enabled = (it.enabled === false); renderItems(); };
+            head.querySelector(".st-mi-del").onclick  = () => { if (!confirm("Delete this item?")) return; m.items.splice(idx, 1); renderItems(); };
+
+            return card;
+        }
+    }
+
+    render();
+}
+
+function _typeColor(type) {
+    return type === "fade"     ? "#5a4a2a"
+         : type === "title"    ? "#3a5475"
+         : type === "art"      ? "#5a2a4a"
+         : type === "dialogue" ? "#2a5a3a"
+         : "#444";
+}
+function _typeSummary(it) {
+    if (it.type === "fade") return `${it.direction || "in"} · ${it.fadeMs || 0}ms · ${it.fadeColor || "#000"}`;
+    if (it.type === "title") return `"${it.title || ""}"${it.subtitle ? " — " + it.subtitle : ""} · ${it.ms || 0}ms`;
+    if (it.type === "art") return `${it.art ? "[image]" : "(no image)"} · ${it.artMs || 0}ms${it.kenburns ? " · ken-burns" : ""}${it.artCaption ? " · captioned" : ""}`;
+    if (it.type === "dialogue") {
+        const speaker = it.narrator ? "Narrator" : (it.name || "?");
+        const text    = (it.text || "").slice(0, 60);
+        return `${speaker} (${it.side || "left"}): "${text}${(it.text || "").length > 60 ? "…" : ""}"`;
+    }
+    return "(unknown type)";
+}
+
+// Build the editor body for one movie item, dispatching by type.
+function _buildMovieItemEditor(it, idx, onChange) {
+    const wrap = document.createElement("div");
+    if (it.type === "fade") {
+        wrap.innerHTML = `
+            <label>Direction:
+                <select class="mi-dir">
+                    <option value="in"  ${it.direction === "in"  ? "selected" : ""}>Fade In  (clear from color)</option>
+                    <option value="out" ${it.direction === "out" ? "selected" : ""}>Fade Out (to color)</option>
+                </select>
+            </label>
+            <label style="margin-left:10px;">Duration (ms):
+                <input type="number" class="mi-fadems" value="${it.fadeMs || 0}" style="width:80px;" min="0">
+            </label>
+            <label style="margin-left:10px;">Color:
+                <input type="color" class="mi-fadecolor" value="${it.fadeColor || "#000000"}">
+            </label>
+        `;
+        wrap.querySelector(".mi-dir").onchange       = e => { it.direction = e.target.value; onChange(); };
+        wrap.querySelector(".mi-fadems").oninput     = e => { it.fadeMs = +e.target.value || 0; onChange(); };
+        wrap.querySelector(".mi-fadecolor").oninput  = e => { it.fadeColor = e.target.value; onChange(); };
+    } else if (it.type === "title") {
+        wrap.innerHTML = `
+            <label>Title:    <input type="text" class="mi-title"    value="${_esc(it.title || "")}"    style="width:300px;"></label>
+            <label>Subtitle: <input type="text" class="mi-subtitle" value="${_esc(it.subtitle || "")}" style="width:300px;"></label>
+            <label>Hold ms:  <input type="number" class="mi-titlems" value="${it.ms || 3500}" style="width:80px;" min="0"></label>
+        `;
+        wrap.querySelector(".mi-title").oninput    = e => { it.title = e.target.value; onChange(); };
+        wrap.querySelector(".mi-subtitle").oninput = e => { it.subtitle = e.target.value; onChange(); };
+        wrap.querySelector(".mi-titlems").oninput  = e => { it.ms = +e.target.value || 0; onChange(); };
+    } else if (it.type === "art") {
+        wrap.innerHTML = `
+            <div>
+                <input type="file" class="mi-art-file" accept="image/*">
+                <button class="st-btn mi-art-clear">Clear</button>
+                <span class="mi-art-preview-wrap" style="margin-left:8px;"></span>
+            </div>
+            <div style="margin-top:6px;">
+                <label>Hold ms (0 = wait for click):
+                    <input type="number" class="mi-artms" value="${it.artMs || 5000}" style="width:80px;" min="0">
+                </label>
+                <label style="margin-left:10px;">
+                    <input type="checkbox" class="mi-kenburns" ${it.kenburns ? "checked" : ""}> Ken-Burns zoom
+                </label>
+            </div>
+            <div style="margin-top:6px;">
+                <label>Caption (optional):</label>
+                <textarea class="mi-artcaption" rows="2" style="width:99%;">${_esc(it.artCaption || "")}</textarea>
+            </div>
+        `;
+        const setPreview = () => {
+            wrap.querySelector(".mi-art-preview-wrap").innerHTML = it.art
+                ? `<img src="${it.art}" style="max-width:240px;max-height:140px;border:2px solid #5a4220;background:#000;vertical-align:middle;">`
+                : `<span style="color:#666;">(no art)</span>`;
+        };
+        setPreview();
+        wrap.querySelector(".mi-art-file").onchange = e => {
+            const f = e.target.files[0];
+            if (!f) return;
+            _readFileAsDataURL(f, (url) => { it.art = url; setPreview(); onChange(); });
+        };
+        wrap.querySelector(".mi-art-clear").onclick    = () => { it.art = ""; setPreview(); onChange(); };
+        wrap.querySelector(".mi-artms").oninput        = e => { it.artMs = +e.target.value || 0; onChange(); };
+        wrap.querySelector(".mi-kenburns").onchange    = e => { it.kenburns = e.target.checked; onChange(); };
+        wrap.querySelector(".mi-artcaption").oninput   = e => { it.artCaption = e.target.value; onChange(); };
+    } else if (it.type === "dialogue") {
+        wrap.innerHTML = `
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+                <label><input type="checkbox" class="mi-narr" ${it.narrator ? "checked" : ""}> Narrator (top of screen)</label>
+                <label>Side:
+                    <select class="mi-side">
+                        <option value="left"  ${it.side !== "right" ? "selected" : ""}>Left</option>
+                        <option value="right" ${it.side === "right" ? "selected" : ""}>Right</option>
+                    </select>
+                </label>
+                <label>Speaker:
+                    <input type="text" class="mi-name" value="${_esc(it.name || "")}" style="width:140px;">
+                </label>
+                <label>Color:
+                    <input type="color" class="mi-color" value="${it.color || "#8a6a3a"}">
+                </label>
+                <label>Portrait:
+                    <input type="file" class="mi-portrait-file" accept="image/*" style="width:140px;">
+                </label>
+                <span class="mi-portrait-thumb" style="display:inline-block;width:36px;height:36px;border:1px solid #5a4220;background:#1a1208 center/cover no-repeat;${it.portrait ? `background-image:url('${it.portrait}');` : ""}"></span>
+            </div>
+            <div style="margin-top:6px;">
+                <textarea class="mi-text" rows="2" style="width:99%;">${_esc(it.text || "")}</textarea>
+            </div>
+        `;
+        wrap.querySelector(".mi-narr").onchange  = e => { it.narrator = e.target.checked; onChange(); };
+        wrap.querySelector(".mi-side").onchange  = e => { it.side = e.target.value; onChange(); };
+        wrap.querySelector(".mi-name").oninput   = e => { it.name = e.target.value; onChange(); };
+        wrap.querySelector(".mi-color").oninput  = e => { it.color = e.target.value; onChange(); };
+        wrap.querySelector(".mi-text").oninput   = e => { it.text = e.target.value; onChange(); };
+        wrap.querySelector(".mi-portrait-file").onchange = e => {
+            const f = e.target.files[0];
+            if (!f) return;
+            _readFileAsDataURL(f, (url) => {
+                it.portrait = url;
+                wrap.querySelector(".mi-portrait-thumb").style.backgroundImage = `url('${url}')`;
+                onChange();
+            });
+        };
+    }
+    return wrap;
 }
 
 // ── Dialogue line editor card (used in Story tab AND show_dialogue actions) ─
@@ -1947,7 +3087,7 @@ function _renderPlayerTab(host) {
                 World dimensions: ${W} × ${H} (use these for x/y).
             </p>
             <div class="st-row-fields">
-                <div class="st-field"><label>Faction</label>${_factionSelectHTML("ps-faction", ps.faction || "Player's Kingdom")}</div>
+                <div class="st-field"><label>Faction</label>${_factionSelectHTML("ps-faction", ps.faction || "Player")}</div>
                 <div class="st-field"><label>Start X</label><input id="ps-x" type="number" value="${ps.x ?? ""}" placeholder="(default: city)" style="width:90px;"></div>
                 <div class="st-field"><label>Start Y</label><input id="ps-y" type="number" value="${ps.y ?? ""}" placeholder="(default: city)" style="width:90px;"></div>
                 <div class="st-field"><label>Troops</label><input id="ps-troops" type="number" value="${ps.troops ?? 20}" style="width:80px;"></div>
@@ -2060,6 +3200,13 @@ function _buildNpcCard(npc, idx, refreshFn) {
     const card = document.createElement("div");
     card.className = "st-npc-card";
     card.innerHTML = `
+        <div id="npc-header-${idx}" style="font-weight:bold;color:#8fc88f;font-size:13px;margin-bottom:8px;
+                    border-bottom:1px solid #2a4a2a;padding-bottom:5px;">
+            📜 ${_esc(npc.name || "Story NPC")}
+            <span style="color:#5a8a5a;font-weight:normal;font-size:11px;margin-left:8px;">
+                id: ${_esc(npc.id)}
+            </span>
+        </div>
         <div style="display:flex;gap:10px;align-items:flex-start;">
             <div>
                 <div class="st-portrait-thumb" id="npc-portrait-${idx}"
@@ -2130,6 +3277,9 @@ function _buildNpcCard(npc, idx, refreshFn) {
         npc.gold    = +card.querySelector(`#npc-gold-${idx}`).value;
         npc.food    = +card.querySelector(`#npc-food-${idx}`).value;
         npc.roster  = card.querySelector(`#npc-roster-${idx}`).value.trim();
+        // Refresh the 📜 header to reflect the updated name/id
+        const hdr = card.querySelector(`#npc-header-${idx}`);
+        if (hdr) hdr.innerHTML = `📜 ${_esc(npc.name || "Story NPC")} <span style="color:#5a8a5a;font-weight:normal;font-size:11px;margin-left:8px;">id: ${_esc(npc.id)}</span>`;
         alert("NPC saved: " + npc.name);
     };
     card.querySelector(`#npc-del-${idx}`).onclick = () => {
@@ -2538,11 +3688,34 @@ function _buildParamField(pdef, paramsObj) {
             return wrap;
         }
         default: { // string
-            input = document.createElement("input");
-            input.type = "text";
-            input.value = (val === null || val === undefined) ? "" : val;
-            input.style.width = "180px";
-            input.addEventListener("input", () => paramsObj[pdef.key] = input.value);
+            // Special case: NPC ID fields → smart dropdown of importantNpcs with 📜 prefix
+            const isNpcId = pdef.key === "id" &&
+                            editorState && editorState.scenario &&
+                            Array.isArray(editorState.scenario.importantNpcs) &&
+                            editorState.scenario.importantNpcs.length > 0;
+            if (isNpcId) {
+                input = document.createElement("select");
+                input.style.width = "220px";
+                // Blank / manual-entry sentinel
+                const blankOpt = document.createElement("option");
+                blankOpt.value = ""; blankOpt.textContent = "— choose Story NPC —";
+                if (!val) blankOpt.selected = true;
+                input.appendChild(blankOpt);
+                editorState.scenario.importantNpcs.forEach(n => {
+                    const opt = document.createElement("option");
+                    opt.value = n.id;
+                    opt.textContent = `📜 ${n.name || n.id}  (${n.id})`;
+                    if (val === n.id) opt.selected = true;
+                    input.appendChild(opt);
+                });
+                input.addEventListener("change", () => paramsObj[pdef.key] = input.value);
+            } else {
+                input = document.createElement("input");
+                input.type = "text";
+                input.value = (val === null || val === undefined) ? "" : val;
+                input.style.width = "180px";
+                input.addEventListener("input", () => paramsObj[pdef.key] = input.value);
+            }
         }
     }
     wrap.appendChild(input);
@@ -2754,7 +3927,7 @@ function _compileWinLoseToTriggers(s) {
                 return [{ type: "player_hp_below_pct", params: { pct: 1 } }];
             case "all_player_cities_lost":
                 return [{ type: "faction_eliminated", params: {
-                    faction: (s.playerSetup && s.playerSetup.faction) || "Player's Kingdom"
+                    faction: (s.playerSetup && s.playerSetup.faction) || "Player"
                 } }];
             default: return [];
         }
@@ -3009,6 +4182,10 @@ function _renderExportTab(host) {
             meta:           s.meta,
             playerSetup:    s.playerSetup,
             importantNpcs:  s.importantNpcs,
+            // Step 4: Prefer the new movies[] array. We keep storyIntro for
+            // back-compat with any external scenario module that still reads
+            // it; both contain the same boot intro data.
+            movies:         s.movies,
             storyIntro:     s.storyIntro,
             scenarioVars:   s.scenarioVars,
             winLose:        s.winLose,
@@ -3047,6 +4224,7 @@ function install() {
     s.triggers       = (s.triggers || []).concat(data.triggers || []);
     s.importantNpcs  = (s.importantNpcs || []).concat(data.importantNpcs || []);
     s.playerSetup    = Object.assign(s.playerSetup || {}, data.playerSetup || {});
+    if (Array.isArray(data.movies) && data.movies.length > 0) s.movies = data.movies;
     s.storyIntro     = data.storyIntro     || s.storyIntro;
     s.scenarioVars   = Object.assign(s.scenarioVars || {}, data.scenarioVars || {});
     s.winLose        = data.winLose        || s.winLose;
@@ -3260,7 +4438,7 @@ function _factionSelectHTML(id, currentValue) {
         names = Object.keys(window.FACTIONS);
     }
     // Always include common defaults so dropdown isn't empty in fresh scenarios
-    ["Player's Kingdom","Bandits","Hong Dynasty","Dab Tribes","Great Khaganate"]
+    ["Player","Bandits","Hong Dynasty","Dab Tribes","Great Khaganate"]
         .forEach(n => { if (!names.includes(n)) names.push(n); });
 
     const opts = names.map(n =>
@@ -3300,6 +4478,9 @@ return {
 
     // Runtime control
     start, stop, pause, resume,
+
+    // Story-playing status (used by parler_system guard and external modules)
+    isStoryPlaying: function () { return !!rt.storyPlaying; },
 
     // Manual firing (also exposed as a callable from external modules)
     fireTrigger: function (id) {

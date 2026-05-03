@@ -1,4 +1,4 @@
- let economyTick = 0;
+let economyTick = 0;
  let uiSyncTick = 0;
  
 let wasInCity = false; // Tracks the previous frame state
@@ -227,7 +227,7 @@ const SAFE_WIDTH = typeof WORLD_WIDTH !== 'undefined' ? WORLD_WIDTH : 2000;
 const SAFE_HEIGHT = typeof WORLD_HEIGHT !== 'undefined' ? WORLD_HEIGHT : 2000;
 
 //overworld PLAYER STUFF HERE MAN
-let player = {
+var player = {
     // --- POSITION & PHYSICS ---
     x: SAFE_WIDTH * 0.5,
     y: SAFE_HEIGHT * 0.45,
@@ -299,12 +299,33 @@ function initPlayer() {
     player.y = worldH * 0.45;
 }
 
+// AFTER — only reset position if no scenario is active:
 function enterOverworldMode() {
-    // Ensure constants are available or use fallbacks
+    // SANDBOX SAFETY: clear stale NPC spawn bans only when NOT in Scenario 1.
+    // __campaignStory1Active is true for the entire duration of a Story 1 session,
+    // so this is a no-op during scenario play.
+    // IMPORTANT: do NOT touch __activeScenario here — clearing it mid-session
+    // destroys the trigger/dialogue system every time the player exits a battle.
+    if (!window.__campaignStory1Active) {
+        window.__npcSpawnBans      = null;
+        window.__mongolWaveAllowed = false;
+    }
+
     const w = (typeof WORLD_WIDTH !== 'undefined') ? WORLD_WIDTH : 2000;
     const h = (typeof WORLD_HEIGHT !== 'undefined') ? WORLD_HEIGHT : 2000;
-    player.x = w * 0.5;
-    player.y = h * 0.45;
+    
+    // Do NOT reset position if a scenario supplies its own playerSetup.
+    // Scenario position is applied by _placePlayer() in scenario_update.js and
+    // _applyPlayerSetup() in scenario_triggers.js — resetting here would clobber it.
+    const _hasScenarioPos = (() => {
+        const ps = window.__DoG_pendingScenario?.playerSetup || window.__activeScenario?.playerSetup;
+        return ps && (typeof ps.x === "number" || typeof ps.xPct === "number");
+    })();
+    if (!_hasScenarioPos) {
+        player.x = w * 0.5;
+        player.y = h * 0.45;
+    }
+
     player.hp = Math.max(1, player.maxHealth || 100);
     player.stunTimer = 0;
     player.isMoving = false;
@@ -725,7 +746,25 @@ function update() {
 
             const cityPanel = document.getElementById('city-panel');
             if (touchingCity) {
-                if (activeCity !== touchingCity) {
+                // Story-mode guard: never open the city panel during a cinematic or
+                // dialogue. Preserve activeCity so the panel won't auto-reopen when
+                // the story ends — player must leave and re-enter the city.
+                const _storyActive = typeof window.ScenarioTriggers !== 'undefined' &&
+                    typeof window.ScenarioTriggers.isStoryPlaying === 'function' &&
+                    window.ScenarioTriggers.isStoryPlaying();
+
+                // Campaign intro guard: also block for 5 seconds after scenario boot
+                // (or until the intro is explicitly marked done) so the city panel
+                // can't pop up during the opening cinematic.  Sandbox mode is
+                // unaffected — the guard only activates when __campaignStory1Active
+                // is set.
+                const _introDone   = !!window.__DoG_introDone;
+                const _bootMs      = window.__DoG_scenarioBootTime;
+                const _inCampaign  = !!window.__campaignStory1Active;
+                const _bootBlocking = _inCampaign && !_introDone &&
+                    _bootMs && (Date.now() - _bootMs) < 5000;
+
+                if (!_storyActive && !_bootBlocking && activeCity !== touchingCity) {
                     activeCity = touchingCity;
                     document.getElementById('city-name').innerText = activeCity.name;
                     document.getElementById('city-name').style.color = activeCity.color;
@@ -746,12 +785,20 @@ function update() {
                         player.stunTimer = 60;
                         keys['w'] = keys['a'] = keys['s'] = keys['d'] = keys['arrowup'] = keys['arrowleft'] = keys['arrowdown'] = keys['arrowright'] = false;
                     }
+
+                    // Refresh recruit + food button state whenever we enter a new city
+                    if (typeof updateRecruitButton === 'function') updateRecruitButton();
+                    if (typeof updateBuyFoodButton === 'function') updateBuyFoodButton();
                 }
 
-                document.getElementById('city-pop').innerText = Math.floor(activeCity.pop).toLocaleString();
-                document.getElementById('city-garrison').innerText = Math.floor(activeCity.troops).toLocaleString();
-                document.getElementById('city-gold').innerText = Math.floor(activeCity.gold).toLocaleString();
-                document.getElementById('city-food').innerText = Math.floor(activeCity.food).toLocaleString();
+                // Guard: activeCity may still be null during story mode if the
+                // player was teleported into a city before activeCity was set.
+                if (activeCity) {
+                    document.getElementById('city-pop').innerText = Math.floor(activeCity.pop).toLocaleString();
+                    document.getElementById('city-garrison').innerText = Math.floor(activeCity.troops).toLocaleString();
+                    document.getElementById('city-gold').innerText = Math.floor(activeCity.gold).toLocaleString();
+                    document.getElementById('city-food').innerText = Math.floor(activeCity.food).toLocaleString();
+                }
             } else if (activeCity !== null) {
                 activeCity = null;
                 if (cityPanel) cityPanel.style.display = 'none';
@@ -996,10 +1043,6 @@ if (canDrawForts) {
 	
     ctx.restore();
 
-    if (typeof drawPlayerOverlay === 'function') {
-        drawPlayerOverlay(ctx, player, zoom);
-    }
-
     requestAnimationFrame(() => {
         update();
         draw();
@@ -1007,6 +1050,22 @@ if (canDrawForts) {
 
     updateAndDrawPlayerSystems(ctx, player, zoom, WORLD_WIDTH, WORLD_HEIGHT, typeof globalNPCs !== 'undefined' ? globalNPCs : []);
 	updateCitySystems();
+
+    // World-map overlays (story quest waypoints etc.) must ONLY render on the
+    // overworld.  City mode and battle mode both reuse the canvas with their own
+    // coordinate spaces — drawing world-map markers there would show waypoints
+    // at wrong positions inside cities or on the battlefield.
+    //
+    // FIX Bug#2: added typeof guard for inBattleMode (was bare !inBattleMode,
+    //            which evaluates to true when inBattleMode is undefined).
+    // FIX Bug#5: moved this call to AFTER updateCitySystems() so that any
+    //            city/battle mode transition committed this frame is already
+    //            reflected in the flags before we test them.
+    if (typeof drawPlayerOverlay === 'function' &&
+        !(typeof inBattleMode !== 'undefined' && inBattleMode) &&
+        !(typeof inCityMode   !== 'undefined' && inCityMode)) {
+        drawPlayerOverlay(ctx, player, zoom);
+    }
 	
 drawMasterStateOverlay(ctx, canvas.width, canvas.height);
 drawVictoryStateOverlay(ctx, canvas.width, canvas.height);
@@ -1180,6 +1239,10 @@ function updateCityPanelUI(city) {
         recruitBox.style.display = 'flex';
         hostileBox.style.display = 'none';
     }
+
+    // Always refresh the recruit + food button states when diplomacy changes
+    if (typeof updateRecruitButton === 'function') updateRecruitButton();
+    if (typeof updateBuyFoodButton === 'function') updateBuyFoodButton();
 }
 // --- SURGERY: MISSING RIVER PHYSICS ENGINE REBUILT ---
 window.updateRiverPhysics = function() {
@@ -1351,3 +1414,351 @@ setInterval(() => {
         }
     }
 }, 5000); // 3000ms (3 seconds) ensures zero frame drops on mobile
+// ============================================================================
+// RECRUITMENT & FOOD RATE-LIMITING SYSTEM
+// ============================================================================
+// Design rules:
+//   NEUTRAL  — 5 militia per 1000 pop per 5-min window, ALSO capped at 1% garrison
+//   ALLY     — double the quota (×2 on both checks)
+//   ENEMY    — cannot recruit at all (recruit-box already hidden by updateCityPanelUI)
+//   FOOD     — city can sell max 10% of its food stock per 5-min window
+//
+// Each city gets a transient recruitWindow object:
+//   { time: timestamp, recruited: n, foodSold: n }
+// The window resets automatically after RECRUIT_WINDOW_MS ms.
+// ============================================================================
+
+const RECRUIT_WINDOW_MS   = 5 * 60 * 1000; // 5 real-time minutes
+const MILITIA_COST_EACH   = 10;             // Gold per militia
+const FOOD_BUY_AMOUNT     = 10;             // Food units per purchase
+const FOOD_BUY_COST       = 10;             // Gold per purchase
+
+// ---------------------------------------------------------------------------
+// HELPER: returns "enemy" | "ally" | "neutral" for the active city
+// ---------------------------------------------------------------------------
+function getRecruitRelation(city) {
+    if (!city) return "none";
+    const pFaction = (typeof player !== 'undefined' && player.faction) ? player.faction : "Player's Kingdom";
+
+    // Enemy check: player.enemies array is the ground truth
+    if (player.enemies && player.enemies.includes(city.faction)) return "enemy";
+
+    // Ally check: use FACTION_RELATIONS if available
+    if (typeof FACTION_RELATIONS !== 'undefined') {
+        const rel = FACTION_RELATIONS[pFaction] && FACTION_RELATIONS[pFaction][city.faction];
+        if (rel === "Ally") return "ally";
+    }
+
+    return "neutral";
+}
+
+// ---------------------------------------------------------------------------
+// HELPER: ensure a city has a fresh recruit window object
+// ---------------------------------------------------------------------------
+function _ensureRecruitWindow(city) {
+    const now = Date.now();
+    if (!city.recruitWindow || (now - city.recruitWindow.time > RECRUIT_WINDOW_MS)) {
+        city.recruitWindow = { time: now, recruited: 0, foodSold: 0 };
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CORE QUOTA CALCULATOR
+// Returns { canRecruit, amount, reason, cost, relation, quota, alreadyUsed }
+// ---------------------------------------------------------------------------
+function calcRecruitQuota(city) {
+    if (!city) return { canRecruit: false, amount: 0, reason: "No city selected.", cost: 0 };
+
+    const relation = getRecruitRelation(city);
+    if (relation === "enemy") {
+        return { canRecruit: false, amount: 0, reason: "At war — cannot recruit here!", cost: 0 };
+    }
+
+    _ensureRecruitWindow(city);
+
+    const pop      = Math.max(1, city.pop     || 500);
+    const garrison = Math.max(0, city.troops  || 0);
+
+    if (garrison <= 0) {
+        return { canRecruit: false, amount: 0, reason: "No garrison soldiers to recruit from!", cost: 0 };
+    }
+
+    // Base quota: 5 militia per 1 000 pop per window
+    let popQuota      = Math.max(1, Math.floor((pop / 1000) * 5));
+    // Garrison cap: max 1% of garrison per window
+    let garrisonCap   = Math.max(1, Math.floor(garrison * 0.01));
+
+    // Ally bonus: double both limits
+    if (relation === "ally") {
+        popQuota    *= 2;
+        garrisonCap *= 2;
+    }
+
+    // Final window quota is the LOWER of the two (most restrictive wins)
+    const windowQuota  = Math.min(popQuota, garrisonCap);
+    const alreadyUsed  = city.recruitWindow.recruited;
+    const remaining    = Math.max(0, windowQuota - alreadyUsed);
+
+    if (remaining <= 0) {
+        const msLeft   = RECRUIT_WINDOW_MS - (Date.now() - city.recruitWindow.time);
+        const minLeft  = Math.max(1, Math.ceil(msLeft / 60000));
+        return {
+            canRecruit:   false,
+            amount:       0,
+            reason:       `Try again in ~${minLeft} min. (${alreadyUsed}/${windowQuota} recruited)`,
+            cost:         0,
+            relation,
+            quota:        windowQuota,
+            alreadyUsed
+        };
+    }
+
+    // Button recruits 1–10 militia depending on garrison size, capped by remaining quota
+    const btnAmount = Math.max(1, Math.min(10, Math.floor(garrison / 100), remaining));
+    const totalCost = btnAmount * MILITIA_COST_EACH;
+
+    return {
+        canRecruit:  true,
+        amount:      btnAmount,
+        reason:      "",
+        cost:        totalCost,
+        relation,
+        quota:       windowQuota,
+        alreadyUsed
+    };
+}
+
+// ---------------------------------------------------------------------------
+// UI: Update the recruit militia button text + disabled state
+// ---------------------------------------------------------------------------
+function updateRecruitButton() {
+    const btn = document.getElementById('recruit-militia-btn');
+    if (!btn) return;
+    const city = (typeof activeCity !== 'undefined') ? activeCity : null;
+    if (!city) {
+        btn.disabled  = true;
+        btn.innerHTML = "Recruit Militia";
+        return;
+    }
+
+    const info       = calcRecruitQuota(city);
+    const allyLabel  = info.relation === "ally" ? " <span style='color:#8bc34a;font-size:0.8em;'>(ALLY ×2)</span>" : "";
+
+    if (!info.canRecruit) {
+        btn.disabled          = true;
+        btn.style.opacity     = "0.55";
+        btn.style.cursor      = "not-allowed";
+        btn.innerHTML         = `🚫 Recruit Militia<br><small style="font-size:0.72em;color:#ff9999;font-weight:normal;">${info.reason}</small>`;
+    } else {
+        const canAfford       = player.gold >= info.cost;
+        btn.disabled          = !canAfford;
+        btn.style.opacity     = canAfford ? "1" : "0.55";
+        btn.style.cursor      = canAfford ? "pointer" : "not-allowed";
+
+        const quotaNote       = `(${info.alreadyUsed + info.amount}/${info.quota} used)`;
+        if (canAfford) {
+            btn.innerHTML = `Recruit ${info.amount} Militia (${info.cost}g)${allyLabel}<br><small style="font-size:0.72em;color:#aaa;font-weight:normal;">${quotaNote} — reduces garrison</small>`;
+        } else {
+            btn.innerHTML = `<span style='color:#ff9999;'>Need ${info.cost}g</span> → ${info.amount} Militia${allyLabel}<br><small style="font-size:0.72em;color:#aaa;font-weight:normal;">${quotaNote}</small>`;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ACTION: Player recruits militia from current city
+// ---------------------------------------------------------------------------
+function recruitMilitiaFromCity() {
+    const city = (typeof activeCity !== 'undefined') ? activeCity : null;
+    if (!city) return;
+
+    const info = calcRecruitQuota(city);
+
+    if (!info.canRecruit) {
+        showGameToast(info.reason, true);
+        if (typeof AudioManager !== 'undefined') AudioManager.playSound('error');
+        return;
+    }
+
+    if (player.gold < info.cost) {
+        showGameToast(`Need ${info.cost} Gold to recruit! (Have ${Math.floor(player.gold)}g)`, true);
+        if (typeof AudioManager !== 'undefined') AudioManager.playSound('error');
+        return;
+    }
+
+    // ── Transaction ──────────────────────────────────────────────────────────
+    if (typeof AudioManager !== 'undefined') AudioManager.playSound('gold_buy');
+
+    player.gold   -= info.cost;
+    player.troops += info.amount;
+    if (!player.roster) player.roster = [];
+    for (let i = 0; i < info.amount; i++) {
+        player.roster.push({ type: 'Militia', name: 'Militia', experienceLevel: 1 });
+    }
+
+    // Garrison loses the conscripted soldiers
+    city.troops   = Math.max(0, (city.troops || 0) - info.amount);
+    city.pop      = Math.max(0, (city.pop    || 0) - info.amount);
+    // City treasury receives the payment
+    city.gold     = (city.gold || 0) + info.cost;
+
+    // Track in window
+    _ensureRecruitWindow(city);
+    city.recruitWindow.recruited += info.amount;
+
+    // ── UI Refresh ───────────────────────────────────────────────────────────
+    const popEl      = document.getElementById('city-pop');
+    const garEl      = document.getElementById('city-garrison');
+    const goldEl     = document.getElementById('city-gold');
+    if (popEl)  popEl.innerText  = Math.floor(city.pop).toLocaleString();
+    if (garEl)  garEl.innerText  = Math.floor(city.troops).toLocaleString();
+    if (goldEl) goldEl.innerText = Math.floor(city.gold).toLocaleString();
+
+    updateRecruitButton();
+    showGameToast(`Recruited ${info.amount} Militia for ${info.cost}g.`, false);
+}
+
+// ---------------------------------------------------------------------------
+// UI: Update the food buy button text + disabled state
+// ---------------------------------------------------------------------------
+function updateBuyFoodButton() {
+    const btn = document.getElementById('buy-food-btn');
+    if (!btn) return;
+    const city = (typeof activeCity !== 'undefined') ? activeCity : null;
+    if (!city) { btn.disabled = true; btn.innerHTML = "Buy Food (10 Gold)"; return; }
+
+    const relation = getRecruitRelation(city);
+    if (relation === "enemy") {
+        btn.disabled      = true;
+        btn.style.opacity = "0.55";
+        btn.innerHTML     = `🚫 Buy Food<br><small style="font-size:0.72em;color:#ff9999;font-weight:normal;">At war — no trade!</small>`;
+        return;
+    }
+
+    _ensureRecruitWindow(city);
+    const maxFoodWindow   = Math.max(FOOD_BUY_AMOUNT, Math.floor((city.food || 0) * 0.10));
+    const remainingQuota  = Math.max(0, maxFoodWindow - (city.recruitWindow.foodSold || 0));
+    const cityHasFood     = (city.food || 0) >= FOOD_BUY_AMOUNT;
+    const canAfford       = player.gold >= FOOD_BUY_COST;
+
+    if (!cityHasFood) {
+        btn.disabled      = true;
+        btn.style.opacity = "0.55";
+        btn.innerHTML     = `🚫 Buy Food<br><small style="font-size:0.72em;color:#ff9999;font-weight:normal;">City has no food to sell!</small>`;
+    } else if (remainingQuota < FOOD_BUY_AMOUNT) {
+        const msLeft  = RECRUIT_WINDOW_MS - (Date.now() - city.recruitWindow.time);
+        const minLeft = Math.max(1, Math.ceil(msLeft / 60000));
+        btn.disabled      = true;
+        btn.style.opacity = "0.55";
+        btn.innerHTML     = `🚫 Buy Food<br><small style="font-size:0.72em;color:#ff9999;font-weight:normal;">Supply limited — ~${minLeft} min wait</small>`;
+    } else if (!canAfford) {
+        btn.disabled      = true;
+        btn.style.opacity = "0.55";
+        btn.innerHTML     = `<span style='color:#ff9999;'>Need ${FOOD_BUY_COST}g</span> — Buy Food (10 Gold)`;
+    } else {
+        btn.disabled      = false;
+        btn.style.opacity = "1";
+        btn.style.cursor  = "pointer";
+        btn.innerHTML     = `Buy Food (${FOOD_BUY_COST} Gold)`;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ACTION: Player buys food from current city (rate-limited)
+// ---------------------------------------------------------------------------
+function buyFoodFromCity() {
+    const city = (typeof activeCity !== 'undefined') ? activeCity : null;
+    if (!city) return;
+
+    const relation = getRecruitRelation(city);
+    if (relation === "enemy") {
+        showGameToast("Cannot buy supplies from an enemy!", true);
+        if (typeof AudioManager !== 'undefined') AudioManager.playSound('error');
+        return;
+    }
+
+    _ensureRecruitWindow(city);
+
+    const maxFoodWindow  = Math.max(FOOD_BUY_AMOUNT, Math.floor((city.food || 0) * 0.10));
+    const remainingQuota = Math.max(0, maxFoodWindow - (city.recruitWindow.foodSold || 0));
+
+    if (remainingQuota < FOOD_BUY_AMOUNT) {
+        const msLeft  = RECRUIT_WINDOW_MS - (Date.now() - city.recruitWindow.time);
+        const minLeft = Math.max(1, Math.ceil(msLeft / 60000));
+        showGameToast(`City rationing supplies — wait ~${minLeft} min before buying more food.`, true);
+        if (typeof AudioManager !== 'undefined') AudioManager.playSound('error');
+        return;
+    }
+
+    if ((city.food || 0) < FOOD_BUY_AMOUNT) {
+        showGameToast("The city has no food left to sell!", true);
+        if (typeof AudioManager !== 'undefined') AudioManager.playSound('error');
+        return;
+    }
+
+    if (player.gold < FOOD_BUY_COST) {
+        showGameToast(`Need ${FOOD_BUY_COST} Gold for rations! (Have ${Math.floor(player.gold)}g)`, true);
+        if (typeof AudioManager !== 'undefined') AudioManager.playSound('error');
+        return;
+    }
+
+    // ── Transaction ──────────────────────────────────────────────────────────
+    if (typeof AudioManager !== 'undefined') AudioManager.playSound('gold_buy');
+
+    player.food  += FOOD_BUY_AMOUNT;
+    player.gold  -= FOOD_BUY_COST;
+    city.food    -= FOOD_BUY_AMOUNT;
+    city.gold     = (city.gold || 0) + FOOD_BUY_COST;
+    city.recruitWindow.foodSold = (city.recruitWindow.foodSold || 0) + FOOD_BUY_AMOUNT;
+
+    // ── UI Refresh ───────────────────────────────────────────────────────────
+    refreshCityUI();
+    const goldEl = document.getElementById('city-gold');
+    const foodEl = document.getElementById('city-food');
+    if (goldEl) goldEl.innerText = Math.floor(city.gold).toLocaleString();
+    if (foodEl) foodEl.innerText = Math.floor(city.food).toLocaleString();
+
+    updateBuyFoodButton();
+    showGameToast(`Bought ${FOOD_BUY_AMOUNT} food for ${FOOD_BUY_COST}g.`, false);
+}
+
+// ---------------------------------------------------------------------------
+// UTILITY: Mobile-friendly toast notification (replaces alert())
+// ---------------------------------------------------------------------------
+function showGameToast(msg, isError) {
+    let el = document.getElementById('game-toast-msg');
+    if (!el) {
+        el = document.createElement('div');
+        el.id = 'game-toast-msg';
+        el.style.cssText = [
+            'position:fixed',
+            'bottom:130px',
+            'left:50%',
+            'transform:translateX(-50%)',
+            'max-width:min(340px,88vw)',
+            'padding:9px 16px',
+            'border-radius:20px',
+            'font-family:Georgia,serif',
+            'font-size:clamp(12px,3.5vw,14px)',
+            'z-index:10200',
+            'pointer-events:none',
+            'text-align:center',
+            'transition:opacity 0.4s',
+            'line-height:1.35'
+        ].join(';');
+        document.body.appendChild(el);
+    }
+    el.textContent      = msg;
+    el.style.background = isError ? 'rgba(120,0,0,0.93)' : 'rgba(20,60,20,0.93)';
+    el.style.color      = '#fff';
+    el.style.border     = isError ? '1px solid #ff5252' : '1px solid #8bc34a';
+    el.style.opacity    = '1';
+    clearTimeout(el._t);
+    el._t = setTimeout(() => { el.style.opacity = '0'; }, isError ? 3000 : 2000);
+}
+
+// Expose to global scope (called from index.html inline onclick fallbacks)
+window.recruitMilitiaFromCity = recruitMilitiaFromCity;
+window.buyFoodFromCity        = buyFoodFromCity;
+window.updateRecruitButton    = updateRecruitButton;
+window.updateBuyFoodButton    = updateBuyFoodButton;
+window.showGameToast          = showGameToast;

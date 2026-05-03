@@ -166,34 +166,11 @@ if (document.readyState === 'loading') {
         </div>
             
         <div id="recruit-box" style="display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; border-top: 1px solid #5d4037; padding-top: 15px; margin-top: 10px;">
-<button class="menu-btn" onclick="
-if(player.gold >= 50) { 
-    if(typeof AudioManager !== 'undefined') AudioManager.playSound('gold_buy');
 
-    // Give player 5 Militia
-    player.troops += 5; 
-    if(!player.roster) player.roster = [];
-    for(let i=0; i<5; i++) {
-        player.roster.push({ type: 'Militia', name: 'Militia', experienceLevel: 1 });
-    }
-
-    // Deduct gold from player
-    player.gold -= 50; 
-
-    // Add gold to active city
-    if(activeCity) {
-        activeCity.gold = (activeCity.gold || 0) + 50;
-
-        // Refresh city UI labels
-        document.getElementById('city-gold').innerText = Math.floor(activeCity.gold);
-        document.getElementById('city-food').innerText = Math.floor(activeCity.food || 0);
-    }
-
-} else {
-    if(typeof AudioManager !== 'undefined') AudioManager.playSound('error');
-    alert('Not enough gold!'); 
-}
-">Recruit 5 Militia (50 Gold)</button>
+<!-- RECRUIT MILITIA BUTTON — state is controlled by updateRecruitButton() in sandboxmode_update.js -->
+<button id="recruit-militia-btn" class="menu-btn" onclick="recruitMilitiaFromCity()">
+    Recruit Militia...
+</button>
 
 <button class="menu-btn" onclick="if(activeCity) { 
                 if(typeof AudioManager !== 'undefined') AudioManager.playSound('ui_click'); 
@@ -213,33 +190,10 @@ if(player.gold >= 50) {
                 }
             ">Upgrade Troops</button>
 
-            <button class="menu-btn" onclick="
-                if(activeCity && player.gold >= 10) { 
-                    if(activeCity.food >= 10) {
-                        if(typeof AudioManager !== 'undefined') AudioManager.playSound('gold_buy');
-                        
-                        // Player Transaction
-                        player.food += 10; 
-                        player.gold -= 10; 
-                        refreshCityUI();
-                        // City Transaction
-                        activeCity.food -= 10;
-                        activeCity.gold = (activeCity.gold || 0) + 10;
-
-                        // Refresh City UI Labels
-                        document.getElementById('city-gold').innerText = Math.floor(activeCity.gold);
-                        document.getElementById('city-food').innerText = Math.floor(activeCity.food);
-                        
-                        console.log(`${activeCity.name} supply updated: ${activeCity.food} food left.`);
-                    } else {
-                        if(typeof AudioManager !== 'undefined') AudioManager.playSound('error');
-                        alert('The city has no food left to sell!'); 
-                    }
-                } else {
-                    if(typeof AudioManager !== 'undefined') AudioManager.playSound('error');
-                    alert('Not enough gold for rations!'); 
-                }
-            ">Buy Food (10 Gold)</button>
+            <!-- BUY FOOD BUTTON — rate-limited via buyFoodFromCity() in sandboxmode_update.js -->
+            <button id="buy-food-btn" class="menu-btn" onclick="buyFoodFromCity()">
+                Buy Food (10 Gold)
+            </button>
 			
 <button id="trade-btn" class="menu-btn" onclick="openTradePanel()" style="background: linear-gradient(to bottom, #1b5e20, #0a330c); border-color: #8bc34a; font-size: 1rem;">
                 ⚖️ Open Trade Market
@@ -258,7 +212,7 @@ if(player.gold >= 50) {
                         console.error('siege_system.js not loaded!');
                     }
                 }
-            ">Besiege Settlement</button>
+            ">Camp beside Settlement</button>
 
             <button id="assault-button" class="menu-btn" style="background: linear-gradient(to bottom, #ff9800, #e65100); border-color: #fff; color: #fff; padding: 10px 20px; font-size: 1rem; width: 90%; display: none;" onclick="
                 if(typeof triggerSiegeAssault === 'function') {
@@ -416,7 +370,9 @@ function toggleDipLog() {
     btn.textContent = isCollapsed ? '+' : '−';
 }
 </script>
- <script src="core/camera_effects.js"></script>
+	<script src="core/camera_effects.js"></script>
+	<script src="story/s1/Story_1_Dev.js"></script>
+ 
     <script src="sandboxmode/sandboxmode_npc_system.js"></script>
     <script src="core/fortification_system.js"></script>
     <script src="core/city_system.js"></script>
@@ -447,12 +403,15 @@ function toggleDipLog() {
     <script src="battle_engine/battlefield_commands.js"></script>
     <script src="core/troopGUI.js"></script>
 	
-<script src="story/scenario_update.js"></script>
+	<script src="story/scenario_update.js"></script>
 <script src="story/scenario_editor.js"></script>
+<script src="story/scenario_tools_panel.js"></script>   
 
-<script src="story/storymode_presentation.js"></script>   <!-- NEW -->
-<script src="story/scenario_triggers.js"></script>        <!-- NEW -->
-<script src="story/senario_devmade_import.js"></script>
+	<script src="story/storymode_presentation.js"></script>   
+	<script src="story/scenario_triggers.js"></script>         
+	<script src="story/s1/senario_devmade_import.js"></script> <!-- test file -->
+   <script src="story/s1/hakata_bay_scenario.js"></script>   <!-- test file -->
+	<script src="story/s1/scenario_import_patch.js"></script> <!-- test file -->
     <script src="menu/menu.js"></script>
     <script src="menu/menu-units-guide.js"></script>
   
@@ -464,10 +423,11 @@ function toggleDipLog() {
     <script src="menu/customsiegebattle.js"></script>
     <script src="core/RandomDialogue.js"></script>
     <script src="core/parler_system.js"></script>
+	<script src="core/parler_patch.js"></script>
     <script src="battle_engine/siege_system.js"></script>
     <script src="core/faction_dynamics.js"></script>
     <script src="sandboxmode/sandboxmode_overworld.js"></script>
-	<script src="story/story1_map_and_update.js"></script>
+	<script src="story/s1/story1_map_and_update.js"></script> <!-- test file -->
     <script src="core/camp_system.js"></script>
     <script src="core/camp_system_combat.js"></script>
     <script src="core/viewport_culling.js"></script>
@@ -477,7 +437,10 @@ function toggleDipLog() {
     <script src="battle_engine/battle_enhancements.js"></script>
     <script src="core/mobile_ui.js"></script>
     <script src="core/inventory_patch.js"></script>	
+	
     <script src="core/quest_system.js"></script>
+    <script src="story/story_quest_patch.js"></script>
+	<script src="story/npc_waypoint_runtime.js"></script>   	
     <script src="battle_engine/RTSControls.js"></script>
     <script src="battle_engine/autoAttack.js"></script>
     <script src="core/mobile_cleanup.js"></script>
@@ -491,7 +454,7 @@ function toggleDipLog() {
     <script src="battle_engine/optimization-battles.js"></script>
     <script src="battle_engine/optimization-siege.js"></script>
 	
-	<script>
+<script>
 (function applyMobileMenuPatch() {
     // Poll lightly to wait for the Scenario Editor and Dev scripts
     // to finish injecting their buttons after the manual is unlocked.
@@ -501,22 +464,22 @@ function toggleDipLog() {
 
         const allBtns = Array.from(ui.querySelectorAll("button"));
         
-  // Find injected scenario buttons
-const launchBtn = allBtns.find(b => b.textContent && b.textContent.includes("Launch Scenario"));
-const editorBtn = allBtns.find(b => b.textContent && b.textContent.includes("Scenario Editor"));
-const sandboxImportBtn = allBtns.find(b => b.textContent && b.textContent.includes("Import Sandbox"));
-const storyBtn = allBtns.find(b => b.textContent && b.textContent.includes("Import Story 1"));
+        // Find injected scenario buttons
+        const launchBtn = allBtns.find(b => b.innerText.includes("Launch Scenario"));
+        const editorBtn = allBtns.find(b => b.innerText.includes("Scenario Editor"));
+        const sandboxImportBtn = allBtns.find(b => b.innerText.includes("Import Sandbox"));
+        const storyBtn = allBtns.find(b => b.innerText.includes("Import Story 1"));
 
-// Find base game mode buttons
-const sandboxGameBtn = allBtns.find(b => b.textContent && b.textContent.includes("Sandbox Game"));
-const campaignBtn = allBtns.find(b => b.textContent && b.textContent.includes("Campaign Mode"));
-const customBattleBtn = allBtns.find(b => b.textContent && b.textContent.includes("Custom Battle"));
-const loadGameBtn = allBtns.find(b => b.textContent && b.textContent.includes("Load Game"));
-
-// Find root UI buttons
-const optionsBtn = allBtns.find(b => b.textContent && b.textContent.includes("Options"));
-const quitBtn = allBtns.find(b => b.textContent && b.textContent.includes("Quit Game"));
-const manualBtn = allBtns.find(b => b.textContent && b.textContent.includes("Manual"));
+        // Find base game mode buttons
+        const sandboxGameBtn = allBtns.find(b => b.innerText.includes("Sandbox Game"));
+        const campaignBtn = allBtns.find(b => b.innerText.includes("Campaign Mode"));
+        const customBattleBtn = allBtns.find(b => b.innerText.includes("Custom Battle"));
+        const loadGameBtn = allBtns.find(b => b.innerText.includes("Load Game"));
+        
+        // Find root UI buttons
+        const optionsBtn = allBtns.find(b => b.innerText.includes("Options"));
+        const quitBtn = allBtns.find(b => b.innerText.includes("Quit Game"));
+        const manualBtn = allBtns.find(b => b.innerText.includes("Manual"));
         const unitsBtn = document.getElementById("units-guide-btn");
         
         // Wait until scenario buttons are injected AND the manual is unlocked
@@ -529,7 +492,6 @@ const manualBtn = allBtns.find(b => b.textContent && b.textContent.includes("Man
             const rootBtns = [manualBtn, unitsBtn, optionsBtn, quitBtn].filter(Boolean); 
 
             // --- SURGERY: DYNAMIC WIDTH CLONING ---
-            // Grab the exact dimensions mobile_cleanup/mobile_ui assigned to existing buttons
             const refBtn = optionsBtn || quitBtn;
             const targetWidth = refBtn ? refBtn.style.width : "min(280px, 85vw)";
             const targetPadding = refBtn ? refBtn.style.padding : "15px clamp(10px, 4vw, 40px)";
@@ -541,19 +503,18 @@ const manualBtn = allBtns.find(b => b.textContent && b.textContent.includes("Man
                 btn.style.background = "linear-gradient(to bottom, #7b1a1a, #4a0a0a)";
                 btn.style.color = "#f5d76e";
                 btn.style.border = "2px solid #d4b886";
-                btn.style.padding = targetPadding; // Cloned from mobile environment
-                btn.style.margin = "10px";
+                btn.style.padding = targetPadding;
+                btn.style.margin = "10px auto"; // Auto margin to center inside wrappers
                 btn.style.fontFamily = "Georgia, serif";
-                btn.style.fontSize = targetFontSize; // Cloned from mobile environment
+                btn.style.fontSize = targetFontSize; 
                 btn.style.fontWeight = "bold";
                 btn.style.cursor = "pointer";
                 btn.style.borderRadius = "4px";
                 btn.style.textTransform = "uppercase";
-                btn.style.width = targetWidth; // Cloned from mobile environment
+                btn.style.width = targetWidth; 
                 btn.style.boxSizing = "border-box";
                 btn.style.transition = "all 0.2s";
                 btn.style.boxShadow = "0 4px 6px rgba(0,0,0,0.5)";
-                btn.style.backgroundImage = "linear-gradient(to bottom, #7b1a1a, #4a0a0a)"; 
 
                 btn.onmouseenter = () => {
                     btn.style.transform = "scale(1.05)";
@@ -570,10 +531,8 @@ const manualBtn = allBtns.find(b => b.textContent && b.textContent.includes("Man
                 };
             }
 
-            // 1. Force scenario buttons to match exactly
             scenarioBtns.forEach(styleBtnAsOriginal);
 
-            // 2. Create the Category & Back Buttons
             const playCategoryBtn = document.createElement("button");
             playCategoryBtn.innerText = "▶ PLAY";
             styleBtnAsOriginal(playCategoryBtn);
@@ -586,65 +545,86 @@ const manualBtn = allBtns.find(b => b.textContent && b.textContent.includes("Man
             backBtn.innerText = "🔙 BACK";
             styleBtnAsOriginal(backBtn);
 
-// 3. Reorder the DOM so everything sits neatly below the title
+            // ==========================================
+            // THE FIX: ARCHITECTURAL WRAPPERS
+            // ==========================================
+            const playWrapper = document.createElement("div");
+            playWrapper.style.display = "none";
+            playWrapper.style.flexDirection = "column";
+            playWrapper.style.alignItems = "center";
+            playWrapper.style.width = "100%";
+
+            const scenarioWrapper = document.createElement("div");
+            scenarioWrapper.style.display = "none";
+            scenarioWrapper.style.flexDirection = "column";
+            scenarioWrapper.style.alignItems = "center";
+            scenarioWrapper.style.width = "100%";
+
+            // 3. Reorder the Root DOM
             if (manualBtn) ui.appendChild(manualBtn);
-            
             ui.appendChild(playCategoryBtn);
             ui.appendChild(scenarioCategoryBtn);
-            
             if (optionsBtn) ui.appendChild(optionsBtn);
-            
-            if (unitsBtn) ui.appendChild(unitsBtn); // <--- MOVED DOWN HERE
+            if (unitsBtn) ui.appendChild(unitsBtn); 
             if (quitBtn) ui.appendChild(quitBtn);
-            playBtns.forEach(b => ui.appendChild(b));
-            scenarioBtns.forEach(b => ui.appendChild(b));
+
+            // 4. Inject Wrappers and move buttons inside them
+            ui.appendChild(playWrapper);
+            ui.appendChild(scenarioWrapper);
             ui.appendChild(backBtn);
 
-            // --- SURGERY: HARD OVERRIDE FOR !IMPORTANT CSS ---
-            function forceHide(b) {
-                if (b) b.style.setProperty('display', 'none', 'important');
+            playBtns.forEach(b => { if(b) playWrapper.appendChild(b); });
+            scenarioBtns.forEach(b => { if(b) scenarioWrapper.appendChild(b); });
+
+            // --- State Management Logic ---
+            function forceHide(el) {
+                if (el) el.style.setProperty('display', 'none', 'important');
             }
-            function forceShow(b) {
-                if (b) b.style.setProperty('display', 'block', 'important');
+            function forceShowBlock(el) {
+                if (el) el.style.setProperty('display', 'block', 'important');
+            }
+            function forceShowFlex(el) {
+                if (el) el.style.setProperty('display', 'flex', 'important');
             }
 
-            // 4. State Management Logic
             function showMainMenu() {
-                playBtns.forEach(forceHide);
-                scenarioBtns.forEach(forceHide);
-                forceHide(backBtn); 
+                forceHide(playWrapper);
+                forceHide(scenarioWrapper);
+                forceHide(backBtn);
 
-                rootBtns.forEach(forceShow);
-                forceShow(playCategoryBtn);
-                forceShow(scenarioCategoryBtn);
+                rootBtns.forEach(forceShowBlock);
+                forceShowBlock(playCategoryBtn);
+                forceShowBlock(scenarioCategoryBtn);
             }
 
             function showPlayMenu() {
                 rootBtns.forEach(forceHide);
-                scenarioBtns.forEach(forceHide);
+                forceHide(scenarioWrapper);
                 forceHide(playCategoryBtn);
                 forceHide(scenarioCategoryBtn);
 
+                forceShowFlex(playWrapper); // Unhide the container
                 playBtns.forEach(b => {
                     if (b === loadGameBtn) {
                         const hasSaveData = [0, 1, 2].some(i => !!localStorage.getItem("DoG_Save_" + i));
-                        if (hasSaveData) forceShow(b);
+                        if (hasSaveData) forceShowBlock(b);
                         else forceHide(b);
                     } else {
-                        forceShow(b);
+                        forceShowBlock(b);
                     }
                 });
-                forceShow(backBtn); 
+                forceShowBlock(backBtn);
             }
 
             function showScenarioMenu() {
                 rootBtns.forEach(forceHide);
-                playBtns.forEach(forceHide);
+                forceHide(playWrapper);
                 forceHide(playCategoryBtn);
                 forceHide(scenarioCategoryBtn);
 
-                scenarioBtns.forEach(forceShow);
-                forceShow(backBtn); 
+                forceShowFlex(scenarioWrapper); // Unhide the container
+                scenarioBtns.forEach(forceShowBlock); 
+                forceShowBlock(backBtn); 
             }
 
             // 5. Attach Listeners & Init

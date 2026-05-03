@@ -221,7 +221,7 @@ function generateOrganicFeatures(grid, typeValue, count, maxSize) {
 }
 
 // --- Generation Logic (Organic & Radial Density) ---
-function generateCity(factionName) {
+function generateCity(factionName, isVillage = false, pop = 1000) {
     if (cityDimensions[factionName]) return;
 
     const arch = ARCHITECTURE[factionName] || ARCHITECTURE["Hong Dynasty"];
@@ -317,7 +317,15 @@ for (let y = 0; y < CITY_ROWS; y++) {
 
     // 3. Scatter Buildings Radially (Dense center, sparse edges)
     const buildings = [];
-    let numBuildingAttempts = 510000; 
+    // ── POPULATION-SCALED BUILDING CAP ───────────────────────────────────────
+    // Goal: 10 pop = 1 house.  Mobile ceiling: 80 houses.
+    // numBuildingAttempts stays high so the density algorithm fills the footprint
+    // naturally, but we BREAK as soon as targetBuildings is reached.
+    let targetBuildings = isVillage
+        ? Math.min(80, Math.max(30,  Math.floor(pop / 3)))   // villages: 4–20
+        : Math.min(180, Math.max(80, Math.floor(pop / 3)));  // cities  : 10–80
+    // Keep attempts high enough that sparse/tight layouts still fill in properly.
+    let numBuildingAttempts = 800000;
 
 for (let i = 0; i < numBuildingAttempts; i++) {
         let bx = Math.floor(Math.random() * CITY_COLS);
@@ -325,8 +333,11 @@ for (let i = 0; i < numBuildingAttempts; i++) {
         let by = Math.floor(Math.random() * CITY_LOGICAL_ROWS);
        let dist = Math.hypot(bx - midX, by - midY);
         
-        // 1. SHRINK RADIUS: Multiply maxRadius by 0.5 to 0.7 to pull the "cutoff" point inward
-        let densityProb = 1 - (dist / (maxRadius * 0.6)); 
+        // Villages: pull all buildings into a tight hamlet cluster (0.25×radius).
+        // Cities: normal urban spread (0.6×radius).
+        let densityProb = isVillage
+            ? 1 - (dist / (maxRadius * 0.25))
+            : 1 - (dist / (maxRadius * 0.6));
         
         // 2. CLEARANCE: Ensure probability hits 0 quickly outside the target zone
         densityProb = Math.max(0, densityProb); 
@@ -367,6 +378,8 @@ for (let i = 0; i < numBuildingAttempts; i++) {
             let bRoof = arch.roofs[Math.floor(Math.random() * arch.roofs.length)];
 
             buildings.push({x: bx, y: by, w: bw, h: bh, wall: bWall, roof: bRoof});
+            // POPULATION CAP: stop placing buildings once we hit the target
+            if (buildings.length >= targetBuildings) break;
             for (let x = bx; x < bx + bw; x++) {
                 for (let y = by; y < by + bh; y++) {
                     grid[x][y] = 2; // Mark as solid building
@@ -382,17 +395,19 @@ generateOrganicFeatures(grid, 3, 10, 10);
 generateOrganicFeatures(grid, 4, 4, 8);
 
 // =========================================================
-    // START ADDITION: HORIZONTAL PARTITION WALL (Yellow Block)
+    // HORIZONTAL PARTITION WALL — skipped for villages (no stone walls exist)
     // =========================================================
-    const partitionY = Math.floor(CITY_LOGICAL_ROWS * 0.35); // Adjust height here
-    const wallStartX = 65; 
-    const wallEndX = CITY_COLS - 65;
-    for (let x = wallStartX; x <= wallEndX; x++) {
-        for (let y = partitionY; y < partitionY + 3; y++) { // 3 tiles thick
-            if (grid[x] && grid[x][y] !== undefined) {
-                // We leave the central road (1) and plaza (5) open for travel
-                if (grid[x][y] !== 1 && grid[x][y] !== 5) {
-                    grid[x][y] = 8; 
+    if (!isVillage) {
+        const partitionY = Math.floor(CITY_LOGICAL_ROWS * 0.35); // Adjust height here
+        const wallStartX = 65; 
+        const wallEndX = CITY_COLS - 65;
+        for (let x = wallStartX; x <= wallEndX; x++) {
+            for (let y = partitionY; y < partitionY + 3; y++) { // 3 tiles thick
+                if (grid[x] && grid[x][y] !== undefined) {
+                    // We leave the central road (1) and plaza (5) open for travel
+                    if (grid[x][y] !== 1 && grid[x][y] !== 5) {
+                        grid[x][y] = 8; 
+                    }
                 }
             }
         }
@@ -467,21 +482,130 @@ generateOrganicFeatures(grid, 4, 4, 8);
         ctx.fillStyle = "rgba(0,0,0,0.3)";
         ctx.fillRect(b.x * CITY_TILE_SIZE, (b.y + b.h) * CITY_TILE_SIZE - 6, b.w * CITY_TILE_SIZE, 2);
     }
-if (typeof buildCityWalls === 'function') {
+// =========================================================
+// Villages have no stone walls — skip the entire fortification build.
+if (!isVillage && typeof buildCityWalls === 'function') {
     buildCityWalls(grid, arch, ctx, factionName);
+} else if (isVillage) {
+    // --- SURGERY: VILLAGE TOWER GENERATOR ---
+    // 1. Wipe ghost data so previous walled-city geometry doesn't bleed into the village
+    window.cityTowerPositions = []; 
+    if (typeof cityLadders !== 'undefined') cityLadders = [];
+    if (typeof overheadCityGates !== 'undefined') overheadCityGates = [];
+    
+    // 2. Randomize 1 to 2 freestanding towers
+    let numTowers = Math.floor(Math.random() * 2) + 0; 
+    let towersSpawned = 0;
+    let attempts = 0;
+    
+    // Attempt to place towers close to the center plaza without hitting buildings
+    while (towersSpawned < numTowers && attempts < 150) {
+        attempts++;
+        // Keep radius tight to the plaza (radius 8 to 22)
+        let radius = 8 + Math.random() * 14; 
+        let angle = Math.random() * Math.PI * 2;
+        let rx = Math.floor(midX + Math.cos(angle) * radius);
+        let ry = Math.floor(midY + Math.sin(angle) * radius);
+        let towerSize = 7;
+
+        // Check clearance: Do not overlap buildings(2), trees(3), water(4), or other towers(7)
+        let canSpawn = true;
+        for (let ix = rx - 1; ix <= rx + towerSize; ix++) {
+            for (let iy = ry - 1; iy <= ry + towerSize; iy++) {
+                if (ix < 0 || ix >= CITY_COLS || iy < 0 || iy >= CITY_LOGICAL_ROWS) {
+                    canSpawn = false; break;
+                }
+                let t = grid[ix][iy];
+                if (t === 2 || t === 3 || t === 4 || t === 7) {
+                    canSpawn = false; break;
+                }
+            }
+            if (!canSpawn) break;
+        }
+
+        if (canSpawn) {
+            // Register tower core as a solid obstacle
+            for (let ix = rx; ix < rx + towerSize; ix++) {
+                for (let iy = ry; iy < ry + towerSize; iy++) {
+                    grid[ix][iy] = 7; 
+                }
+            }
+
+            let originalSize = towerSize * CITY_TILE_SIZE;
+            let newSize      = originalSize * 1.10; 
+            let offset       = (newSize - originalSize) / 2;
+            let tX = (rx * CITY_TILE_SIZE) - offset;
+            let tY = (ry * CITY_TILE_SIZE) - offset;
+
+            // Register in the main loop so they shoot and render in 3D
+            window.cityTowerPositions.push({
+                pixelX:      tX + newSize / 2,
+                pixelY:      tY + newSize / 2,
+                tX, tY, newSize,
+                side:        'Village', // Flag as standalone
+                hp:          300,
+                maxHp:       300,
+                fireCooldown: Math.floor(Math.random() * 200 + 80),
+            });
+
+            // Physically paint the wooden wrap-around stairs to the ground canvas
+            const woodDark  = "#4A3728";
+            const woodBase  = "#A67B5B";
+            const woodLight = "#D2B48C";
+            const backdrop  = "#1a1a1a";
+
+            for (let ix = rx - 1; ix <= rx + towerSize; ix++) {
+                for (let iy = ry - 1; iy <= ry + towerSize; iy++) {
+                    // Skip the solid core footprint
+                    if (ix >= rx && ix < rx + towerSize && iy >= ry && iy < ry + towerSize) continue;
+                    
+                    let existingTile = grid[ix][iy];
+                    // Overwrite ground, roads, and plaza
+                    if (existingTile === 0 || existingTile === 1 || existingTile === 5 || existingTile === undefined) {
+                        grid[ix][iy] = 12; // Scaffold tile (Walkable)
+                        let spx = ix * CITY_TILE_SIZE, spy = iy * CITY_TILE_SIZE;
+                        ctx.fillStyle = backdrop; 
+                        ctx.fillRect(spx, spy, CITY_TILE_SIZE, CITY_TILE_SIZE);
+                        
+                        let isVert = (ix === rx - 1 || ix === rx + towerSize);
+                        if (isVert) {
+                            ctx.fillStyle = woodDark;
+                            ctx.fillRect(spx + 1, spy, 2, CITY_TILE_SIZE);
+                            ctx.fillRect(spx + CITY_TILE_SIZE - 3, spy, 2, CITY_TILE_SIZE);
+                            for (let step = 1; step < CITY_TILE_SIZE; step += 3) {
+                                ctx.fillStyle = "rgba(0,0,0,0.5)"; ctx.fillRect(spx + 2, spy + step + 1, CITY_TILE_SIZE - 5, 1);
+                                ctx.fillStyle = woodBase;  ctx.fillRect(spx + 2, spy + step, CITY_TILE_SIZE - 5, 1);
+                                ctx.fillStyle = woodLight; ctx.fillRect(spx + 2, spy + step, CITY_TILE_SIZE - 5, 0.5);
+                            }
+                        } else {
+                            ctx.fillStyle = woodDark;
+                            ctx.fillRect(spx, spy + 1, CITY_TILE_SIZE, 2);
+                            ctx.fillRect(spx, spy + CITY_TILE_SIZE - 3, CITY_TILE_SIZE, 2);
+                            for (let step = 1; step < CITY_TILE_SIZE; step += 3) {
+                                ctx.fillStyle = "rgba(0,0,0,0.5)"; ctx.fillRect(spx + step + 1, spy + 2, 1, CITY_TILE_SIZE - 5);
+                                ctx.fillStyle = woodBase;  ctx.fillRect(spx + step, spy + 2, 1, CITY_TILE_SIZE - 5);
+                                ctx.fillStyle = woodLight; ctx.fillRect(spx + step, spy + 2, 0.5, CITY_TILE_SIZE - 5);
+                            }
+                        }
+                    }
+                }
+            }
+            towersSpawned++;
+        }
+    }
 }
+
     cityDimensions[factionName] = {
         bgCanvas: canvas,
-        grid: grid
+        grid: grid,
+        isVillage: isVillage,   // remembered so enterCity can invalidate on type change
+        pop: pop                // remembered so enterCity can invalidate on pop change
     };
-	
-	// Populate the city with NPCs and Troops
+    
+    // Populate the city with NPCs and Troops
     if (typeof generateCityCosmeticNPCs === 'function') {
-        generateCityCosmeticNPCs(factionName, grid);
+        generateCityCosmeticNPCs(factionName, grid, isVillage, pop);
     }
- 
- 
-	
 }
 
 function isCityCollision(x, y, factionName = currentActiveCityFaction, isOnWall = false, isLarge = false) {
@@ -495,37 +619,78 @@ function isCityCollision(x, y, factionName = currentActiveCityFaction, isOnWall 
     let tile = cityDimensions[factionName].grid[tileX][tileY];
     
     // ---> SURGERY: Cavalry/Large Units cannot climb ladders or walk on walls <---
-    if (isLarge && (tile === 8 || tile === 9 || tile === 10 || tile === 12)) {
-        return true; // Hard blocked
+    if (isLarge && (tile === 7 || tile === 8 || tile === 9 || tile === 10 || tile === 12)) {
+        return true; // Hard blocked (7 = tower body — no unit can enter a solid tower)
+    }
+
+    // --- FIX: TOWER ROOF OVERHANG BLOCK ---
+    // CRITICAL: This check MUST sit before the tile-9/12 early-return below.
+    // The wrap-around stair generator places tile-12 scaffold at row ry-1 (just north of
+    // the tower core) — inside the roof overhang zone. Without this ordering, those
+    // scaffold tiles fire the tile-9/12 early-return and let the player squeeze through.
+    // renderDynamicTowers draws the roof ~38px north of tY (zBase=22 + pavH/roofOv stacking);
+    // 42px covers that overhang plus a small safety buffer.
+    if (window.cityTowerPositions) {
+        const TOWER_ROOF_NORTH_OVERHANG = 42; // px: zBase(22)+pavH(20)+roofOv(10)-pavYoffset(≈14)+buffer
+        for (let twr of window.cityTowerPositions) {
+            if (
+                x >= twr.tX - 2               &&
+                x <= twr.tX + twr.newSize + 2  &&
+                y >= twr.tY - TOWER_ROOF_NORTH_OVERHANG &&
+                y <  twr.tY + twr.newSize
+            ) {
+                return true; // Blocked: inside tower visual footprint (including roof overhang)
+            }
+        }
     }
 
     // FIX: 9 = Ladder Bridge, 12 = Wooden Stairs. These are universally walkable for infantry!
+    // (Intentionally AFTER the tower pixel check so scaffold tiles can't bypass the roof block.)
     if (tile === 9 || tile === 12) return false;
 
     if (isOnWall) {
         // LAYER: ON WALL (8 = Parapet floor, 10 = Tower/Gate top)
-        return !(tile === 8 || tile === 10);
+        // SURGERY 1: Added 'tile === 7' here. 
+        // This allows units walking on the wall to pass smoothly through the tower pavilion.
+        return !(tile === 8 || tile === 10 || tile === 7);
     } 
 
-// --- SURGERY: CIVILIAN SETTLEMENT VISIT MODE ---
-    // This blocks stone walls (6) but allows "entering" towers (10) and scaffolds (12)
-    // Only triggers when NOT in a siege (inBattleMode is false).
+    // --- SURGERY: CIVILIAN SETTLEMENT VISIT MODE ---
     if (!inBattleMode) {
-        // Explicitly allow entry to Tower and Scaffold tiles
         if (tile === 10 || tile === 12) return false; 
-        
-        // Explicitly block Stone Walls (6) and Parapets (8) to prevent clipping
-        if (tile === 6 || tile === 8) return true;
+        if (tile === 6 || tile === 7 || tile === 8) return true; // 7 = tower body, solid brick, no door
     }
 	
     // LAYER: GROUND
+    // Tile 7 = Tower body (solid brick, no door — nothing enters from ground level).
+    // Wall-walking units (isOnWall=true) are handled above and already pass through tile 7 correctly.
     return tile === 2 || tile === 3 || tile === 4 || tile === 6 || tile === 7 || tile === 8 || tile === 10;
 }
-
 // --- City Entry/Exit ---
 function enterCity(factionName, playerObj) {
-    generateCity(factionName);
-    if (!cityDimensions || !cityDimensions[factionName]) return; 
+    // Determine whether the entering city is a village.
+    // activeCity is set in sandboxmode_update.js before enterCity is called.
+    const _entering_isVillage = !!(
+        typeof activeCity !== 'undefined' && activeCity && activeCity.isVillage
+    );
+
+    const _entering_pop = (typeof activeCity !== 'undefined' && activeCity && activeCity.pop)
+        ? activeCity.pop : 1000;
+
+    // If a cached interior exists but its village/city type mismatches, flush it
+    // so the correct visual regenerates (e.g. after conquest or multi-city faction).
+    // Also flush if population has shifted enough to change house / NPC counts.
+    const _cached = cityDimensions[factionName];
+    if (_cached) {
+        const _popDiff = Math.abs((_cached.pop || 1000) - _entering_pop);
+        if (_cached.isVillage !== _entering_isVillage || _popDiff >= 100) {
+            delete cityDimensions[factionName];
+            if (cityCosmeticNPCs[factionName]) delete cityCosmeticNPCs[factionName];
+        }
+    }
+
+    generateCity(factionName, _entering_isVillage, _entering_pop);
+    if (!cityDimensions || !cityDimensions[factionName]) return;
     
     savedWorldPlayerState.x = playerObj.x;
     savedWorldPlayerState.y = playerObj.y;
@@ -797,14 +962,19 @@ function drawHuman(ctx, x, y, moving, frame, baseColor, hatType = "conical", clo
     ctx.restore();
 }
 
-function generateCityCosmeticNPCs(factionName, grid) {
+function generateCityCosmeticNPCs(factionName, grid, isVillage = false, pop = 1000) {
     cityCosmeticNPCs[factionName] = [];
     let midX = CITY_COLS / 2;
     let midY = Math.floor(CITY_LOGICAL_ROWS / 2);
     let spawned = 0;
     let attempts = 0;
     
-    const targetPopulation = Math.floor(Math.random() * 55) + 25;
+    // ── POPULATION-SCALED NPC COUNT ──────────────────────────────────────────
+    // Goal: 10 pop = 1 roaming NPC.  Mobile ceiling: 40 NPCs.
+    // Villages are always sparse; cities scale linearly up to the cap.
+    const targetPopulation = isVillage
+        ? Math.min(10, Math.max(2, Math.floor(pop / 10)))   // villages: 2–10
+        : Math.min(40, Math.max(5, Math.floor(pop / 10)));  // cities:   5–40
     
     // Grab styles based on faction or use default
     let fStyles = CIVILIAN_STYLES[factionName] || CIVILIAN_STYLES["Default"];

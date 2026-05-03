@@ -285,6 +285,8 @@ function populateCities() {
     window.WORLD_WIDTH_sandbox = WORLD_WIDTH;
     window.WORLD_HEIGHT_sandbox = WORLD_HEIGHT;
 	
+   
+	
 }
 	
 	
@@ -1351,10 +1353,13 @@ let peakSpawnThreshold = isMobile ? 0.991 : 0.984;
     bgCtx.globalCompositeOperation = "source-over";
 
     await setLoading(92, "Founding cities");
+	
+ 	window.__sandboxBgCanvas = bgCanvas;
+	window.__sandboxBgCtx = bgCtx;
+
+	
     populateCities();
 	
-	window.__sandboxBgCanvas = bgCanvas;
-window.__sandboxBgCtx = bgCtx;
 
     await setLoading(97, "Spawning caravans");
     initializeNPCs(cities, worldMap, TILE_SIZE, COLS, ROWS, PADDING_X, PADDING_Y);
@@ -1362,6 +1367,12 @@ window.__sandboxBgCtx = bgCtx;
     await setLoading(98, "Generating Settlements...");
     await initAllCities(FACTIONS);
 
+
+// AFTER — skip default spawn if a scenario is about to override it:
+const _pendingSetup = window.__DoG_pendingScenario?.playerSetup;
+const _hasScenarioPos = _pendingSetup &&
+    (typeof _pendingSetup.x === "number" || typeof _pendingSetup.xPct === "number");
+if (!_hasScenarioPos) {
     if (cities.length > 0) {
         player.x = WORLD_WIDTH  * (0.6 + (Math.random() * 0.04 - 0.02));
         player.y = WORLD_HEIGHT * (0.6 + (Math.random() * 0.04 - 0.02));
@@ -1369,6 +1380,7 @@ window.__sandboxBgCtx = bgCtx;
         player.x = WORLD_WIDTH  / 2;
         player.y = WORLD_HEIGHT / 2;
     }
+}
 
     document.getElementById('ui').style.display      = 'block';
     document.getElementById('loading').style.display = 'none';

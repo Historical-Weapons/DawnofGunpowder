@@ -1,8 +1,9 @@
-
 let inParleMode = false;
 let currentParleNPC = null;
 let savedParleTile = null; 
 let isDiplomacyProcessing = false; // NEW: Prevents button spamming
+
+window.addEventListener('DoG:gameStart', () => { inParleMode = false; });
 
 function getTopExpensiveNPCUnits(npc, count = 3) {
     if (!npc.roster || npc.roster.length === 0) return [];
@@ -246,10 +247,69 @@ function executeAttackAction(npc) {
     }
 }
 
+// At the start of initiateParleWithNPC, add a boot-delay guard:
 function initiateParleWithNPC(npc, tile) {
+    // ── Null-safety: never open parle for a missing or invalid NPC ────────────
+    if (!npc || typeof npc !== 'object') {
+        console.warn("[Parle] Blocked: null or invalid NPC passed to initiateParleWithNPC.");
+        return;
+    }
+    // ── Scenario teleport lock: block parle during/after scripted teleports ──
+    // Set by hakata_bay_scenario t1_beach_defeat before the Mizuki teleport;
+    // auto-cleared after 5 seconds so normal play resumes.
+    if (window.__hakata_parleLocked) {
+        console.log("[Parle] Blocked: scenario teleport lock active (__hakata_parleLocked).");
+        return;
+    }
+    // ── Null-safety: ensure tile is always a valid object ────────────────────
+    // Callers may omit the tile argument; guard here so tile.name never throws.
+    if (!tile || typeof tile !== 'object') tile = { name: "Plains", speed: 1 };
+
+    // ── Campaign intro safety gate ────────────────────────────────────────────
+    // In campaign mode, block parle until the cinematic intro finishes AND a
+    // 3-second grace period has expired so proximity triggers can't fire the
+    // instant the screen fades in.
+    if (window.__campaignStory1Active) {
+        // Primary check: story/cinematic is actively playing right now
+        const _storyPlaying = typeof window.ScenarioTriggers !== 'undefined' &&
+            typeof window.ScenarioTriggers.isStoryPlaying === 'function' &&
+            window.ScenarioTriggers.isStoryPlaying();
+        if (_storyPlaying) {
+            console.log("[Parle] Blocked: campaign cinematic/intro is playing.");
+            return;
+        }
+
+        // Secondary check: intro not yet done — block unconditionally until
+        // __DoG_introDone is set (no time-limit; intro can take any length).
+        const _introDone = !!window.__DoG_introDone;
+        if (!_introDone) {
+            console.log("[Parle] Blocked: campaign intro has not completed yet.");
+            return;
+        }
+
+        // Tertiary check: 3-second grace period AFTER intro ends so proximity
+        // NPCs at the player start position can't immediately fire parle.
+        const _introEndTime = window.__DoG_introEndTime;
+        if (_introEndTime && (Date.now() - _introEndTime) < 3000) {
+            console.log("[Parle] Blocked: post-intro grace period active.");
+            return;
+        }
+    }
+
+    // Legacy 2-second boot guard (kept for non-campaign edge cases)
+    if (window.__DoG_scenarioBootTime && !window.__campaignStory1Active &&
+        (Date.now() - window.__DoG_scenarioBootTime) < 2000) {
+        console.log("[Parle] Blocked: scenario still booting.");
+        return;
+    }
+
 	
 if (typeof inBattleMode !== 'undefined' && inBattleMode) return;
-    if (typeof inCityMode !== 'undefined' && inCityMode) return; 
+    if (typeof inCityMode !== 'undefined' && inCityMode) return;
+    // Story-mode guard: never open parle while a cinematic/dialogue is playing.
+    if (typeof window.ScenarioTriggers !== 'undefined' &&
+        typeof window.ScenarioTriggers.isStoryPlaying === 'function' &&
+        window.ScenarioTriggers.isStoryPlaying()) return;
     isHoveringPlayer = false;
     window.isRosterOpen = false;
 	
@@ -881,7 +941,6 @@ function displayAutoresolveResults(npc, playerWon, playerLosses, npcLosses) {
     actionBox.innerHTML = resultHtml;
 
 // Continue Button
-// Continue Button
     const continueBtn = createDiplomacyButton("Continue", () => {
         isDiplomacyProcessing = false;
         
@@ -894,6 +953,15 @@ function displayAutoresolveResults(npc, playerWon, playerLosses, npcLosses) {
             }
             leaveParle(player);
         } else {
+            // ========================================================================
+            // ---> SURGERY: THE AUTORESOLVE ROSTER SAFETY CLAMP <---
+            // ========================================================================
+            if (player.troops <= 0 || !player.roster || player.roster.length === 0) {
+                player.troops = 1;
+                player.roster = [{ type: "Militia", exp: 1 }];
+                console.log("Autoresolve Safety Clamp: Injected 1 Militia.");
+            }
+
             // 1. Force a strict number cast to prevent NaN or string bugs
             const remainingTroops = Number(player.troops) || 0;
             
@@ -1000,10 +1068,10 @@ if (typeof initiateParleWithNPC === 'function') {
         let emoji = "👤"; // Default
 
         const role = String(npc.role).toLowerCase();
-        if (role === "military" || role === "patrol") emoji = "💂";
-        else if (role === "bandit") emoji = "🥷";
+        if (role === "military" || role === "patrol") emoji = "🪖";
+        else if (role === "bandit") emoji = "🏴‍☠️";
         else if (role === "civilian") emoji = "🧑‍🌾";
-        else if (role === "commerce") emoji = "🐪";
+        else if (role === "commerce") emoji = "⚖️";
         
         iconSpan.innerText = emoji;
 

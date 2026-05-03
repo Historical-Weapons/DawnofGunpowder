@@ -1,5 +1,5 @@
 //==============================================================//==============
-/*battle_roster_avatar.js
+/* 
   Adds persistent rosters, player avatar, and hero progression.
   Overrides deploy, update, draw, and leave functions for battle sync.
   Tracks XP, loot, casualties, and UI messages.
@@ -486,36 +486,39 @@ leaveBattlefield = function(playerObj) {
     if (playerObj.stats) playerObj.stats.ammo = 30;
 
 // C. LOOT SYSTEM & CARGO TRANSFER
-    if (enemyRef) {
-        let eInitial = (currentBattleData.trueInitialCounts && currentBattleData.trueInitialCounts.enemy) ? currentBattleData.trueInitialCounts.enemy : 1;
-        let eLost = Math.max(0, eInitial - (enemyRef.roster ? enemyRef.roster.length : 0));
-        
-        let pInitial = (currentBattleData.trueInitialCounts && currentBattleData.trueInitialCounts.player) ? currentBattleData.trueInitialCounts.player : 1;
-        let pLost = Math.max(0, pInitial - playerObj.roster.length);
+let didPlayerWin = false; // <-- SURGERY: Declare at function scope[cite: 2]
 
-        // Ensure player inventory exists
-        if (!playerObj.inventory) playerObj.inventory = {};
-        
-        // ---> THE FIX: STRICT CARGO ENFORCEMENT <---
-        // Use the exact formula from trade_materials_nonfood.js (2 per troop, min 10)
-        playerObj.cargoCapacity = Math.max(10, (playerObj.troops || (playerObj.roster ? playerObj.roster.length : 1)) * 2);
-        let currentCargoLoad = Object.values(playerObj.inventory).reduce((a, b) => a + b, 0);
-        
-        let randMod = 0.8 + (Math.random() * 0.4);
-        // --- DEEP ANALYSIS FIX: VICTORY CONDITION ---
-        // If you press 'P' to win while enemies are fleeing off the map, eSurvivors > 0.
-        // We now check if the player's commander survived AND if the enemy is routed.
-        let isPlayerDead = (currentBattleData && currentBattleData.playerDefeatedText) || (cachedCommander && cachedCommander.hp <= 0);
-        let isEnemyRouted = (eSurvivors.length < 5 || (eSurvivors.length / Math.max(1, eInitial)) < 0.15);
-        
-        let didPlayerWin = !isPlayerDead && (eSurvivors.length === 0 || isEnemyRouted);
+if (enemyRef) {
+    let eInitial = (currentBattleData.trueInitialCounts && currentBattleData.trueInitialCounts.enemy) ? currentBattleData.trueInitialCounts.enemy : 1; //[cite: 2]
+    let eLost = Math.max(0, eInitial - (enemyRef.roster ? enemyRef.roster.length : 0)); //[cite: 2]
+    
+    let pInitial = (currentBattleData.trueInitialCounts && currentBattleData.trueInitialCounts.player) ? currentBattleData.trueInitialCounts.player : 1; //[cite: 2]
+    let pLost = Math.max(0, pInitial - playerObj.roster.length); //[cite: 2]
 
-        // --- BATTLE LOGGING ---
-        console.log(`[BATTLE END] --- LOOT SYSTEM TRIGGERED ---`);
-        console.log(`[BATTLE END] Player Dead: ${isPlayerDead}, Enemy Routed: ${isEnemyRouted}, eSurvivors: ${eSurvivors.length}/${eInitial}`);
-        console.log(`[BATTLE END] didPlayerWin Evaluated To: ${didPlayerWin}`);
+    // Ensure player inventory exists
+    if (!playerObj.inventory) playerObj.inventory = {}; //[cite: 2]
+    
+    // ---> THE FIX: STRICT CARGO ENFORCEMENT <---
+    // Use the exact formula from trade_materials_nonfood.js (2 per troop, min 10)
+    playerObj.cargoCapacity = Math.max(10, (playerObj.troops || (playerObj.roster ? playerObj.roster.length : 1)) * 2); //[cite: 2]
+    let currentCargoLoad = Object.values(playerObj.inventory).reduce((a, b) => a + b, 0); //[cite: 2]
+    
+    let randMod = 0.8 + (Math.random() * 0.4); //[cite: 2]
+    
+    // --- DEEP ANALYSIS FIX: VICTORY CONDITION ---
+    let isPlayerDead = (currentBattleData && currentBattleData.playerDefeatedText) || (cachedCommander && cachedCommander.hp <= 0); //[cite: 2]
+    let isEnemyRouted = (eSurvivors.length < 5 || (eSurvivors.length / Math.max(1, eInitial)) < 0.15); //[cite: 2]
+    
+    // <-- SURGERY: Remove 'let' so it assigns to the outer variable
+    didPlayerWin = !isPlayerDead && (eSurvivors.length === 0 || isEnemyRouted); //[cite: 2]
 
-        if (didPlayerWin) {
+    // --- BATTLE LOGGING ---
+    console.log(`[BATTLE END] --- LOOT SYSTEM TRIGGERED ---`); //[cite: 2]
+    console.log(`[BATTLE END] Player Dead: ${isPlayerDead}, Enemy Routed: ${isEnemyRouted}, eSurvivors: ${eSurvivors.length}/${eInitial}`); //[cite: 2]
+    console.log(`[BATTLE END] didPlayerWin Evaluated To: ${didPlayerWin}`); //[cite: 2]
+
+    if (didPlayerWin) { //[cite: 2]
+        // ... (rest of your victory loot code remains exactly the same)
 			playerObj.cohesion = Math.min(100, (playerObj.cohesion || 100) + 15);  
 			
             // --- VICTORY LOOT-
@@ -649,8 +652,22 @@ leaveBattlefield = function(playerObj) {
     cachedCommander = null;
     isBattlefieldReady = false;
 
+    // ========================================================================
+    // ---> SURGERY: THE ROSTER SAFETY CLAMP <---
+    // If the 1% Miracle wiped the army, or starvation/combat left them at 0,
+    // force a fallback unit so the UI and Overworld do not crash.
+    // ========================================================================
+    if (playerObj.troops <= 0) {
+        playerObj.troops = 1; 
+       
+    }
+
     // --- SURGERY: STRICT < 3 PERMADEATH RULE ---
-    if (!didPlayerWin && playerObj.troops < 3) {
+    // Note: If you want the player to SURVIVE the 1% miracle, you must bypass this!
+    // We add a check for the miracle text so it doesn't kill them after saving them.
+    let savedByMiracle = currentBattleData && currentBattleData.playerDefeatedText;
+    
+    if (!didPlayerWin && playerObj.troops < 3 && !savedByMiracle) {
         console.log("CRITICAL DEFEAT: Less than 3 troops remain. Permadeath triggered.");
         if (typeof window.triggerPermadeath === 'function') {
             window.triggerPermadeath();
@@ -659,7 +676,6 @@ leaveBattlefield = function(playerObj) {
         }
     }
 };
-
 
 
 

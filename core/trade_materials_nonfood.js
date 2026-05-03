@@ -238,6 +238,12 @@ function initCityMarket(city) {
     const tileName = _getTileAtCity(city);
     const nativeIds = TILE_RESOURCES[tileName] || TILE_RESOURCES["_default"];
 
+    // ── POPULATION SCALE FACTOR ──────────────────────────────────────────────
+    // Large cities (pop ≥ 3000) get full stock.  Tiny villages (pop ~100) get
+    // ~3–5% of a city's stock.  Clamp between 0.03 and 1.0.
+    const _cityPop  = city.pop || 1000;
+    const popFactor = Math.max(0.03, Math.min(1.0, _cityPop / 3000));
+
 // 6a. Give native resources a MASSIVE starting stock (Local Abundance)
     nativeIds.forEach((rid, idx) => {
         const res = RESOURCE_CATALOG[rid];
@@ -246,8 +252,10 @@ function initCityMarket(city) {
         // The first item in the tile's array gets 100% (1.0), the 4th gets 46% (0.46)
         const abundanceFactor = 1.0 - idx * 0.18; 
         
-        // SURGERY: Crank ideal stock from ~100 up to ~500 for primary goods
-        const idealStock = Math.round((350 + Math.random() * 100) * abundanceFactor);
+        // SURGERY: Scale ideal stock with population (full city = 350–450, hamlet = ~12–18)
+        const idealStock = Math.max(2, Math.round(
+            (350 + Math.random() * 100) * abundanceFactor * popFactor
+        ));
         
         // Init stock is between 80% and 120% of ideal (to create slight market fluctuations)
         const initStock  = Math.round(idealStock * (0.8 + Math.random() * 0.4)); 
@@ -264,11 +272,11 @@ function initCityMarket(city) {
         if (city.market[rid]) return; // Already native
         const res = RESOURCE_CATALOG[rid];
         
-        // SURGERY: They only WANT 2 to 6 units of foreign goods to begin with
-        const idealStock = 2 + Math.floor(Math.random() * 5); 
+        // Scale import demand with pop too — tiny hamlets import almost nothing
+        const baseIdeal  = 2 + Math.floor(Math.random() * 5);
+        const idealStock = Math.max(1, Math.round(baseIdeal * popFactor));
         
         // SURGERY: But they actually HAVE almost none of it (0% to 40% of ideal)
-        // This will frequently result in exactly 0 or 1 unit of stock.
         const initStock  = Math.floor(idealStock * (0.0 + Math.random() * 0.4)); 
         
         city.market[rid] = {
@@ -462,8 +470,20 @@ function playerSellResource(city, rid, qty) {
 
     const entry   = city.market[rid];
     const res     = RESOURCE_CATALOG[rid];
-    // Sell price = 80% of current market price (merchant fee)
-    const revenue = Math.round(entry.price * qty * 0.80);
+
+    // DIMINISHING RETURNS: As you sell more units, you flood the market and each
+    // subsequent unit fetches a lower price.  We simulate this with a trapezoidal
+    // average: the price at the START of the sale vs the price AFTER all units land.
+    // This is O(1), mathematically fair, and creates real incentives to spread sales
+    // across multiple cities rather than dumping everything at once.
+    const startPrice    = entry.price;
+    const stockAfter    = entry.stock + qty;
+    const endPrice      = _calcPrice(res, stockAfter, entry.idealStock, city.faction);
+    // Weighted average: first unit gets full price, last unit gets endPrice
+    const avgPrice      = (startPrice + endPrice) / 2;
+    // 80% of the average price (20% merchant cut)
+    const revenue       = Math.round(avgPrice * qty * 0.80);
+    const avgPerUnit    = qty > 0 ? Math.round(revenue / qty) : 0;
 
     player.gold                += revenue;
     player.inventory[rid]      -= qty;
@@ -471,7 +491,10 @@ function playerSellResource(city, rid, qty) {
     entry.stock                += qty;
     entry.price                 = _calcPrice(res, entry.stock, entry.idealStock, city.faction);
 
-    return { ok:true, msg:`Sold ${qty}× ${res.label} for ${revenue}g` };
+    const priceDropNote = (endPrice < startPrice)
+        ? ` (price dropped ${startPrice}→${endPrice}g/u from flooding market)`
+        : "";
+    return { ok:true, msg:`Sold ${qty}× ${res.label} for ${revenue}g (avg ${avgPerUnit}g/u)${priceDropNote}` };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -668,9 +691,26 @@ function _renderTradePanel() {
                 const entry  = city.market[rid];
                 const sellPr = entry ? Math.round(entry.price * 0.80) : Math.round(res.basePrice * 0.6);
                 const profit = sellPr > res.basePrice ? " 📈" : sellPr < res.basePrice * 0.7 ? " 📉" : "";
+
+                // ── Diminishing-returns revenue previews ──────────────────────
+                const rev1    = _calcSellRevenue(city, rid, 1);
+                const revPack = _calcSellRevenue(city, rid, res.packSize);
+                const revAll  = _calcSellRevenue(city, rid, owned);
+                // Per-unit averages to make the drop visible
+                const avg1    = rev1;   // trivially 1 unit
+                const avgPack = res.packSize > 1 ? Math.round(revPack / res.packSize) : revPack;
+                const avgAll  = owned   > 1 ? Math.round(revAll  / owned)        : revAll;
+
+                // Warn when selling a lot causes significant price drop
+                const simulatedEndPrice = entry ? _calcPrice(res, (entry.stock || 0) + owned, entry.idealStock || 10, city.faction) : sellPr;
+                const priceDrop = entry ? Math.round(((entry.price - simulatedEndPrice) / Math.max(1, entry.price)) * 100) : 0;
+                const dropWarning = priceDrop >= 15
+                    ? `<span style="color:#ff9999;font-size:0.85em;">⚠ Selling all drops price by ~${priceDrop}%</span>`
+                    : '';
+
                 html += `
 <div style="
-    display:flex;align-items:center;gap:8px;
+    display:flex;align-items:flex-start;gap:8px;
     padding:8px;margin-bottom:5px;
     background:rgba(255,255,255,0.04);border-radius:6px;
     border-left:3px solid #2e7d32;
@@ -684,13 +724,21 @@ function _renderTradePanel() {
       Carrying: <span style="color:#fff">${owned}</span>
       &nbsp;|&nbsp; Base: ${res.basePrice}g${profit}
     </div>
+    <div style="font-size:clamp(9px,2.2vw,10px);color:#888;margin-top:2px;">
+      Preview → 1u:<span style="color:#ffca28">${rev1}g</span>
+      &nbsp;|&nbsp; ${res.packSize}u:<span style="color:#ffca28">${revPack}g</span>
+      <span style="color:#888">(${avgPack}g/u)</span>
+      &nbsp;|&nbsp; All:<span style="color:#ffca28">${revAll}g</span>
+      <span style="color:#888">(${avgAll}g/u)</span>
+    </div>
+    <div style="margin-top:2px;">${dropWarning}</div>
   </div>
   <div style="text-align:right;flex-shrink:0;">
-    <div style="color:#8bc34a;font-weight:bold;font-size:clamp(12px,3vw,15px);">${sellPr}Gold/unit</div>
-    <div style="display:flex;gap:3px;margin-top:4px;">
-      <button onclick="_tradeSell('${rid}',1)" style="${_sellBtnStyle()}">-1</button>
-      <button onclick="_tradeSell('${rid}',${res.packSize})" style="${_sellBtnStyle()}" ${owned<res.packSize?'disabled':''}>-${res.packSize}</button>
-      <button onclick="_tradeSellAll('${rid}')" style="${_sellBtnStyle('#6b1a1a')}">ALL</button>
+    <div style="color:#8bc34a;font-weight:bold;font-size:clamp(12px,3vw,15px);">${sellPr}g/unit now</div>
+    <div style="display:flex;gap:3px;margin-top:4px;flex-wrap:wrap;justify-content:flex-end;">
+      <button onclick="_tradeSell('${rid}',1)" style="${_sellBtnStyle()}">-1<br><span style='font-size:9px;color:#ffca28;'>${rev1}g</span></button>
+      <button onclick="_tradeSell('${rid}',${res.packSize})" style="${_sellBtnStyle()}" ${owned<res.packSize?'disabled':''}>-${res.packSize}<br><span style='font-size:9px;color:#ffca28;'>${revPack}g</span></button>
+      <button onclick="_tradeSellAll('${rid}')" style="${_sellBtnStyle('#6b1a1a')}">ALL<br><span style='font-size:9px;color:#ffca28;'>${revAll}g</span></button>
     </div>
   </div>
 </div>`;
@@ -705,12 +753,34 @@ function _renderTradePanel() {
   <div style="
       padding:7px 12px;border-top:1px solid #333;font-size:clamp(9px,2.2vw,11px);
       color:#666;text-align:center;flex-shrink:0;">
-    💡 Buy low, travel to another city, sell high. Prices shift with supply & demand.
+    💡 Buy low, travel to another city, sell high. Prices shift with supply &amp; demand.
     &nbsp;|&nbsp; ⭐ = native resource (abundant &amp; cheap here)
+    &nbsp;|&nbsp; 📉 Selling in bulk floods the market — spread sales across cities for best profit.
   </div>
 </div><!-- end trade-modal -->`;
 
     panel.innerHTML = html;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DIMINISHING RETURNS PREVIEW HELPER
+// Returns projected total revenue for selling `qty` units of `rid` at `city`,
+// using the same trapezoidal formula as playerSellResource().  O(1), safe to
+// call on every render frame.
+// ─────────────────────────────────────────────────────────────────────────────
+function _calcSellRevenue(city, rid, qty) {
+    if (!city || !city.market || qty <= 0) return 0;
+    let entry = city.market[rid];
+    if (!entry) {
+        const res2 = RESOURCE_CATALOG[rid];
+        if (!res2) return 0;
+        entry = { stock:0, idealStock:10, price: Math.round(res2.basePrice * 0.6) };
+    }
+    const res        = RESOURCE_CATALOG[rid];
+    if (!res) return 0;
+    const startPrice = entry.price;
+    const endPrice   = _calcPrice(res, entry.stock + qty, entry.idealStock, city.faction);
+    return Math.round(((startPrice + endPrice) / 2) * qty * 0.80);
 }
 
 function _buyBtnStyle(bg) {
@@ -805,6 +875,7 @@ window._tradeBuy          = _tradeBuy;
 window._tradeBuyMax       = _tradeBuyMax;
 window._tradeSell         = _tradeSell;
 window._tradeSellAll      = _tradeSellAll;
+window._calcSellRevenue   = _calcSellRevenue;
 
 console.log("[TradeSystem] trade_materials_nonfood.js loaded — " +
     Object.keys(RESOURCE_CATALOG).length + " resources across " +
@@ -836,4 +907,4 @@ setInterval(() => {
             }
         }
     });
-}, 5000); // Scans and replenishes the world every 5 seconds
+}, 10000); // Scans and replenishes the world every 10 seconds

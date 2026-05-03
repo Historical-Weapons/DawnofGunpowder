@@ -297,8 +297,8 @@ function showCampaignScreen(menuEl, onBack, onLaunch) {
             title:    "The Bun'ei Invasion",
             subtitle: "Kyūshū, Japan — 1274",
             desc:     "The Mongol-Goryeo fleet has crossed the Korea Strait. " +
-                      "The clans of Kyūshū must defend the sacred shores. " +
-                      "Lead your samurai, forge alliances, and drive back the tide.",
+ "Rally militia from nearby coastal villages, hold the beach line, " +
+     "the kami will decide the rest.",
             tag:      "JAPAN TUTORIAL",
             tagColor: "#c62828",
             available: true
@@ -414,34 +414,148 @@ function showCampaignScreen(menuEl, onBack, onLaunch) {
                 card.style.boxShadow   = "none";
             };
 
-            card.onclick = () => {
-                // Remove the campaign screen
-                if (panel.parentNode) panel.parentNode.removeChild(panel);
+card.onclick = async () => {
+    // 1. UI Cleanup
+    if (panel.parentNode) panel.parentNode.removeChild(panel);
 
-                // Show the loading screen
-                if (typeof window.showLoadingScreen === 'function') {
-                    window.showLoadingScreen();
+    // 2. Trigger your new loading screen
+    if (typeof window.showLoadingScreen === 'function') {
+        window.showLoadingScreen();
+    }
+
+    if (typeof AudioManager !== 'undefined') AudioManager.init();
+
+    // 3. Destroy main menu
+    if (typeof onLaunch === 'function') onLaunch();
+
+    // 4. NEW METHOD: Replicate the working "Launch Scenario" path EXACTLY.
+    //
+    //    Why this is the only reliable path:
+    //    The .json/.js file stores tiles in compact form { e, m, r } to keep
+    //    the file small. ScenarioRuntime._reskinWorldMap (in scenario_update.js)
+    //    expects FULL tile objects with .name, .color, .speed, .impassable —
+    //    it does NOT expand compact tiles itself. If we hand raw compact tiles
+    //    straight to ScenarioRuntime.launch, every tile gets its name/color/
+    //    impassable mutated to `undefined`, the renderer falls back to its
+    //    ocean default, and the player sees an all-water map.
+    //
+    //    The "Launch Scenario" file picker in scenario_editor.js works
+    //    correctly because it runs the JSON through TWO transforms:
+    //      a. tiles via window.ScenarioEditor.classifyTile(e, m, r)  (compact → full)
+    //      b. factions backfilled from window.ScenarioEditor.DEFAULT_FACTIONS
+    //         (older saves are missing order/cityCount/uniqueTroop)
+    //    We do the SAME transforms here, with a hardcoded data source instead
+    //    of a file picker, so the campaign launches with one tap.
+    //
+    //    Data source: try window.Story_1_Data first (loaded by the
+    //    <script src="story/Story_1_Dev.js"> tag in index.html). If that
+    //    isn't present, fall back to fetching story/Story_1_Dev.json. Either
+    //    a .js or .json source is fine — only the post-load transforms matter.
+    if (story.id === 1) {
+        try {
+            // ── (0) Campaign-mode gate — REQUIRED for HakataBay install ──────
+            //  HakataBayScenario auto-installs ONLY when this flag is true,
+            //  so loading the same JSON via Sandbox or Scenario Editor will
+            //  NOT splice the Hakata triggers in. Cleared on quit-to-menu.
+            //  Without this, the trigger system never starts → no spawn_npc
+            //  actions ever fire → empty world.
+            window.__campaignStory1Active = true;
+            window.__campaignStoryId      = 1;
+            console.log("[Campaign] Campaign-mode flag set → Story 1.");
+
+            // ── (a) Acquire raw scenario data ────────────────────────────────
+            let raw = null;
+            if (window.Story_1_Data && typeof window.Story_1_Data === "object") {
+                raw = window.Story_1_Data;
+                console.log("[Campaign] Using window.Story_1_Data (loaded via <script>).");
+            } else {
+                console.log("[Campaign] window.Story_1_Data not present — fetching JSON…");
+                const path = "story/Story_1_Dev.json";
+                const response = await fetch(path);
+                if (!response.ok) throw new Error("HTTP " + response.status + " for " + path);
+                raw = await response.json();
+            }
+
+            if (!raw || !raw.tiles || !raw.factions) {
+                throw new Error("Scenario data missing required fields (tiles / factions). " +
+                                "Re-export from the Scenario Editor.");
+            }
+
+            // ── (b) Validate the editor module is loaded ─────────────────────
+            //  classifyTile + DEFAULT_FACTIONS live in scenario_editor.js.
+            //  index.html loads scenario_editor.js BEFORE menu.js, so this
+            //  should always be present, but we guard for it explicitly so
+            //  the failure mode is a clear alert rather than a silent
+            //  all-water map.
+            if (!window.ScenarioEditor ||
+                typeof window.ScenarioEditor.classifyTile !== "function" ||
+                !window.ScenarioEditor.DEFAULT_FACTIONS) {
+                throw new Error("window.ScenarioEditor is not loaded. " +
+                                "Ensure scenario_editor.js is included BEFORE menu.js.");
+            }
+            const classifyTile     = window.ScenarioEditor.classifyTile;
+            const DEFAULT_FACTIONS = window.ScenarioEditor.DEFAULT_FACTIONS;
+
+            // ── (c) Expand compact tiles → full tiles (THE critical step) ────
+            //  Compact:  { e: 0.42, m: 0.61, r: false }
+            //  Full:     { name, color, speed, impassable, e, m, isRiver, ... }
+            const tiles = raw.tiles.map(function (col) {
+                return col.map(function (t) {
+                    return classifyTile(t.e, t.m, t.r);
+                });
+            });
+
+            // ── (d) Faction migration (matches editor's Launch Scenario) ─────
+            const migratedFactions = {};
+            let i = 0;
+            Object.entries(raw.factions || {}).forEach(function (entry) {
+                const fName = entry[0], fData = entry[1];
+                const def   = DEFAULT_FACTIONS[fName] || {};
+                migratedFactions[fName] = {
+                    color:       fData.color     || def.color     || "#888888",
+                    geoWeight:   fData.geoWeight || def.geoWeight || { north: 0.5, south: 0.5, west: 0.5, east: 0.5 },
+                    enabled:     ("enabled" in fData) ? !!fData.enabled : true,
+                    locked:      !!fData.locked,
+                    order:       (typeof fData.order === "number") ? fData.order : i,
+                    cityCount:   (typeof fData.cityCount === "number") ? fData.cityCount
+                                  : (typeof def.cityCount === "number" ? def.cityCount : 4),
+                    uniqueTroop: fData.uniqueTroop || def.uniqueTroop || ""
+                };
+                i++;
+            });
+
+            // ── (e) Build the scenario object the runtime expects ────────────
+            const scenario = Object.assign({}, raw, {
+                tiles:        tiles,
+                factions:     migratedFactions,
+                cityStrategy: raw.cityStrategy || "random"
+            });
+
+            console.log("[Campaign] Loaded scenario:",
+                        "meta:",     scenario.meta && scenario.meta.name,
+                        "| tiles:",  tiles.length + "×" + (tiles[0] ? tiles[0].length : 0),
+                        "| cities:", (scenario.cities || []).length,
+                        "| triggers:", (scenario.triggers || []).length,
+                        "| importantNpcs:", (scenario.importantNpcs || []).length);
+
+            // ── (f) Hand off to the runtime ──────────────────────────────────
+            setTimeout(function () {
+                if (window.ScenarioRuntime && typeof window.ScenarioRuntime.launch === "function") {
+                    window.ScenarioRuntime.launch(scenario);
+                } else {
+                    console.error("[Campaign] ScenarioRuntime not found!");
+                    alert("Engine Error: ScenarioRuntime module missing.\n" +
+                          "Ensure scenario_update.js is included before menu.js.");
                 }
+            }, 120);
 
-                if (typeof AudioManager !== 'undefined') AudioManager.init();
-
-                // Destroy main menu
-                if (typeof onLaunch === 'function') onLaunch();
-
-                // Boot the story
-                setTimeout(() => {
-                    if (story.id === 1) {
-                        if (typeof window.initGame_story1 === 'function') {
-                            window.initGame_story1();
-                        } else {
-                            console.error("[Campaign] initGame_story1() not found. " +
-                                          "Ensure story1_map_and_update.js is loaded.");
-                            alert("Story 1 module not loaded! Check index.html script tags.");
-                        }
-                    }
-                    // Future stories: add else-if blocks here
-                }, 120);
-            };
+        } catch (err) {
+            console.error("[Campaign] Load Failed:", err);
+            alert("Failed to load Story 1 campaign.\n\nReason: " +
+                  (err && err.message ? err.message : String(err)));
+        }
+    }
+};
         }
 
         grid.appendChild(card);

@@ -28,7 +28,11 @@ function drawInfantryUnit(ctx, x, y, moving, frame, factionColor, type, isAttack
     }
 
     if (unitName === "PLAYER" || unitName === "Commander") armorVal = Math.max(armorVal, 40);
-	
+
+    // Scenario 1 (Hakata Bay): player-side units use Japanese visuals regardless of factionColor.
+    // Mirrors the same flag used for the Yumi bow. Has zero effect in sandbox.
+    const isJapan = (factionColor === "#c2185b") || (window.__campaignStory1Active && unit && unit.side === 'player');
+
     let legSwing = moving ? Math.sin(frame * 0.3) * 6 : 0;
     let bob = moving ? Math.abs(Math.sin(frame * 0.3)) * 2 : 0;
     // dir is always 1 — ctx.scale(facingDir) above handles all mirroring.
@@ -62,8 +66,8 @@ function drawInfantryUnit(ctx, x, y, moving, frame, factionColor, type, isAttack
             ctx.beginPath(); ctx.moveTo(1.5, i); ctx.lineTo(1.5, i+2); ctx.stroke();
         }
 
-        // SQUARE Asian-style Pauldrons
-        ctx.fillStyle = factionColor; 
+        // SQUARE Asian-style Pauldrons — crimson if Japanese scenario player unit
+        ctx.fillStyle = isJapan ? "#c2185b" : factionColor; 
         ctx.strokeStyle = "#1a1a1a"; ctx.lineWidth = 1;
         // Left pauldron
         ctx.fillRect(-6.5, -9.5, 3, 4.5); ctx.strokeRect(-6.5, -9.5, 3, 4.5);
@@ -81,8 +85,8 @@ function drawInfantryUnit(ctx, x, y, moving, frame, factionColor, type, isAttack
         ctx.beginPath(); ctx.moveTo(-4, -1); ctx.lineTo(4, -1); ctx.lineTo(2.5, -9); ctx.lineTo(-2.5, -9);
         ctx.closePath(); ctx.fill(); ctx.stroke();
 
-        // ADDED: Square Pauldrons for Medium Tier (Faction Color, No Lines)
-        ctx.fillStyle = factionColor; 
+        // ADDED: Square Pauldrons for Medium Tier (Faction Color / crimson if Japanese scenario)
+        ctx.fillStyle = isJapan ? "#c2185b" : factionColor; 
         ctx.strokeStyle = "#1a1a1a"; ctx.lineWidth = 1;
         // Left pauldron
         ctx.fillRect(-6, -9, 2.5, 4); ctx.strokeRect(-6, -9, 2.5, 4);
@@ -98,8 +102,8 @@ function drawInfantryUnit(ctx, x, y, moving, frame, factionColor, type, isAttack
     // 5. DYNAMIC HEADGEAR BY ARMOR TIER AND FACTION
     if (armorVal >= 25) {
         // --- HIGH TIER -> HEAVY HELMETS ---
-        if (factionColor === "#c2185b") { 
-            // Yamato (Crimson) -> Samurai Kabuto Helmet with Horns
+        if (isJapan) { 
+            // Yamato / Hakata Bay player → Samurai Kabuto Helmet with Horns
             ctx.fillStyle = "#212121";
             ctx.beginPath(); ctx.arc(0, -13, 4, Math.PI, 0); ctx.fill(); 
             ctx.fillRect(-5, -13, 10, 2); 
@@ -275,8 +279,8 @@ ctx.stroke(); // Adds a subtle edge to the last path
 }
     } else if (armorVal >= 8) {
   // --- MEDIUM TIER -> FACTION SPECIFIC LIGHT HATS ---
-        if (factionColor === "#c2185b") { 
-            // Yamato -> Ashigaru Jingasa (Peasant Style: Iron/Black Wood)
+        if (isJapan) { 
+            // Yamato / Hakata Bay player → Ashigaru Jingasa (Peasant Style: Iron/Black Wood)
             // Removed gold stroke; used a dark grey outline for a worn metal look
             ctx.fillStyle = "#212121"; 
             ctx.strokeStyle = "#424242"; 
@@ -975,7 +979,7 @@ else if (type === "two_handed") {
 	        ctx.translate(-3, -1);
 	        ctx.rotate(Math.PI / 1.2); 
 	        
-	        let isJapanBack = (factionColor === "#c2185b");
+	        let isJapanBack = (factionColor === "#c2185b") || (window.__campaignStory1Active && unit && unit.side === 'player');
 	        let stowTopY = isJapanBack ? -28 : -18; // Yumi extra long top limb
 	        let stowBotY = isJapanBack ? 12 : 18;   // Yumi shorter bottom limb
 	        let stowTopDip = isJapanBack ? -10 : -6;
@@ -1107,7 +1111,7 @@ else if (type === "two_handed") {
 	let tipX = (handX - 5) - (tension * 4); // Limbs bend back up to 4px
 	let dipX = (handX + 4) - (tension * 2); // Belly flattens slightly
 
-	let isJapan = (factionColor === "#c2185b");
+	// isJapan already declared at top of function
 	let topTipY = isJapan ? -38 : -23; // Extreme asymmetric upper limb for Yumi
 	let botTipY = isJapan ? 2 : 7;     // Shorter lower limb
 	let topDipY = isJapan ? -20 : -13; // Adjust upper bending curve

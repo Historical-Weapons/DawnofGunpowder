@@ -199,6 +199,35 @@ function updateSieges() {
     continue;
 	}
 
+        // ── VILLAGE BRANCH: no attrition, no sally-out ──────────────────────
+        // Unfortified settlements auto-resolve fast for NPC attackers.
+        // Player attackers are handled entirely by _initiateVillageAssault.
+        if (def.isVillage) {
+            if (!atk.disableAICombat && siege.ticks > 300) {
+                const _atkPow = atk.count || 0;
+                const _defPow = def.militaryPop || 0;
+                if (_atkPow >= _defPow) {
+                    const _occupying = Math.max(2, Math.floor(_atkPow * 0.3));
+                    // Flush cached interior so it regenerates under new faction colours
+                    if (typeof cityDimensions !== 'undefined') {
+                        const _oldKey = def.originalFaction || def.faction;
+                        if (cityDimensions[_oldKey]) delete cityDimensions[_oldKey];
+                    }
+                    def.originalFaction = atk.faction;
+                    def.faction         = atk.faction;
+                    def.color           = atk.color || def.color;
+                    def.militaryPop     = _occupying;
+                    def.troops          = _occupying;
+                    atk.count           = Math.max(0, _atkPow - _occupying);
+                }
+                def.isUnderSiege = false;
+                atk.isSieging    = false;
+                activeSieges.splice(i, 1);
+            }
+            continue; // No attrition or sally logic for villages — ever
+        }
+        // ── END village branch ────────────────────────────────────────────────
+
 // 2. ADD THIS LINE RIGHT HERE: Block attrition if paused
         if (siege.isPaused) continue;
 
@@ -420,6 +449,68 @@ function drawSiegeVisuals(ctx) {
         ctx.save();
         ctx.textAlign   = "center";
         ctx.textBaseline = "middle";
+
+        // ── VILLAGE: open field-raid visuals (no ladders, no wall-arrows) ────
+        if (def.isVillage) {
+            const _cityR_v = def.radius || 20;
+
+            // Amber ring — distinct from the red walled-city ring
+            ctx.beginPath();
+            ctx.arc(def.x, def.y, _cityR_v + 18, 0, Math.PI * 2);
+            ctx.strokeStyle = s.isDelaying
+                ? "rgba(255, 180, 40, 0.65)"
+                : "rgba(255, 130,  0, 0.85)";
+            ctx.lineWidth = 3;
+            ctx.setLineDash([8, 6]);
+            ctx.lineDashOffset = -(T / 50) % 14;
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            ctx.shadowColor = "rgba(0,0,0,0.9)"; ctx.shadowBlur = 5;
+            ctx.fillStyle   = "#ff9800";
+            ctx.font        = "bold 13px Georgia, serif";
+            ctx.fillText(
+                s.isDelaying ? "⚔️ ENCIRCLING..." : "⚔️ RAID IN PROGRESS",
+                def.x, def.y - _cityR_v - 42
+            );
+            ctx.fillStyle = "#ffffff";
+            ctx.font      = "12px Arial, 'Segoe UI Emoji', sans-serif";
+            ctx.fillText(`⚔️ ${attackerCount}`, def.x, def.y - _cityR_v - 26);
+            ctx.fillText(`🏘️ ${defenderCount}`, def.x, def.y - _cityR_v - 10);
+            ctx.shadowBlur = 0;
+
+            // Charging soldiers animated from attacker toward the settlement
+            const _NUM_CHARGE_V = 4;
+            ctx.font = "16px Arial, 'Segoe UI Emoji', sans-serif";
+            for (let _k = 0; _k < _NUM_CHARGE_V; _k++) {
+                const _ph  = ((T / 1800) + _k / _NUM_CHARGE_V) % 1;
+                const _sp  = (_k - (_NUM_CHARGE_V - 1) / 2) * 12;
+                const _px  = -dyAD / distAD * _sp;
+                const _py  =  dxAD / distAD * _sp;
+                const _sx  = atkX + dxAD * _ph + _px;
+                const _sy  = atkY + dyAD * _ph + _py - Math.sin(_ph * Math.PI) * 20;
+                ctx.globalAlpha = _ph > 0.85 ? Math.max(0, (1 - _ph) / 0.15) : 0.9;
+                ctx.fillText("⚔️", _sx, _sy);
+            }
+            ctx.globalAlpha = 1.0;
+
+            // Clash flash
+            const _mx_v = (atkX + def.x) * 0.5;
+            const _my_v = (atkY + def.y) * 0.5;
+            if (Math.floor(T / 700) % 3 === 0) {
+                ctx.font = "18px Arial, 'Segoe UI Emoji', sans-serif";
+                ctx.globalAlpha = 0.85;
+                ctx.fillText("💥",
+                    _mx_v + Math.sin(T / 310) * 8,
+                    _my_v + Math.cos(T / 270) * 5 - 6
+                );
+                ctx.globalAlpha = 1.0;
+            }
+
+            ctx.restore();
+            return; // exits this forEach callback only; other sieges still render
+        }
+        // ── END village branch — walled-city siege visuals continue below ─────
 
         // ── 1. ANIMATED SIEGE RING ───────────────────────────────────────────
         ctx.beginPath();
@@ -691,4 +782,217 @@ function restoreSiegeAfterBattle(didPlayerWin) {
         statusText.innerText = "DEFEAT...";
         statusText.style.color = "#ffca28";
     }
+}
+
+// ============================================================================
+// VILLAGE / UNFORTIFIED SETTLEMENT ASSAULT SYSTEM
+// ============================================================================
+// Settlements with city.isVillage = true (stamped by initializeCityData when
+// pop < random(600-900)) have no attrition phase, no sally-out, and no wall-
+// battle. The player gets a simple prompt: Attack (open field battle) or Leave.
+// Conquest uses the same ownership-transfer logic as attrition-siege victory.
+// ============================================================================
+
+// ── INTERCEPT initiatePlayerSiege for villages ──────────────────────────────
+(function _wrapInitiatePlayerSiege() {
+    const _origInitiatePlayerSiege = initiatePlayerSiege;
+
+    window.initiatePlayerSiege = function(city) {
+        if (player.troops <= 0) {
+            alert("You have no troops to attack!");
+            return;
+        }
+        if (city && city.isVillage) {
+            _initiateVillageAssault(city);
+            return;
+        }
+        _origInitiatePlayerSiege(city);
+    };
+    // Keep the local name pointing to the new wrapper too
+    initiatePlayerSiege = window.initiatePlayerSiege;
+})();
+
+
+// ── Show the minimal village assault prompt ──────────────────────────────────
+function _initiateVillageAssault(city) {
+    // Hide any open panels
+    const cityPanel  = document.getElementById('city-panel');
+    const parlePanel = document.getElementById('parle-panel');
+    if (cityPanel)  cityPanel.style.display  = 'none';
+    if (parlePanel) parlePanel.style.display = 'none';
+
+    // Stash target city so the post-battle hook can find it
+    window._pendingVillageCapture = city;
+
+    // Reconfigure the existing siege-gui as a village-raid prompt
+    const gui = document.getElementById('siege-gui');
+    if (gui) {
+        gui.style.display = 'block';
+
+        const h2 = gui.querySelector('h2');
+        if (h2) { h2.innerText = '⚔️ Settlement Raid'; h2.style.color = '#ff9800'; }
+
+        const statusText = document.getElementById('siege-status-text');
+        if (statusText) {
+            statusText.innerText =
+                `${city.name} is unfortified. Strike now or withdraw.`;
+            statusText.style.color = '#d4b886';
+        }
+
+        // Re-label and re-wire the assault button for a village field attack
+        const assaultBtn = document.getElementById('gui-assault-btn');
+        if (assaultBtn) {
+            assaultBtn.style.display = 'block';
+            assaultBtn.innerText     = '⚔️ Lead an Attack';
+            assaultBtn.onclick       = function() { _triggerVillageBattle(); };
+        }
+
+        // Re-wire leave button to clean up village-specific state
+        const leaveBtn = document.getElementById('gui-leave-btn');
+        if (leaveBtn) {
+            leaveBtn.style.display = 'block';
+            leaveBtn.onclick       = function() { _cancelVillageAssault(); };
+        }
+
+        // Hide controls that don't apply to a village raid
+        const continueBtn = document.getElementById('gui-continue-btn');
+        const sallyBtn    = document.getElementById('gui-sally-btn');
+        if (continueBtn) continueBtn.style.display = 'none';
+        if (sallyBtn)    sallyBtn.style.display    = 'none';
+    }
+
+    // Hide attrition panel left over from any prior real siege
+    const attrition = document.getElementById('mob-attrition-panel');
+    if (attrition) attrition.style.display = 'none';
+}
+
+
+// ── Launch the open-field battle for the village ─────────────────────────────
+function _triggerVillageBattle() {
+    const city = window._pendingVillageCapture;
+    if (!city) return;
+
+    // Hide GUI during battle
+    const gui = document.getElementById('siege-gui');
+    if (gui) gui.style.display = 'none';
+
+    // Restore GUI controls to original handlers for future sieges
+    _restoreDefaultSiegeGUI();
+
+    if (typeof enterBattlefield === 'function' && typeof generateNPCRoster === 'function') {
+        const garrison = {
+            faction:          city.faction,
+            role:             'Garrison',
+            count:            Math.max(1, city.militaryPop || 20),
+            roster:           generateNPCRoster('Military', Math.max(1, city.militaryPop || 20), city.faction),
+            isVillageGarrison: true   // flag available for battlefield customisation
+        };
+        // Open-field battle — no walls, standard plains speed
+        enterBattlefield(garrison, player, { name: 'Plains', speed: 1.0 });
+    }
+}
+
+
+// ── Cancel the village assault prompt cleanly ────────────────────────────────
+function _cancelVillageAssault() {
+    window._pendingVillageCapture = null;
+    const gui = document.getElementById('siege-gui');
+    if (gui) gui.style.display = 'none';
+    _restoreDefaultSiegeGUI();
+}
+
+
+// ── Reset siege GUI controls to their original default handlers ──────────────
+function _restoreDefaultSiegeGUI() {
+    const h2 = document.querySelector('#siege-gui h2');
+    if (h2) { h2.innerText = 'Under Siege'; h2.style.color = '#ff5252'; }
+
+    const assaultBtn = document.getElementById('gui-assault-btn');
+    if (assaultBtn) {
+        assaultBtn.innerText = 'Attack Settlement';
+        assaultBtn.onclick   = function() {
+            if (typeof triggerSiegeAssault === 'function') triggerSiegeAssault();
+        };
+    }
+
+    const leaveBtn = document.getElementById('gui-leave-btn');
+    if (leaveBtn) {
+        leaveBtn.onclick = function() {
+            if (typeof endSiege === 'function') endSiege(false);
+        };
+    }
+}
+
+
+// ── Lazy hook: wraps leaveBattlefield once battlefield_system.js defines it ──
+// battleEnvironment.units is still intact when leaveBattlefield fires, so we
+// can determine win/loss before the battlefield state is torn down.
+(function _installVillageCaptureHook() {
+    function _tryInstall() {
+        if (typeof window.leaveBattlefield !== 'function') {
+            setTimeout(_tryInstall, 600);
+            return;
+        }
+        if (window.__villageLeaveBattleHooked) return;
+        window.__villageLeaveBattleHooked = true;
+
+        const _origLeave = window.leaveBattlefield;
+        window.leaveBattlefield = function(...args) {
+            // Must run BEFORE the original so battleEnvironment is still live
+            if (window._pendingVillageCapture) {
+                _resolveVillageCapture();
+            }
+            return _origLeave.apply(this, args);
+        };
+        console.log('[SiegeSystem] Village capture hook installed on leaveBattlefield.');
+    }
+    // Brief delay so battlefield_system.js loads and defines leaveBattlefield first
+    setTimeout(_tryInstall, 800);
+})();
+
+
+// ── Post-battle: transfer ownership if the player won ───────────────────────
+function _resolveVillageCapture() {
+    const city = window._pendingVillageCapture;
+    window._pendingVillageCapture = null;
+    if (!city) return;
+
+    // Win condition: fewer than 15% of the enemy side still alive.
+    // battleEnvironment.units is intact because we run before leaveBattlefield clears it.
+    let didWin = false;
+    if (typeof battleEnvironment !== 'undefined' && battleEnvironment && battleEnvironment.units) {
+        const totalEnemy = battleEnvironment.units.filter(u => u.side !== 'player').length;
+        const aliveEnemy = battleEnvironment.units.filter(u => u.side !== 'player' && u.hp > 0).length;
+        didWin = totalEnemy > 0 && (aliveEnemy / totalEnemy) < 0.15;
+    }
+
+    if (!didWin) return; // City stays as-is on a loss
+
+    // ── Same conquest formula as attrition-siege starvation victory ──────────
+    const attackerCount     = player.troops;
+    const conqueringFaction = player.faction;
+    const occupyingForce    = Math.max(5, Math.floor(attackerCount * 0.3));
+
+    // Flush the old faction's cached interior so it regenerates with new colours
+    if (typeof cityDimensions !== 'undefined') {
+        const _oldKey = city.originalFaction || city.faction;
+        if (cityDimensions[_oldKey]) delete cityDimensions[_oldKey];
+    }
+    if (typeof cityCosmeticNPCs !== 'undefined') {
+        const _oldKey = city.originalFaction || city.faction;
+        if (cityCosmeticNPCs[_oldKey]) delete cityCosmeticNPCs[_oldKey];
+    }
+
+    // Transfer ownership
+    city.originalFaction = conqueringFaction;
+    city.faction         = conqueringFaction;
+    city.color           = "#FFFFFF"; // overworld icon colour — faction lookup refreshes next tick
+
+    city.militaryPop = occupyingForce;
+    city.troops      = occupyingForce;
+    city.pop        += occupyingForce;
+    player.troops   -= occupyingForce;
+
+    console.log(`[SiegeSystem] Village ${city.name} captured by ${conqueringFaction}.`);
+    alert(`Victory! ${city.name} has fallen.\n\n${occupyingForce} troops left as garrison.`);
 }
