@@ -1197,6 +1197,65 @@ if (e >= 0.36 && e < 0.65 && m > 0.45) {
                 let isDryMountains = tile.name.includes("Large Mountains");
                 let isExtremePeak  = tile.name === "Large Mountains";
 
+                // ── Hexi / Himalayan sub-pixel relief  (Large Mountains only) ──────
+                // Replaces the plain tile-colour with ridged multifractal slope
+                // shading at 4-pixel (8-px mobile) resolution — exactly the same
+                // algorithm as the story2 Qilian Corridor renderer.
+                // The drawSnowyPeak icons further below are painted on top.
+                if (isDryMountains) {
+                    const _SUB  = isMobile ? 8 : 4;
+                    const _dNx  = _SUB * 0.55 / WORLD_WIDTH;
+                    const _dNy  = _SUB * 0.55 / WORLD_HEIGHT;
+
+                    for (let _cx = 0; _cx < TILE_SIZE; _cx += _SUB) {
+                        for (let _cy = 0; _cy < TILE_SIZE; _cy += _SUB) {
+                            const _snx = (px + _cx + _SUB * 0.5) / WORLD_WIDTH;
+                            const _sny = (py + _cy + _SUB * 0.5) / WORLD_HEIGHT;
+
+                            // Sample elevation at centre + 4 cardinal neighbours
+                            const _eC = _sbRidgeMtnElev(_snx,          _sny         );
+                            const _eR = _sbRidgeMtnElev(_snx + _dNx,   _sny         );
+                            const _eL = _sbRidgeMtnElev(_snx - _dNx,   _sny         );
+                            const _eD = _sbRidgeMtnElev(_snx,           _sny + _dNy );
+                            const _eU = _sbRidgeMtnElev(_snx,           _sny - _dNy );
+
+                            // NW-light hill shading from elevation gradient
+                            const _gx = _eR - _eL;
+                            const _gy = _eD - _eU;
+                            let _shading = 0.5 - (_gx * (-0.7071) + _gy * (-0.7071)) * 18.0;
+                            if (_shading < 0) _shading = 0;
+                            if (_shading > 1) _shading = 1;
+
+                            // Boost lit ridge crests; darken crevices
+                            if (_eC > _eL && _eC > _eR && _eC > _eU && _eC > _eD && _eC > 0.55)
+                                _shading = Math.min(1, _shading + 0.18);
+                            if (_eC < _eL && _eC < _eR && _eC < _eU && _eC < _eD && _eC < 0.42)
+                                _shading = Math.max(0, _shading - 0.20);
+
+                            // Vegetation noise for forested mid-slope patches
+                            const _vegN = fbm(_snx * 7 + 4.4, _sny * 7 + 9.1);
+                            const _rgb  = _sbPickMtnColor(_eC, _shading, _vegN);
+                            bgCtx.fillStyle = _sbRgbStr(_rgb[0], _rgb[1], _rgb[2]);
+                            bgCtx.fillRect(px + _cx, py + _cy, _SUB, _SUB);
+                        }
+                    }
+
+                    // Sparse snow speckles on the highest-elevation tiles
+                    const _nSpeck = tile.e > 0.82 ? 3 : tile.e > 0.74 ? 1 : 0;
+                    for (let _k = 0; _k < _nSpeck; _k++) {
+                        bgCtx.fillStyle = "rgba(244,248,252,"
+                            + (0.40 + hash(i * 3 + _k, j) * 0.32).toFixed(2) + ")";
+                        bgCtx.beginPath();
+                        bgCtx.arc(
+                            px + hash(i, j + _k) * TILE_SIZE,
+                            py + hash(i + _k, j) * TILE_SIZE,
+                            0.5 + hash(j, i + _k) * 0.7,
+                            0, Math.PI * 2
+                        );
+                        bgCtx.fill();
+                    }
+                }
+
  
 // AFTER:
 let peakSpawnThreshold = isMobile ? 0.991 : 0.984;
@@ -1362,6 +1421,16 @@ let peakSpawnThreshold = isMobile ? 0.991 : 0.984;
 	
 
     await setLoading(97, "Spawning caravans");
+    // -- SANDBOX ENTRY GUARD ------------------------------------------------------------------
+    // This is a full world load, NOT a battle exit, so it is safe to wipe any
+    // stale scenario state that enterOverworldMode() deliberately leaves intact
+    // (it avoids touching __activeScenario mid-session to protect the trigger
+    // system).  Clearing here ensures proceduralAITendency category filters and
+    // spawn bans from a previous scenario session never bleed into sandbox play.
+    if (!window.__campaignStory1Active) {
+        window.__activeScenario  = null;
+        window.__npcSpawnBans    = null;
+    }
     initializeNPCs(cities, worldMap, TILE_SIZE, COLS, ROWS, PADDING_X, PADDING_Y);
 
     await setLoading(98, "Generating Settlements...");
@@ -1405,6 +1474,112 @@ function smoothstep(edge0, edge1, x) {
     // Scales, clamps and interpolates x into a 0.0 to 1.0 range
     let t = Math.max(0, Math.min(1, (x - edge0) / (edge1 - edge0)));
     return t * t * (3 - 2 * t);
+}
+
+// =============================================================================
+// LARGE MOUNTAINS — Hexi / Himalayan ridge terrain  (injected helpers)
+// These drive the sub-pixel slope-shading pass on every Large Mountains tile
+// so the sandbox mountains look like the Google-Maps-style Qilian/Himalayan
+// relief the player requested.  Uses the existing sandbox noise() globally.
+// =============================================================================
+
+// Ridge noise: peaks where noise ≈ 0.5, valleys where noise ≈ 0 or 1
+function _sbRidge(x, y) {
+    const n = noise(x, y);
+    const r = 1.0 - Math.abs(2.0 * n - 1.0);
+    return r * r;   // square → sharper crests
+}
+
+// Musgrave-style ridged multifractal — produces sharp ridge crests with
+// deep transverse crevices; amplitude weighted by previous octave so high
+// ridges spawn higher sub-ridges.
+function _sbRidgeFbm(x, y) {
+    let v = 0, a = 0.5, f = 1.0, prev = 1.0;
+    for (let _oi = 0; _oi < 5; _oi++) {
+        let r = _sbRidge(x * f, y * f);
+        r = Math.min(1, r * prev * 1.6);
+        v += a * r;
+        prev = r;
+        f *= 2.07;
+        a *= 0.55;
+    }
+    return Math.max(0, Math.min(1, v * 1.15));
+}
+
+// Generic Himalayan elevation — two crossing ridge fields (primary NW–SE,
+// secondary orthogonal) plus a fine roughness layer.  No spine: adapts
+// to any mountain region on the map.
+function _sbRidgeMtnElev(nx, ny) {
+    // Rotate ~32° so dominant ridges trend NW–SE (typical of Asian ranges)
+    const cosA = Math.cos(0.560), sinA = Math.sin(0.560);
+    const u =  nx * cosA - ny * sinA;
+    const v =  nx * sinA + ny * cosA;
+    const e1 = _sbRidgeFbm(u *  6.5 + 1.7, v *  4.8 + 3.1);  // primary
+    const e2 = _sbRidgeFbm(v * 11.2 + 5.3, u *  9.4 + 7.7);  // crossing
+    const e3 = _sbRidgeFbm(u * 23.1 + 8.9, v * 19.4 + 2.5);  // fine roughness
+    return Math.max(0, Math.min(1, e1 * 0.62 + e2 * 0.28 + e3 * 0.10));
+}
+
+// Linear interpolation between two RGB triples
+function _sbLerpRGB(r1, g1, b1, r2, g2, b2, t) {
+    return [ r1 + (r2 - r1) * t, g1 + (g2 - g1) * t, b1 + (b2 - b1) * t ];
+}
+
+// Safe rgb() string
+function _sbRgbStr(r, g, b) {
+    return "rgb(" + (r < 0 ? 0 : r > 255 ? 255 : r | 0) + ","
+                  + (g < 0 ? 0 : g > 255 ? 255 : g | 0) + ","
+                  + (b < 0 ? 0 : b > 255 ? 255 : b | 0) + ")";
+}
+
+// Colour picker: elevation tier + NW slope shading + optional forest patches.
+// Mirrors the story2 Hexi design exactly so Large Mountains look identical
+// whether loaded via sandbox or the campaign map.
+function _sbPickMtnColor(e, shading, vegN) {
+    let r, g, b;
+    if (e > 0.78) {
+        // SNOW / ICE  — cool blue-white
+        const tri = _sbLerpRGB(160, 174, 192,  232, 240, 248, shading);
+        r = tri[0]; g = tri[1]; b = tri[2];
+    } else if (e > 0.65) {
+        // ALPINE BARE ROCK  — warm grey, lit ridges get snow-dust bleed
+        const tri = _sbLerpRGB(60, 52, 44,  202, 196, 184, shading);
+        r = tri[0]; g = tri[1]; b = tri[2];
+        if (shading > 0.78 && e > 0.72) {
+            const k = Math.min(0.35, (shading - 0.78) * 4.5 * (e - 0.72) * 6);
+            r = r + (235 - r) * k;
+            g = g + (240 - g) * k;
+            b = b + (244 - b) * k;
+        }
+    } else if (e > 0.48) {
+        // MID-SLOPE  — rocky scree or mint-green forested
+        if (vegN > 0.56) {
+            const tri = _sbLerpRGB(60, 86, 64,   168, 196, 152, shading);
+            r = tri[0]; g = tri[1]; b = tri[2];
+        } else {
+            const tri = _sbLerpRGB(70, 56, 42,   188, 168, 138, shading);
+            r = tri[0]; g = tri[1]; b = tri[2];
+        }
+    } else if (e > 0.32) {
+        // LOWER MID-SLOPE
+        if (vegN > 0.50) {
+            const tri = _sbLerpRGB(82, 100, 74,  188, 208, 162, shading);
+            r = tri[0]; g = tri[1]; b = tri[2];
+        } else {
+            const tri = _sbLerpRGB(94, 76, 54,   200, 178, 148, shading);
+            r = tri[0]; g = tri[1]; b = tri[2];
+        }
+    } else {
+        // FOOTHILL / BLEND BASE
+        if (vegN > 0.55) {
+            const tri = _sbLerpRGB(108, 118, 86,  198, 210, 168, shading);
+            r = tri[0]; g = tri[1]; b = tri[2];
+        } else {
+            const tri = _sbLerpRGB(122, 96, 64,   210, 188, 152, shading);
+            r = tri[0]; g = tri[1]; b = tri[2];
+        }
+    }
+    return [r, g, b];
 }
 
 // Helper function to keep the main loop clean
@@ -1787,6 +1962,3 @@ function drawShip(x, y, moving, frame, factionColor = "#ffffff") {
 
     ctx.restore();
 }
-
-
- 

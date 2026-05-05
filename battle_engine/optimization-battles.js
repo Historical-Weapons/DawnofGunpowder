@@ -292,6 +292,17 @@ function _pb1_infantryLOD() {
             return _orig.apply(this, arguments);
         }
 
+        // Guard 1b: the custom battle SETUP MENU is open in the DOM.
+        // This is a belt-and-suspenders check that makes the LOD patch completely
+        // immune to inBattleMode being stale/true while the unit-card selection
+        // screen is visible (e.g. after a failed validation return in launchCustomBattle).
+        // Card canvases render at world coords x=0,y=0 which are thousands of px
+        // from player.x/y, so _shouldLOD would always return true for them — this
+        // guard prevents that entirely.
+        if (document.getElementById('cb-menu-container')) {
+            return _orig.apply(this, arguments);
+        }
+
         // Guard 2: within LOD distance — full quality
         if (!_shouldLOD(x, y, unit)) {
             return _orig.apply(this, arguments);
@@ -343,6 +354,13 @@ function _pb2_cavalryLOD() {
                                        isFleeing, cooldown, unitAmmo, unit,
                                        reloadProgress) {
         if (typeof inBattleMode === 'undefined' || !inBattleMode) {
+            return _orig.apply(this, arguments);
+        }
+
+        // Guard 1b: custom battle setup menu is open — bypass LOD entirely.
+        // Mirrors the same guard in _pb1_infantryLOD. Cavalry card previews
+        // render at x=0,y=0 and would always trigger the LOD dot otherwise.
+        if (document.getElementById('cb-menu-container')) {
             return _orig.apply(this, arguments);
         }
 
@@ -869,146 +887,4 @@ function _pb9_supplyLineReduction() {
 
 })(); // End OPTIMIZATION_BATTLES IIFE
 
-
-/* ═══════════════════════════════════════════════════════════════════════════
-   APPENDIX A — LOADING ORDER
-   ═══════════════════════════════════════════════════════════════════════════
-
-   This file MUST load AFTER all other game scripts, identical to
-   optimization.js (CAPACITOR_PERF_PATCH.js).  Recommended order:
-
-     <script src="troop_system.js"></script>
-     <script src="infscript.js"></script>
-     <script src="cavscript.js"></script>
-     <script src="battlefield_launch.js"></script>
-     <script src="troop_draw.js"></script>
-     <script src="battlefield_logic.js"></script>
-     <script src="naval_battles.js"></script>
-     <script src="custom_battle_gui.js"></script>
-     <script src="optimization.js"></script>          ← existing overworld patch
-     <script src="optimization_battles.js"></script>  ← THIS FILE (load last)
-
-   Both optimization files coexist without conflict:
-     - optimization.js        patches drawCaravan, drawShip, updateNPCs (OVERWORLD)
-     - optimization_battles.js patches drawInfantryUnit, drawCavalryUnit,
-                                        drawBattleUnits, drawBloodPool,
-                                        drawSupplyLines, initNavalBattle,
-                                        drawCosmeticWaves, updateNavalPhysics
-   There is no function overlap between the two files.
-
-   ═══════════════════════════════════════════════════════════════════════════
-   APPENDIX B — PATCHES THAT REQUIRE SOURCE FILE EDITS
-   ═══════════════════════════════════════════════════════════════════════════
-
-   The following optimisations cannot be applied from outside without
-   replacing entire closures.  Documented here for future reference.
-
-   ── troop_draw.js ────────────────────────────────────────────────────────
-
-   CHANGE 1: Increase SORT_INTERVAL from 100 ms to 200 ms on native.
-
-     // BEFORE:
-     const SORT_INTERVAL = 100;
-
-     // AFTER (add IS_NATIVE detection at the top of troop_draw.js):
-     const IS_NATIVE_DRAW = (
-         typeof window.Capacitor !== 'undefined' ||
-         /\bwv\b/.test(navigator.userAgent)
-     );
-     const SORT_INTERVAL = IS_NATIVE_DRAW ? 200 : 100;
-
-     // Rationale: Units move at 0.25–0.5 world-px/frame in battle.
-     // In 200 ms at 30 fps = 6 frames, max Y movement = 3 px.
-     // Two adjacent units can only swap Y-sort order if they pass
-     // each other — at 3 px total movement this cannot happen.
-     // Visual artefact: none detectable.
-
-   NOTE: SORT_INTERVAL and lastSortTime are declared with let/const at the
-   top of troop_draw.js (script scope), so they are NOT accessible on window
-   and cannot be patched from this external file.
-
-   ── battlefield_logic.js ────────────────────────────────────────────────
-
-   CHANGE 2: Skip projectile rendering beyond a distance threshold.
-
-     // In the projectile forEach block in the draw loop, add:
-     battleEnvironment.projectiles.forEach(p => {
-         if (isNaN(p.x) || isNaN(p.y)) return;
-         if (typeof camera !== 'undefined' && !isOnScreen(p, camera)) return;
-         // ADD — distance cull (projectiles > 500 px from player are tiny):
-         var _pdx = p.x - player.x, _pdy = p.y - player.y;
-         if ((_pdx * _pdx + _pdy * _pdy) > 250000) return; // 500 px squared
-         // ... rest of projectile draw ...
-     });
-
-   ── naval_battles.js ────────────────────────────────────────────────────
-
-   CHANGE 3: Reduce wave cosmetic count from 300 to 150 on native.
-
-     // In generateCosmetics():
-     // BEFORE:
-     for (let i = 0; i < 300; i++) { navalEnvironment.waves.push(...); }
-
-     // AFTER:
-     const waveCount = IS_NATIVE ? 150 : 300;
-     for (let i = 0; i < waveCount; i++) { navalEnvironment.waves.push(...); }
-
-   CHANGE 4: Reduce fish count from 40 to 15 on native.
-
-     // In generateCosmetics():
-     // BEFORE:
-     for (let i = 0; i < 40; i++) { navalEnvironment.fishes.push(...); }
-
-     // AFTER:
-     const fishCount = IS_NATIVE ? 15 : 40;
-     for (let i = 0; i < fishCount; i++) { navalEnvironment.fishes.push(...); }
-
-   (Changes 3 and 4 above combine with PB4/PB5 from this file — the throttles
-   become even more effective when there are fewer objects to iterate over.)
-
-   ═══════════════════════════════════════════════════════════════════════════
-   APPENDIX C — COMBINED PERFORMANCE BUDGET ESTIMATE  (Pixel 2 WebView)
-   ═══════════════════════════════════════════════════════════════════════════
-
-   LAND BATTLE (200 units, zoom 0.8, 60 fps):
-   ┌──────────────────────────────────────────────────────────────────┐
-   │ BEFORE patch:                                                    │
-   │   ~200 units visible (all within isOnScreen bounds)             │
-   │   ~150 ops/unit (infantry avg) × 200 = 30,000 ops/frame        │
-   │   × 60 fps = 1,800,000 canvas ops/second                       │
-   │                                                                  │
-   │ AFTER PB1/PB2 (LOD at 400 px):                                  │
-   │   ~80 units within 400 px → full sprite: 80 × 150 = 12,000     │
-   │   ~120 units beyond 400 px → dot:       120 × 5  =    600      │
-   │   Total: 12,600 ops/frame × 60 fps = 756,000 ops/sec           │
-   │   REDUCTION: ~58 % fewer canvas ops                             │
-   └──────────────────────────────────────────────────────────────────┘
-
-   LAND BATTLE supply lines saved (PB9, native):
-   ┌──────────────────────────────────────────────────────────────────┐
-   │   BEFORE: 10 wagons × ~100 ops × 60 fps = 60,000 ops/sec       │
-   │   AFTER:   4 wagons × ~100 ops × 60 fps = 24,000 ops/sec       │
-   │   REDUCTION: ~60 % of supply line cost eliminated               │
-   └──────────────────────────────────────────────────────────────────┘
-
-   NAVAL BATTLE (80 units, zoom 1.3, 60 fps):
-   ┌──────────────────────────────────────────────────────────────────┐
-   │ BEFORE patch:                                                    │
-   │   Map: 4800×3200 bgCanvas = 15.36 MP                           │
-   │   300 waves × ~15 ops = 4,500 ops/frame                        │
-   │   40 fish × avoidance math = ~8,000 ops/frame                  │
-   │   80 units × ~200 ops (cavalry heavy) = 16,000 ops             │
-   │   Total frame cost: ~28,500 ops + large bgCanvas blit           │
-   │                                                                  │
-   │ AFTER PB1–PB6 + PB9:                                            │
-   │   Map: 3200×2400 bgCanvas = 7.68 MP  (50 % smaller blit)      │
-   │   Waves: skip-2 throttle → 150 wave ops + PB4 = ~2,250         │
-   │   Fish: skip-3 → ~2,670 ops/sec AI                             │
-   │   50 units within 400 px: full sprite → 50 × 200 = 10,000      │
-   │   30 units beyond 400 px: dot         → 30 × 5  =    150       │
-   │   Total frame cost: ~12,400 ops + 50 % less blit work          │
-   │   REDUCTION: ~56 % fewer canvas ops + 50 % less blit work      │
-   └──────────────────────────────────────────────────────────────────┘
-
-   ═══════════════════════════════════════════════════════════════════════════
-*/
+ 

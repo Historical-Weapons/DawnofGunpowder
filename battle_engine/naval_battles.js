@@ -399,7 +399,69 @@ function drawNavalSailOverlay() {
 
     navalEnvironment.ships.forEach(s => _drawJunkSails(ctx, s));
 
-    ctx.restore();
+    ctx.restore(); // End world-space transform — everything below is screen space
+
+    // -------------------------------------------------------------------------
+    // DEATH / VICTORY OVERLAYS — must draw here (on the sail canvas) so they
+    // sit ABOVE the sails.  drawMasterStateOverlay / drawVictoryStateOverlay in
+    // the main engine draw to the main canvas which is BELOW this sail canvas,
+    // so those versions are invisible in naval battles.
+    // -------------------------------------------------------------------------
+    if (typeof battleEnvironment !== 'undefined' && battleEnvironment.units) {
+        let pCmdr = battleEnvironment.units.find(u => u.isCommander && u.side === "player");
+
+        // --- Death overlay ---
+        if (pCmdr && pCmdr.hp <= 0) {
+            ctx.save();
+            ctx.fillStyle = "rgba(0, 0, 0, 0.75)";
+            ctx.fillRect(0, 0, sc.width, sc.height);
+
+            ctx.textAlign    = "center";
+            ctx.textBaseline = "middle";
+
+            let mainFontSize = Math.min(64, sc.width * 0.1);
+            ctx.fillStyle = "#ff3333";
+            ctx.font      = `bold ${mainFontSize}px Georgia, serif`;
+            ctx.shadowColor = "rgba(0,0,0,0.8)";
+            ctx.shadowBlur  = 10;
+            ctx.fillText("YOU HAVE FALLEN", sc.width / 2, sc.height / 2 - 20);
+
+            let subFontSize = Math.min(24, sc.width * 0.04);
+            ctx.fillStyle = "#ffca28";
+            ctx.font      = `italic ${subFontSize}px Georgia, serif`;
+            ctx.shadowBlur = 5;
+            ctx.fillText("Press [P] or ↩️ to end Battle.", sc.width / 2, sc.height / 2 + 40);
+
+            ctx.restore();
+            return; // Skip victory check when already dead
+        }
+
+        // --- Victory overlay ---
+        const aliveEnemies = battleEnvironment.units.filter(u => u.side !== 'player' && u.hp > 0).length;
+        if (aliveEnemies < 1) {
+            ctx.save();
+            ctx.fillStyle = "rgba(0, 0, 0, 0.65)";
+            ctx.fillRect(0, 0, sc.width, sc.height);
+
+            ctx.textAlign    = "center";
+            ctx.textBaseline = "middle";
+
+            let mainFontSize = Math.min(64, sc.width * 0.1);
+            ctx.fillStyle = "#ffca28";
+            ctx.font      = `bold ${mainFontSize}px Georgia, serif`;
+            ctx.shadowColor = "rgba(0,0,0,0.8)";
+            ctx.shadowBlur  = 10;
+            ctx.fillText("VICTORY", sc.width / 2, sc.height / 2 - 20);
+
+            let subFontSize = Math.min(24, sc.width * 0.04);
+            ctx.fillStyle = "#ffffff";
+            ctx.font      = `italic ${subFontSize}px Georgia, serif`;
+            ctx.shadowBlur = 5;
+            ctx.fillText("Press [P] or ↩️ to return to the Overworld.", sc.width / 2, sc.height / 2 + 40);
+
+            ctx.restore();
+        }
+    }
 }
 
 // ============================================================================

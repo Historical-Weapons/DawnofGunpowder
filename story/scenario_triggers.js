@@ -1496,6 +1496,18 @@ function start(scenarioDoc) {
     rt.tick        = 0;
     rt.storyPlaying = false;
 
+    // ── Safety-net: re-assert startingNpcBans so that even if initializeNPCs or
+    //    any engine code cleared window.__npcSpawnBans during the 150–300ms dead
+    //    zone between _applyToLiveEngine and this start() call, bans are fully
+    //    restored before the first trigger tick fires.  Always REPLACE — never
+    //    merge — so old session state cannot bleed in.
+    window.__npcSpawnBans = {
+        factions: ((scenarioDoc.startingNpcBans && scenarioDoc.startingNpcBans.factions) || []).slice(),
+        roles:    ((scenarioDoc.startingNpcBans && scenarioDoc.startingNpcBans.roles)    || []).slice()
+    };
+    console.log("[ScenarioTriggers] NPC spawn bans re-asserted at start() → factions:",
+        window.__npcSpawnBans.factions, "| roles:", window.__npcSpawnBans.roles);
+
     // Reset intro-gate flags so a scenario re-launch restarts the full guard
     // sequence.  __DoG_introDone is what scenario_start's introComplete reads;
     // __DoG_introEndTime drives the 3-second post-intro parle cooldown.
@@ -2015,17 +2027,20 @@ function _installScenarioRuntimeHook() {
         const cur = window.__activeScenario;
         if (cur && cur !== lastActive) {
             lastActive = cur;
-            // Boot a small delay after world apply so cities etc. are present
+            // Reduced from 600ms → 150ms: start() must re-assert __npcSpawnBans
+            // before the NPC update loop fires its first periodic re-spawn tick.
+            // The total dead-zone is now poll(≤300ms) + delay(150ms) = ≤450ms,
+            // down from the previous worst-case 1200ms.
             setTimeout(() => {
                 if (window.__activeScenario === cur) start(cur);
-            }, 600);
+            }, 150);
         }
         if (!cur && lastActive) {
             // Scenario cleared (e.g. quit to menu) — stop ticks
             stop();
             lastActive = null;
         }
-    }, 600);
+    }, 300);  // was 600ms — poll twice as often to cut the leading dead-zone
 }
 
 // Install hooks at module load
@@ -2501,7 +2516,7 @@ function _injectEditorCss() {
 // ╔══════════════════════════════════════════════════════════════════════════╗
 // ║ CHROME — Tabs, Close, Body container                                     ║
 // ╚══════════════════════════════════════════════════════════════════════════╝
-const TABS = ["Story", "Player", "NPCs", "Diplomacy", "Triggers", "Win/Lose", "Timeline", "Code Export", "Help"];
+const TABS = ["Story", "Player", "NPCs", "Diplomacy", "Triggers", "Win/Lose", "Timeline", "Help"];
 
 function _buildEditorChrome(root) {
     root.innerHTML = `
@@ -2542,7 +2557,6 @@ function _switchTab(name) {
         case "Triggers":   _renderTriggersTab(body); break;
         case "Win/Lose":   _renderWinLoseTab(body); break;
         case "Timeline":   _renderTimelineTab(body); break;
-        case "Code Export": _renderExportTab(body); break;
         case "Help":       _renderHelpTab(body); break;
     }
 }
@@ -2645,6 +2659,8 @@ function _renderDiplomacyTab(host) {
                 const next = REL_OPTIONS[(REL_OPTIONS.indexOf(cur) + 1) % REL_OPTIONS.length];
                 setRel(f1, f2, next);
                 renderTable(); // re-render to show new state
+                // Sync the floating Diplomacy panel in the map editor
+                if (typeof window.__seRefreshDiplomacy === 'function') window.__seRefreshDiplomacy();
             });
         }
 
@@ -2655,25 +2671,38 @@ function _renderDiplomacyTab(host) {
                 for (let j = i+1; j < factions.length; j++)
                     setRel(factions[i], factions[j], "Peace");
             renderTable();
+            if (typeof window.__seRefreshDiplomacy === 'function') window.__seRefreshDiplomacy();
         };
         host.querySelector("#diplo-all-war").onclick = () => {
             if (!playerFaction) return;
             factions.filter(f => f !== playerFaction).forEach(f => setRel(playerFaction, f, "War"));
             renderTable();
+            if (typeof window.__seRefreshDiplomacy === 'function') window.__seRefreshDiplomacy();
         };
         host.querySelector("#diplo-all-ally").onclick = () => {
             if (!playerFaction) return;
             factions.filter(f => f !== playerFaction).forEach(f => setRel(playerFaction, f, "Ally"));
             renderTable();
+            if (typeof window.__seRefreshDiplomacy === 'function') window.__seRefreshDiplomacy();
         };
         host.querySelector("#diplo-reset").onclick = () => {
             s.initialDiplomacy = {};
             renderTable();
+            if (typeof window.__seRefreshDiplomacy === 'function') window.__seRefreshDiplomacy();
         };
     }
 
     renderTable();
 }
+
+// Cross-panel sync: called by the map editor's Diplomacy panel whenever it
+// changes a relation, so the trigger editor's Diplomacy tab stays in sync.
+window.__stRefreshDiplomacyTab = function() {
+    if (editorState && editorState.currentTab === 'Diplomacy') {
+        const body = document.getElementById('st-editor-body');
+        if (body) { body.innerHTML = ''; _renderDiplomacyTab(body); }
+    }
+};
 
 // ╔══════════════════════════════════════════════════════════════════════════╗
 // ║ STORY TAB — intro art / dialogue / fade / title card                     ║
@@ -4153,112 +4182,6 @@ function _compileTimelineToTriggers(s) {
             actions:    [ev.action || { type: "log_message", params: { text: "(empty)" } }]
         });
     });
-}
-
-// ╔══════════════════════════════════════════════════════════════════════════╗
-// ║ CODE EXPORT TAB                                                          ║
-// ║                                                                          ║
-// ║   Generates a self-contained JS module of the current scenario's         ║
-// ║   triggers — useful for power users / Skywind to fold into hand-written  ║
-// ║   campaign files alongside Story Mode.                                   ║
-// ╚══════════════════════════════════════════════════════════════════════════╝
-function _renderExportTab(host) {
-    const s = editorState.scenario;
-    host.innerHTML = `
-        <p style="color:#8aa;">
-            Export the current scenario's <strong>triggers</strong>, <strong>importantNpcs</strong>,
-            <strong>playerSetup</strong>, and <strong>storyIntro</strong> as a
-            standalone JS file you can include directly in a developer-built campaign.
-        </p>
-        <button class="st-btn primary" id="exp-make">⚙ Generate JS</button>
-        <button class="st-btn"         id="exp-copy">⎘ Copy to Clipboard</button>
-        <button class="st-btn"         id="exp-download">💾 Download .js</button>
-        <textarea id="exp-out" rows="22" style="width:99%;font-family:monospace;font-size:11px;margin-top:10px;"></textarea>
-    `;
-    const out = host.querySelector("#exp-out");
-
-    function generate() {
-        const json = JSON.stringify({
-            meta:           s.meta,
-            playerSetup:    s.playerSetup,
-            importantNpcs:  s.importantNpcs,
-            // Step 4: Prefer the new movies[] array. We keep storyIntro for
-            // back-compat with any external scenario module that still reads
-            // it; both contain the same boot intro data.
-            movies:         s.movies,
-            storyIntro:     s.storyIntro,
-            scenarioVars:   s.scenarioVars,
-            winLose:        s.winLose,
-            timeline:       s.timeline,
-            triggers:       s.triggers
-        }, null, 2);
-
-        const safeName = ((s.meta?.name || "MyScenario").replace(/[^a-zA-Z0-9]/g, "")) || "MyScenario";
-
-        out.value =
-`// ============================================================================
-// ${s.meta?.name || "Custom Scenario"} — auto-generated by ScenarioTriggers v${VERSION}
-// Author: ${s.meta?.author || "Unknown"}
-// Created: ${new Date().toISOString()}
-// ============================================================================
-//
-// This file packages the scenario's trigger logic as a runtime-installable
-// module. Drop it after scenario_triggers.js + storymode_presentation.js in
-// your index.html, then call:  window.${safeName}.install();
-//
-// Triggers, important NPCs, and player setup will be merged into the
-// currently-active scenario.
-// ============================================================================
-
-window.${safeName} = (function () {
-"use strict";
-
-const data = ${json};
-
-function install() {
-    if (!window.__activeScenario) {
-        console.warn("[${safeName}] No active scenario — install() should be called from a scenario boot hook.");
-        return;
-    }
-    const s = window.__activeScenario;
-    s.triggers       = (s.triggers || []).concat(data.triggers || []);
-    s.importantNpcs  = (s.importantNpcs || []).concat(data.importantNpcs || []);
-    s.playerSetup    = Object.assign(s.playerSetup || {}, data.playerSetup || {});
-    if (Array.isArray(data.movies) && data.movies.length > 0) s.movies = data.movies;
-    s.storyIntro     = data.storyIntro     || s.storyIntro;
-    s.scenarioVars   = Object.assign(s.scenarioVars || {}, data.scenarioVars || {});
-    s.winLose        = data.winLose        || s.winLose;
-    s.timeline       = data.timeline       || s.timeline;
-    if (window.ScenarioTriggers && window.ScenarioTriggers.start) {
-        window.ScenarioTriggers.start(s);
-    }
-    console.log("[${safeName}] Installed.");
-}
-
-return { install, data };
-})();
-`;
-    }
-
-    host.querySelector("#exp-make").onclick = generate;
-    host.querySelector("#exp-copy").onclick = () => {
-        if (!out.value) generate();
-        out.select();
-        document.execCommand("copy");
-        alert("Copied!");
-    };
-    host.querySelector("#exp-download").onclick = () => {
-        if (!out.value) generate();
-        const blob = new Blob([out.value], { type: "text/javascript" });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        const safeName = ((s.meta?.name || "scenario").replace(/[^a-zA-Z0-9]/g, "_")) || "scenario";
-        a.href = url; a.download = safeName + "_triggers.js";
-        document.body.appendChild(a); a.click();
-        setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 100);
-    };
-
-    generate();
 }
 
 // ╔══════════════════════════════════════════════════════════════════════════╗

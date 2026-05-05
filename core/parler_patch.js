@@ -132,7 +132,7 @@ function _patchParler() {
         const orig = window[fnName];
         if (typeof orig !== "function" || orig.__parlerPatched) return;
 
-        window[fnName] = function (npc) {
+        window[fnName] = function (npc, tile) {
             // ── Gate: busy or in cooldown ────────────────────────────────────
             if (!_parlerAllowed()) {
                 _logBlocked("StoryPresentation is active or in cooldown.");
@@ -157,7 +157,7 @@ function _patchParler() {
                 // npc.__overrideLine if present (or we patch generateNPCDialogue).
                 if (npc) npc.__overrideLine = scenarioLine;
                 try {
-                    orig.call(this, npc);
+                    orig.call(this, npc, tile); // ← pass tile through
                 } finally {
                     if (npc) delete npc.__overrideLine;
                 }
@@ -165,7 +165,7 @@ function _patchParler() {
             }
 
             // ── Default: run original ─────────────────────────────────────────
-            orig.call(this, npc);
+            orig.call(this, npc, tile); // ← pass tile through
         };
 
         window[fnName].__parlerPatched = true;

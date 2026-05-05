@@ -60,6 +60,7 @@
 //   window.ScenarioDevImport = {
 //     importSandbox()       → kicks off sandbox capture flow (UI dialog)
 //     importStory1()        → kicks off story 1 capture flow (UI dialog)
+//     importStory2()        → kicks off story 2 (Hexi Corridor 1226) capture flow
 //     captureCurrentToFile(metaOpts?)  → low-level: capture WHATEVER map is
 //                                         currently live and download it.
 //                                         metaOpts = { name, author, description }
@@ -74,7 +75,7 @@
 window.ScenarioDevImport = (function () {
 "use strict";
 
-const VERSION = "1.0.0";
+const VERSION = "1.1.0";
 
 // ────────────────────────────────────────────────────────────────────────────
 // CONFIG
@@ -924,6 +925,59 @@ async function importStory1() {
     }
 }
 
+async function importStory2() {
+    const opts = await _showImportDialog("Story 2: Hexi Corridor 1226", "story2",
+                                          "Story 2 Custom Scenario");
+    if (!opts) return;
+
+    if (typeof window.initGame_story2 !== "function") {
+        alert("initGame_story2() not found — story2_map_and_update.js not loaded.");
+        return;
+    }
+
+    _showProgress("Booting Story 2 map…");
+
+    // Hide main menu
+    const menuUI = document.getElementById("main-menu-ui-container");
+    if (menuUI) menuUI.style.display = "none";
+    if (typeof window.destroyMainMenuSafe === "function") {
+        try { window.destroyMainMenuSafe(); } catch(e){}
+    }
+
+    if (typeof window.AudioManager !== "undefined") {
+        try { window.AudioManager.init(); } catch(e){}
+    }
+
+    try {
+        if (window.__gameStarted) {
+            _warn("__gameStarted=true, resetting before re-boot");
+            window.__gameStarted = false;
+        }
+        // Note: initGame_story2 sets __gameStarted=true on its own first line
+        // and bails if it was true. So we leave it false here.
+        // We also must NOT set __campaignStory2Active — import mode runs
+        // trigger-free (free play) exactly like story1 import mode.
+        await window.initGame_story2();
+
+        _showProgress("Waiting for Hexi Corridor terrain and garrisons to settle…");
+        await _waitForMapReady();
+
+        _showProgress("Capturing scenario data…");
+        await new Promise(r => setTimeout(r, 500));
+
+        const fileName = captureCurrentToFile(opts);
+
+        _showProgress("Done — downloaded " + fileName + ". Reloading in 3 seconds…");
+        await new Promise(r => setTimeout(r, 3000));
+        location.reload();
+    } catch (err) {
+        _err("Story 2 import failed:", err);
+        _hideProgress();
+        alert("Story 2 import failed:\n" + err.message + "\n\nReloading.");
+        location.reload();
+    }
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // MAIN-MENU INTEGRATION
 //
@@ -936,11 +990,12 @@ async function importStory1() {
         const ui = document.getElementById("main-menu-ui-container");
         if (!ui) return;
         if (document.getElementById("import-sandbox-btn") &&
-            document.getElementById("import-story1-btn")) {
+            document.getElementById("import-story1-btn") &&
+            document.getElementById("import-story2-btn")) {
             return;  // already installed
         }
 
-        // Build the two buttons
+        // Build the three buttons
         const sandboxBtn = document.createElement("button");
         sandboxBtn.id = "import-sandbox-btn";
         sandboxBtn.innerText = "Import Sandbox to Scenario";
@@ -953,6 +1008,12 @@ async function importStory1() {
         _styleMenuBtn(story1Btn);
         story1Btn.onclick = () => importStory1();
 
+        const story2Btn = document.createElement("button");
+        story2Btn.id = "import-story2-btn";
+        story2Btn.innerText = "Import Story 2 to Scenario";
+        _styleMenuBtn(story2Btn);
+        story2Btn.onclick = () => importStory2();
+
         // Insert after "Scenario Editor" button (created by scenario_editor.js's
         // own observer). If that button isn't there yet, fall back to before
         // "Load Game", or finally just append.
@@ -963,14 +1024,17 @@ async function importStory1() {
         if (editorBtn && editorBtn.nextSibling) {
             ui.insertBefore(sandboxBtn, editorBtn.nextSibling);
             ui.insertBefore(story1Btn, sandboxBtn.nextSibling);
+            ui.insertBefore(story2Btn, story1Btn.nextSibling);
         } else {
             const loadBtn = allBtns.find(b => b.innerText && b.innerText.includes("Load Game"));
             if (loadBtn) {
                 ui.insertBefore(sandboxBtn, loadBtn);
                 ui.insertBefore(story1Btn, loadBtn);
+                ui.insertBefore(story2Btn, loadBtn);
             } else {
                 ui.appendChild(sandboxBtn);
                 ui.appendChild(story1Btn);
+                ui.appendChild(story2Btn);
             }
         }
 
@@ -979,6 +1043,7 @@ async function importStory1() {
             if (window.__isManualUnlocked) {
                 sandboxBtn.style.display = "block";
                 story1Btn.style.display  = "block";
+                story2Btn.style.display  = "block";
                 clearInterval(poll);
             }
         }, 150);
@@ -999,6 +1064,7 @@ async function importStory1() {
 return {
     importSandbox,
     importStory1,
+    importStory2,
     captureCurrentToFile,
     buildScenarioDoc,
     VERSION

@@ -259,3 +259,34 @@ body.detail-drawer-open #ui {
 #city-panel button:hover {
     opacity: 1.0 !important;
 }
+
+/* Add this inside the tag.textContent string in injectCSS() */
+@media (min-width: 901px) {
+    #mc3-hbar {
+        left: 10px !important;       /* Pin to the left edge */
+        transform: none !important;  /* Remove the centering offset */
+    }
+}
+
+/* Targeting the ↩️ button for Mobile */
+@media (max-width: 900px), (pointer: coarse) {
+    #mob-back-btn { /* Or #mob-p-btn if mapped to the P key function */
+        position: fixed !important;
+        top: 10px !important;     /* Match the #mc3-hbar spacing */
+        left: 10px !important;    /* Shifted to the far left corner */
+        right: auto !important;   /* Clear any right-side anchoring */
+        transform: none !important; /* Remove centering offsets */
+        
+        /* Unified Cosmetic Styling from your CSS */
+        width: 32px !important;
+        height: 32px !important;
+        background: rgba(0,0,0,0.4) !important;
+        border: 1px solid #d4b886 !important;
+        color: #f5d76e !important;
+        z-index: 10025 !important; /* Above all other UI panels */
+        display: flex !important;
+        align-items: center;
+        justify-content: center;
+        font-size: 20px !important;
+    }
+}

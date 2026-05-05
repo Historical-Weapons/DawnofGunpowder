@@ -318,32 +318,28 @@ function _applyToLiveEngine(scenarioDoc) {
     //     is exposed (otherwise there is no canvas to paint into).
     _paintCosmeticDetails(scenarioDoc);
 
-    // 4. Replace cities array with scenario cities (re-init each via engine API)
+    // ── STEP 0 (SPAWN-BAN LOCK) ──────────────────────────────────────────────
+    // MUST run before _replaceCities() because that call triggers initAllCities()
+    // which immediately begins spawning garrison/patrol/gate NPCs.  If bans land
+    // after that, the first wave of faction NPCs is already in globalNPCs.
+    //
+    // We ALWAYS hard-reset __npcSpawnBans to exactly what this scenario defines —
+    // never merge/push onto whatever stale state a previous session left behind.
+    // This is the authoritative source of truth for the lifetime of this scenario.
+    window.__npcSpawnBans = {
+        factions: ((scenarioDoc.startingNpcBans && scenarioDoc.startingNpcBans.factions) || []).slice(),
+        roles:    ((scenarioDoc.startingNpcBans && scenarioDoc.startingNpcBans.roles)    || []).slice()
+    };
+    console.log("[ScenarioRuntime] NPC spawn bans locked (pre-init) → factions:",
+        window.__npcSpawnBans.factions, "| roles:", window.__npcSpawnBans.roles);
+
+    // 4. Replace cities array with scenario cities (re-init each via engine API).
+    // Bans are already live above — any NPC spawned during initAllCities() inside
+    // _replaceCities() will be correctly filtered by _isSpawnBanned().
     _replaceCities(scenarioDoc, cities, W, H);
 
-    // 5. Re-spawn NPCs from the new cities so traders/patrols come from scenario factions
-    // ── v3.1 FIX: Pre-apply startingNpcBans BEFORE initializeNPCs runs ──────
-    // initializeNPCs() already checks _isSpawnBanned() at every spawn call, BUT
-    // those bans are normally set by the t0_briefing trigger which fires AFTER
-    // NPC init. We read the scenario doc's startingNpcBans field (if present)
-    // and push it into window.__npcSpawnBans RIGHT NOW so the ban is active from
-    // the very first call to spawnNPCFromCity / spawnMongolHorde at init time.
-    if (scenarioDoc.startingNpcBans) {
-        if (!window.__npcSpawnBans) {
-            window.__npcSpawnBans = { factions: [], roles: [] };
-        }
-        const _sBans = scenarioDoc.startingNpcBans;
-        (_sBans.factions || []).forEach(f => {
-            if (!window.__npcSpawnBans.factions.includes(f))
-                window.__npcSpawnBans.factions.push(f);
-        });
-        (_sBans.roles || []).forEach(r => {
-            if (!window.__npcSpawnBans.roles.includes(r))
-                window.__npcSpawnBans.roles.push(r);
-        });
-        console.log("[ScenarioRuntime] Pre-init NPC spawn bans applied → factions:",
-            window.__npcSpawnBans.factions, "| roles:", window.__npcSpawnBans.roles);
-    }
+    // 5. Re-spawn NPCs from the new cities so traders/patrols come from scenario factions.
+    // Bans remain in effect from Step 0 above.
     _respawnNPCsFromScenarioCities();
 
     // 6. Place player.

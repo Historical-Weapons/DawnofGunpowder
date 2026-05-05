@@ -851,12 +851,14 @@ let playerTroopCount = playerObj.troops || 0;
     });
 
 
-
-    if (typeof AudioManager !== 'undefined') {
+  if (typeof AudioManager !== 'undefined') {
         AudioManager.init();
-
-        // 2. Play your MP3 file (false = no loop)
-        // Ensure path matches your folder: music/menu_noloop.mp3
+ 
+        // CRITICAL: Arm the 3-second combat gate BEFORE music starts.
+        // This stops any melee/projectile SFX from firing while units
+        // are still being repositioned from sandbox world-map coordinates.
+        AudioManager.clearAllSFXForBattle();
+ 
         AudioManager.playMP3('music/battlemusic.mp3', false);
     }
  

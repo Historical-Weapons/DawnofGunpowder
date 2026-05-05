@@ -827,6 +827,19 @@ function draw() {
 
 	if (inBattleMode) {
 			if (typeof inNavalBattle !== 'undefined' && inNavalBattle) {
+				
+				
+    // ── SAIL OVERLAY CAMERA SYNC ─────────────────────────────────────────
+    // The sail canvas mirrors the main ctx transform each frame.
+    // main ctx does: translate(w/2, h/2) → scale(zoom) → translate(-player)
+    // So: sailCanvas pixel = cameraX + zoom * worldX  =>  cameraX = w/2 - zoom*player.x
+    navalEnvironment.cameraX     = canvas.width  / 2 - zoom * player.x;
+    navalEnvironment.cameraY     = canvas.height / 2 - zoom * player.y;
+    navalEnvironment.cameraScale = zoom;
+    // ─────────────────────────────────────────────────────────────────────
+
+
+
 				// --- FIX 1: THE BLACK ABYSS ---
 				// 1. Paint the infinite background pure black
 				ctx.fillStyle = "#000000"; 

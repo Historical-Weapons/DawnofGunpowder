@@ -718,6 +718,25 @@ function spawnMongolHorde(padX, padY) {
 
 function initializeNPCs(cities, mapData, tileSize, cols, rows, padX, padY) {
 
+    // -- SPAWN-BAN SNAPSHOT (scenario mode only) -----------------------------------
+    // scenario_update.js sets window.__npcSpawnBans from scenarioDoc.startingNpcBans
+    // BEFORE calling this function so that banned factions are blocked from the
+    // very first spawn call.  The stale-state clear below (which sets
+    // __npcSpawnBans = null) was silently wiping those pre-applied bans, causing
+    // banned factions to spawn freely at scenario launch.
+    // FIX: snapshot the bans first, perform the clear, then restore the snapshot
+    // so all spawn loops inside this function and the purge at the bottom honor them.
+    // SANDBOX GUARD: only snapshot when __activeScenario is already set, meaning
+    // applyScenario() is the caller.  In a plain sandbox session __activeScenario
+    // is null (cleared by the sandbox entry guard in sandboxmode_overworld.js),
+    // so any lingering __npcSpawnBans value is stale and must NOT be restored.
+    const _scenarioBansSnapshot = (window.__activeScenario && window.__npcSpawnBans &&
+        ((window.__npcSpawnBans.factions && window.__npcSpawnBans.factions.length) ||
+         (window.__npcSpawnBans.roles    && window.__npcSpawnBans.roles.length)))
+        ? { factions: (window.__npcSpawnBans.factions || []).slice(),
+            roles:    (window.__npcSpawnBans.roles    || []).slice() }
+        : null;
+
     // SANDBOX SAFETY: clear stale scenario globals from a previous Story 1 session.
     // Guard: only run when __campaignStory1Active is false/unset — i.e. we are NOT
     // inside an active Scenario 1 campaign.  When Scenario 1 is active this is a
@@ -727,6 +746,16 @@ function initializeNPCs(cities, mapData, tileSize, cols, rows, padX, padY) {
         window.__npcSpawnBans        = null;
         window.__activeScenario      = null;
         window.__mongolWaveAllowed   = false;
+    }
+
+    // Restore the pre-applied scenario bans so _isSpawnBanned() returns correctly
+    // for the spawn loops below and for the banned-role purge at the bottom.
+    // This has no effect during a plain sandbox session (snapshot will be null).
+    if (_scenarioBansSnapshot) {
+        window.__npcSpawnBans = _scenarioBansSnapshot;
+        console.log("[NpcSystem] Scenario spawn bans restored after stale-clear →",
+            "factions:", _scenarioBansSnapshot.factions,
+            "| roles:", _scenarioBansSnapshot.roles);
     }
 
     console.log("Drafting Dynamic Populations & Armies...");
@@ -1004,8 +1033,26 @@ function updateNPCs(cities) {
                 (typeof inBattleMode === 'undefined' || !inBattleMode) &&
                 (typeof BATTLE_COOLDOWN !== 'undefined' && now - (typeof lastBattleTime !== 'undefined' ? lastBattleTime : 0) > BATTLE_COOLDOWN)) 
             {
-                let tx = Math.floor(npc.x / tSize), ty = Math.floor(npc.y / tSize);
-                let currentTile = (worldMapRef && worldMapRef[tx] && worldMapRef[tx][ty]) ? worldMapRef[tx][ty] : {name: "Plains"}; 
+                // -- TERRAIN FIX v2: sample the PLAYER's tile with bounds clamping.
+                // If the player's tile is not water, also check the NPC's tile.
+                // Naval NPCs live on Ocean/Coastal but the player can never stand
+                // on water, so the player's tile is always adjacent land — causing
+                // naval encounters to fire as Plains.  Deferring to the NPC's tile
+                // when it is on water restores correct naval/coastal detection.
+                const WATER_TILES = new Set(["Ocean", "Coastal", "River", "Sea", "Deep Ocean"]);
+                let tx = Math.max(0, Math.min(maxCols - 1, Math.floor(player.x / tSize)));
+                let ty = Math.max(0, Math.min(maxRows - 1, Math.floor(player.y / tSize)));
+                let currentTile = (worldMapRef && worldMapRef[tx] && worldMapRef[tx][ty])
+                    ? worldMapRef[tx][ty]
+                    : { name: "Plains" };
+                if (!WATER_TILES.has(currentTile.name)) {
+                    let ntx = Math.max(0, Math.min(maxCols - 1, Math.floor(npc.x / tSize)));
+                    let nty = Math.max(0, Math.min(maxRows - 1, Math.floor(npc.y / tSize)));
+                    let npcTile = (worldMapRef && worldMapRef[ntx] && worldMapRef[ntx][nty])
+                        ? worldMapRef[ntx][nty]
+                        : null;
+                    if (npcTile && WATER_TILES.has(npcTile.name)) currentTile = npcTile;
+                }
                 if (typeof initiateParleWithNPC === 'function') initiateParleWithNPC(npc, currentTile);
                 else if (typeof enterBattlefield === 'function') enterBattlefield(npc, player, currentTile);
             }

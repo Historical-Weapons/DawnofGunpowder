@@ -177,12 +177,21 @@
    Shrink header buttons to fit iPhone 11 (414 px wide)
    ────────────────────────────────────────────────────── */
 @media (max-width: 480px) {
-  #mc3-pbtn {
-    width:  34px !important;
-    height: 34px !important;
-    font-size: 0.72rem !important;
-    flex-shrink: 0 !important;
-  }
+#mc3-pbtn {
+        position: fixed !important;
+        top: 50px !important;    /* Your requested 50px shift */
+        left: 10px !important;   /* Standard margin from the left edge */
+        right: auto !important;  /* Clear any default right-side alignment */
+        transform: none !important; 
+        z-index: 10005 !important; /* Ensure it stays above map and menus */
+        
+        /* Keeping your existing mobile size from the script */
+        width: 34px !important;
+        height: 34px !important;
+        display: flex !important;
+        align-items: center;
+        justify-content: center;
+    }
   .mc3-gbtn {
     width:  28px !important;
     height: 28px !important;

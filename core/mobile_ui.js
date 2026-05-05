@@ -485,7 +485,7 @@ body.detail-drawer-open #diplomacy-container {
     display: none; /* Hidden by default, shown via .visible class */
     position: fixed;
     top: 10px;
-    left: 50%;
+    left: 5%;
     transform: translateX(-50%); /* Centers it perfectly on Desktop */
     z-index: 8999;
     

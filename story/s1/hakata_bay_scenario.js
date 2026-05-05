@@ -985,7 +985,7 @@ var TRIGGERS = [
                 radius:      RAD.villageTrigger,
                 noAutoComplete: true
             }},
-            _sub("Torikai next — their archers are known throughout the province.", 6000, "#f5d76e")
+            _sub("Torikai next — they have some bowmen.", 6000, "#f5d76e")
         ]
     },
 

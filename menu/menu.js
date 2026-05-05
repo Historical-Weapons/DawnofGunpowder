@@ -299,19 +299,18 @@ function showCampaignScreen(menuEl, onBack, onLaunch) {
             desc:     "The Mongol-Goryeo fleet has crossed the Korea Strait. " +
  "Rally militia from nearby coastal villages, hold the beach line, " +
      "the kami will decide the rest.",
-            tag:      "JAPAN TUTORIAL",
+            tag:      "JAPAN LANDING",
             tagColor: "#c62828",
             available: true
         },
-        {
+{
             id:       2,
-            title:    "The Silk Road Fractures",
-            subtitle: "Central Asia — coming soon",
-            desc:     "A vast campaign across the Steppe and Tarim Basin as rival Khanates " +
-                      "vie for dominance of the ancient trade routes.",
-            tag:      "UNDER CONSTRUCTION",
-            tagColor: "#555",
-            available: false
+            title:    "The Fall of Western Xia",
+            subtitle: "Genghis Khan's Final Campaign",
+            desc:     "Lead the brutal 1225 invasion to crush the Xia dynasty, besiege Yinchuan, and secure the Mongol Empire's dominance.",
+            tag:      "TANGUT SIEGE",
+            tagColor: "#b5451b",
+            available: true
         },
         {
             id:       3,
@@ -552,6 +551,39 @@ card.onclick = async () => {
         } catch (err) {
             console.error("[Campaign] Load Failed:", err);
             alert("Failed to load Story 1 campaign.\n\nReason: " +
+                  (err && err.message ? err.message : String(err)));
+        }
+    }
+
+    // ── Story 2: The Fall of Western Xia ─────────────────────────────────────
+    // Uses initGame_story2() from story2_map_and_update.js — generates the
+    // Hexi Corridor map procedurally (no .json file needed).
+    // SuzhouScenario.install() is called inside initGame_story2 once the flag
+    // __campaignStory2Active is set here.
+    //
+    // To add Story 3: copy this block, replace every "2" with "3", point it at
+    // window.initGame_story3 and set window.__campaignStory3Active = true.
+    if (story.id === 2) {
+        try {
+            window.__campaignStory2Active = true;
+            window.__campaignStoryId      = 2;
+            console.log("[Campaign] Campaign-mode flag set → Story 2.");
+
+            if (typeof window.initGame_story2 !== 'function') {
+                throw new Error(
+                    "window.initGame_story2() not found.\n" +
+                    "Ensure story2_map_and_update.js is loaded in index.html " +
+                    "AFTER sandboxmode_overworld.js and AFTER mongolconquestxia_scenario.js."
+                );
+            }
+
+            setTimeout(function () {
+                window.initGame_story2();
+            }, 120);
+
+        } catch (err) {
+            console.error("[Campaign] Story 2 load failed:", err);
+            alert("Failed to load Story 2 campaign.\n\nReason: " +
                   (err && err.message ? err.message : String(err)));
         }
     }

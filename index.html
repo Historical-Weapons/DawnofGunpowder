@@ -408,10 +408,14 @@ function toggleDipLog() {
 <script src="story/scenario_tools_panel.js"></script>   
 
 	<script src="story/storymode_presentation.js"></script>   
-	<script src="story/scenario_triggers.js"></script>         
-	<script src="story/s1/senario_devmade_import.js"></script> <!-- test file -->
-   <script src="story/s1/hakata_bay_scenario.js"></script>   <!-- test file -->
-	<script src="story/s1/scenario_import_patch.js"></script> <!-- test file -->
+	<script src="story/scenario_triggers.js"></script>        
+ <script src="story/scenario_editor_patch_p1.js"></script>	
+	<script src="story/senario_devmade_import.js"></script>  
+	<!-- Exports hardcoded dev maps (Sandbox, Story 1, Story 2) into a .json file so you can open them in the Scenario Editor and add triggers/story content. -->
+ 
+	<script src="story/scenario_import_triggerNPC.js"></script>  <!-- used to be below hakata bay, Adds an import button inside the Trigger Editor so you can pull triggers, NPCs, and story data from a pre-written .js scenario module into whatever scenario you currently have open. -->
+   <script src="story/s1/hakata_bay_scenario.js"></script>  
+   
     <script src="menu/menu.js"></script>
     <script src="menu/menu-units-guide.js"></script>
   
@@ -427,7 +431,8 @@ function toggleDipLog() {
     <script src="battle_engine/siege_system.js"></script>
     <script src="core/faction_dynamics.js"></script>
     <script src="sandboxmode/sandboxmode_overworld.js"></script>
-	<script src="story/s1/story1_map_and_update.js"></script> <!-- test file -->
+	<script src="story/s1/story1_map_and_update.js"></script>  
+	<script src="story/s2/story2_map_and_update.js"></script>  
     <script src="core/camp_system.js"></script>
     <script src="core/camp_system_combat.js"></script>
     <script src="core/viewport_culling.js"></script>
@@ -445,7 +450,9 @@ function toggleDipLog() {
     <script src="battle_engine/autoAttack.js"></script>
     <script src="core/mobile_cleanup.js"></script>
 	
+	    <script src="story/scenario_troop_editor.js"></script>
 	
+<script src="story/scenario_troop_appearance.js"></script>  
     <script src="core/save_system.js"></script>
     <script src="core/world_map.js"></script>
 	
@@ -468,7 +475,8 @@ function toggleDipLog() {
         const launchBtn = allBtns.find(b => b.innerText.includes("Launch Scenario"));
         const editorBtn = allBtns.find(b => b.innerText.includes("Scenario Editor"));
         const sandboxImportBtn = allBtns.find(b => b.innerText.includes("Import Sandbox"));
-        const storyBtn = allBtns.find(b => b.innerText.includes("Import Story 1"));
+        const story1Btn = allBtns.find(b => b.innerText.includes("Import Story 1"));
+        const story2Btn = allBtns.find(b => b.innerText.includes("Import Story 2"));
 
         // Find base game mode buttons
         const sandboxGameBtn = allBtns.find(b => b.innerText.includes("Sandbox Game"));
@@ -483,11 +491,11 @@ function toggleDipLog() {
         const unitsBtn = document.getElementById("units-guide-btn");
         
         // Wait until scenario buttons are injected AND the manual is unlocked
-        if (launchBtn && editorBtn && sandboxImportBtn && storyBtn && window.__isManualUnlocked) {
+        if (launchBtn && editorBtn && sandboxImportBtn && story1Btn && story2Btn && window.__isManualUnlocked) {
             clearInterval(poll);
             
             // Group arrays
-            const scenarioBtns = [launchBtn, editorBtn, sandboxImportBtn, storyBtn];
+            const scenarioBtns = [launchBtn, editorBtn, sandboxImportBtn, story1Btn, story2Btn];
             const playBtns = [campaignBtn, sandboxGameBtn, customBattleBtn, loadGameBtn].filter(Boolean);
             const rootBtns = [manualBtn, unitsBtn, optionsBtn, quitBtn].filter(Boolean); 
 

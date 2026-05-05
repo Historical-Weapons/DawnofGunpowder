@@ -240,7 +240,22 @@ function _newScenarioDoc(opts) {
         // ── Entity setup ──────────────────────────────────────────────────────
         importantNpcs:        [],
         playerSetup:          {},
-        proceduralAITendency: {}
+        proceduralAITendency: {},
+
+        // ── CUSTOM TROOPS (Troop Editor — Phase 1) ────────────────────────────
+        // customTroops:    array of full troop definition objects (see
+        //                  scenario_troop_editor.js for the schema). Each entry
+        //                  is a self-contained troop spec that the runtime
+        //                  layers ON TOP of the vanilla UnitRoster — vanilla
+        //                  troops are never deleted, only augmented.
+        // customHierarchy: a shallow overlay applied on top of
+        //                  troopGUI.hierarchy at launch.  Key is the parent
+        //                  unit name (e.g. "Spearman"); value is an array of
+        //                  child unit names (e.g. ["My Custom Halberdier"]).
+        //                  Children are appended; existing vanilla children
+        //                  are preserved.
+        customTroops:         [],
+        customHierarchy:      {}
     };
 
     // opts.factionsArr is the ordered array from the setup screen. If not
@@ -1185,15 +1200,6 @@ function _makeMenu(label, items) {
 
     // ── HELP menu ───────────────────────────────────────────────────────────
     _makeMenu("Help", [
-        { label: "🖌 Paint Biome",         action: () => alert("🖌 PAINT BIOME\n\nDrag on the canvas to paint the selected biome. Adjust brush size, strength, and active biome in the Brush panel.") },
-        { label: "🧽 Erase",              action: () => alert("🧽 ERASE\n\nDrag to reset tiles back to Plains. Useful for correcting paint mistakes.") },
-        { label: "⬆ Elevate / ⬇ Lower", action: () => alert("⬆ ELEVATE / ⬇ LOWER\n\nAdjust tile altitude. High elevation → mountains; low → coastal/ocean. Biome is auto-reclassified.") },
-        { label: "💧 Moisten / 🌵 Dry",  action: () => alert("💧 MOISTEN / 🌵 DRY\n\nAdjust tile moisture. High moisture → forest/jungle; low → desert/dunes.") },
-        { label: "〰 Paint River",         action: () => alert("〰 PAINT RIVER\n\nMark tiles as river tiles. Rivers appear coastal-coloured and affect movement speed.") },
-        { label: "🏰 Place City",          action: () => alert("🏰 PLACE CITY\n\nClick any non-ocean tile to place a new city. You will be prompted for name and faction.") },
-        { label: "✥ Move City",           action: () => alert("✥ MOVE CITY\n\nClick and drag a city marker to reposition it on the map.") },
-        { label: "✖ Delete City",         action: () => alert("✖ DELETE CITY\n\nClick on a city marker to permanently remove it from the scenario.") },
-        "---",
         { label: "⌨ Keyboard Shortcuts",  action: () => alert(
 "KEYBOARD SHORTCUTS\n\n" +
 "── Desktop ──────────────────────────\n" +
@@ -1790,6 +1796,8 @@ function _setDipRel(a, b, display) {
     if (!state.scenario.initialDiplomacy[b]) state.scenario.initialDiplomacy[b] = {};
     state.scenario.initialDiplomacy[a][b] = raw;
     state.scenario.initialDiplomacy[b][a] = raw;
+    // Sync the trigger editor's Diplomacy tab if it's open
+    if (typeof window.__stRefreshDiplomacyTab === 'function') window.__stRefreshDiplomacyTab();
 }
 
 function _renderDiplomacyPanel(wrap) {
@@ -1895,6 +1903,10 @@ function _renderDiplomacyPanel(wrap) {
     });
     wrap.appendChild(quickRow);
 }
+
+// Cross-panel sync: called by scenario_triggers.js Diplomacy tab whenever it
+// changes a relation, so the floating Diplomacy panel stays in sync.
+window.__seRefreshDiplomacy = _renderDiplomacyPanel;
 
 
 function _buildCityPanel() {
@@ -2654,8 +2666,24 @@ function _restoreScenarioFromCompact(raw) {
         importantNpcs:        Array.isArray(raw.importantNpcs)    ? raw.importantNpcs   : [],
         playerSetup:          (raw.playerSetup && typeof raw.playerSetup === "object") ? raw.playerSetup : {},
         proceduralAITendency: (raw.proceduralAITendency && typeof raw.proceduralAITendency === "object") ? raw.proceduralAITendency : {},
+        // -- NPC Spawn Bans ------------------------------------------------------------------
+        // Previously missing from this restore function, causing startingNpcBans to be
+        // silently dropped whenever a scenario was loaded via the editor's Load flow.
+        // This meant ban settings saved in the Spawn Bans panel had no effect at runtime.
+        startingNpcBans:      (raw.startingNpcBans && typeof raw.startingNpcBans === "object")
+                                ? { factions: Array.isArray(raw.startingNpcBans.factions) ? raw.startingNpcBans.factions.slice() : [],
+                                    roles:    Array.isArray(raw.startingNpcBans.roles)    ? raw.startingNpcBans.roles.slice()    : [] }
+                                : { factions: [], roles: [] },
         // ── Diplomacy (Step 1) ─────────────────────────────────────────────────
-        initialDiplomacy:     (raw.initialDiplomacy && typeof raw.initialDiplomacy === "object") ? raw.initialDiplomacy : {}
+        initialDiplomacy:     (raw.initialDiplomacy && typeof raw.initialDiplomacy === "object") ? raw.initialDiplomacy : {},
+
+        // ── CUSTOM TROOPS (Troop Editor — Phase 1) ─────────────────────────────
+        // Preserved verbatim from the saved JSON so the troop editor and the
+        // runtime can both read them.  Validation/normalisation lives in
+        // scenario_troop_editor.js (the editor will repair missing fields
+        // when the user opens a malformed scenario file).
+        customTroops:         Array.isArray(raw.customTroops) ? raw.customTroops : [],
+        customHierarchy:      (raw.customHierarchy && typeof raw.customHierarchy === "object") ? raw.customHierarchy : {}
     };
 }
 
@@ -2908,3 +2936,1033 @@ console.log("[ScenarioEditor] scenario_menu_adder.js — module ready.");
     observer.observe(document.body, { childList: true, subtree: true });
     console.log("[ScenarioEditor] Menu patch active — waiting for #main-menu-ui-container.");
 })();
+
+// ============================================================================
+// SCENARIO EDITOR PATCH — Phase 1  (1A · 1B · 1C)
+// scenario_editor_patch_p1.js
+//
+// Drop-in extension for scenario_editor.js. Zero edits to existing files.
+// Load AFTER scenario_editor.js, scenario_tools_panel.js, scenario_triggers.js.
+//
+//   <script src="story/scenario_editor_patch_p1.js"></script>
+//
+// What this adds to the 🛠 Tools menu:
+//   1A · 🗨  Parler Lines  — per-role NPC dialogue overrides
+//   1B · 📜  Quest Manager — CRUD editor for scenario.storyQuests[]
+//   1C · 🚫  Spawn Bans    — startingNpcBans + proceduralAITendency rates
+//
+// Public API:
+//   window.ScenarioEditorPatch.openParlerEditor()
+//   window.ScenarioEditorPatch.openQuestManager()
+//   window.ScenarioEditorPatch.openSpawnBans()
+//   window.ScenarioEditorPatch.VERSION
+// ============================================================================
+
+window.ScenarioEditorPatch = (function () {
+"use strict";
+
+const VERSION = "1.0.0";
+
+// ── Design tokens (match scenario_editor.js palette) ────────────────────────
+const T = {
+    bg:        "#141d2c",
+    bar:       "#1a2538",
+    border:    "#3a5a7a",
+    border2:   "#2a3f5a",
+    text:      "#cfd8dc",
+    dim:       "#7a9ab8",
+    accent:    "#f5d76e",
+    blue:      "#4aafd8",
+    green:     "#8bc34a",
+    red:       "#e74c3c",
+    redDark:   "#3c1a1a",
+    input:     "#0d1520",
+    hover:     "#1e4a7a",
+    hoverDark: "#1a3a5a"
+};
+
+let _topZ = 10200;
+
+// ── Scenario accessor ────────────────────────────────────────────────────────
+function _s() {
+    return window.ScenarioEditor && window.ScenarioEditor._state
+        ? window.ScenarioEditor._state.scenario
+        : (window.__activeScenario || null);
+}
+
+// ── Shared CSS ───────────────────────────────────────────────────────────────
+function _ensureCSS() {
+    if (document.getElementById("sep-p1-css")) return;
+    const st = document.createElement("style");
+    st.id = "sep-p1-css";
+    st.textContent = `
+        .sep-btn{background:#1e3a5a;border:1px solid #3a5a7a;color:#cfd8dc;
+            padding:4px 10px;cursor:pointer;border-radius:3px;
+            font:11px Tahoma,Verdana,sans-serif;margin:2px;transition:background .12s;}
+        .sep-btn:hover{background:#2a5a8c;color:#fff;}
+        .sep-btn.pri{background:#1565c0;border-color:#4aafd8;color:#fff;}
+        .sep-btn.pri:hover{background:#1976d2;}
+        .sep-btn.dan{background:#5c1a1a;border-color:#c0392b;color:#ff8a80;}
+        .sep-btn.dan:hover{background:#7c2a2a;}
+        .sep-inp{background:#0d1520;border:1px solid #3a5a7a;color:#cfd8dc;
+            padding:4px 8px;border-radius:3px;font:12px Tahoma,Verdana,sans-serif;
+            box-sizing:border-box;}
+        .sep-inp:focus{outline:none;border-color:#4aafd8;}
+        .sep-tab{background:none;border:none;border-bottom:2px solid transparent;
+            color:#7a9ab8;padding:6px 12px;cursor:pointer;
+            font:11px Tahoma,Verdana,sans-serif;white-space:nowrap;}
+        .sep-tab:hover{color:#cfd8dc;}
+        .sep-tab.on{color:#f5d76e;border-bottom-color:#f5d76e;}
+        .sep-sec{border:1px solid #2a3f5a;border-radius:3px;padding:8px 10px;margin-bottom:10px;}
+        .sep-sec-title{color:#7a9ab8;font-size:10px;text-transform:uppercase;
+            letter-spacing:1px;font-weight:bold;margin-bottom:6px;}
+        .sep-note{font-size:10px;color:#4a6a7a;margin-top:6px;line-height:1.5;}
+        .sep-lbl{display:block;font-size:10px;color:#7a9ab8;text-transform:uppercase;
+            letter-spacing:0.5px;margin-bottom:3px;}
+    `;
+    document.head.appendChild(st);
+}
+
+// ── Panel factory ────────────────────────────────────────────────────────────
+function _panel(id, title, w, h) {
+    const old = document.getElementById(id);
+    if (old) old.remove();
+
+    const p = document.createElement("div");
+    p.id = id;
+    Object.assign(p.style, {
+        position:"fixed", top:"70px", left:"160px",
+        width:w+"px", height:h+"px",
+        background:T.bg, border:"1px solid "+T.border, borderRadius:"4px",
+        zIndex: ++_topZ, fontFamily:"Tahoma,Verdana,sans-serif", fontSize:"12px",
+        color:T.text, display:"flex", flexDirection:"column",
+        boxShadow:"0 10px 30px rgba(0,0,0,.75)", overflow:"hidden",
+        minWidth:"320px", minHeight:"200px"
+    });
+    p.addEventListener("mousedown", () => { p.style.zIndex = ++_topZ; });
+
+    // Title bar
+    const bar = document.createElement("div");
+    Object.assign(bar.style, {
+        background:T.bar, borderBottom:"1px solid "+T.border,
+        padding:"0 8px", height:"28px",
+        display:"flex", alignItems:"center", flexShrink:"0",
+        cursor:"move", userSelect:"none"
+    });
+    const titleEl = document.createElement("span");
+    Object.assign(titleEl.style, {
+        flex:"1", fontWeight:"bold", color:T.accent, fontSize:"12px"
+    });
+    titleEl.textContent = title;
+    bar.appendChild(titleEl);
+
+    const closeBtn = document.createElement("button");
+    closeBtn.textContent = "✕";
+    Object.assign(closeBtn.style, {
+        background:"none", border:"none", color:T.text,
+        cursor:"pointer", padding:"0 4px", fontSize:"14px", lineHeight:"1"
+    });
+    closeBtn.onclick = () => p.remove();
+    bar.appendChild(closeBtn);
+    p.appendChild(bar);
+
+    // Body
+    const body = document.createElement("div");
+    Object.assign(body.style, { flex:"1", overflow:"auto", padding:"10px" });
+    p.appendChild(body);
+
+    // Resize grip
+    const grip = document.createElement("div");
+    Object.assign(grip.style, {
+        position:"absolute", right:"0", bottom:"0", width:"14px",
+        height:"14px", cursor:"se-resize"
+    });
+    grip.innerHTML = `<svg width="14" height="14"><path d="M14 14L0 14L14 0Z" fill="#3a5a7a" opacity=".5"/></svg>`;
+    p.appendChild(grip);
+
+    // Drag
+    let dx=0,dy=0,dl=0,dt=0,dragging=false;
+    bar.addEventListener("mousedown", e => {
+        if (e.target === closeBtn) return;
+        dragging=true; dx=e.clientX; dy=e.clientY;
+        dl=p.offsetLeft; dt=p.offsetTop; e.preventDefault();
+    });
+    document.addEventListener("mousemove", e => {
+        if (dragging) { p.style.left=(dl+e.clientX-dx)+"px"; p.style.top=(dt+e.clientY-dy)+"px"; }
+    });
+    document.addEventListener("mouseup", () => { dragging=false; });
+
+    // Resize
+    let rx=0,ry=0,rw=0,rh=0,resizing=false;
+    grip.addEventListener("mousedown", e => {
+        resizing=true; rx=e.clientX; ry=e.clientY;
+        rw=p.offsetWidth; rh=p.offsetHeight; e.preventDefault(); e.stopPropagation();
+    });
+    document.addEventListener("mousemove", e => {
+        if (resizing) {
+            p.style.width  = Math.max(320, rw+e.clientX-rx)+"px";
+            p.style.height = Math.max(200, rh+e.clientY-ry)+"px";
+        }
+    });
+    document.addEventListener("mouseup", () => { resizing=false; });
+
+    document.body.appendChild(p);
+    return { panel:p, body };
+}
+
+// ── Small helpers ────────────────────────────────────────────────────────────
+function _btn(txt, cls, fn) {
+    const b = document.createElement("button");
+    b.className = "sep-btn" + (cls ? " "+cls : "");
+    b.textContent = txt;
+    if (fn) b.onclick = fn;
+    return b;
+}
+function _inp(val, placeholder, width) {
+    const i = document.createElement("input");
+    i.className = "sep-inp";
+    i.value = val !== undefined ? val : "";
+    if (placeholder) i.placeholder = placeholder;
+    if (width) i.style.width = width;
+    return i;
+}
+function _ta(val, h, placeholder) {
+    const t = document.createElement("textarea");
+    t.className = "sep-inp";
+    t.value = val || "";
+    t.style.height = (h||80)+"px";
+    t.style.width = "100%";
+    t.style.resize = "vertical";
+    t.style.display = "block";
+    if (placeholder) t.placeholder = placeholder;
+    return t;
+}
+function _row(items, gap) {
+    const d = document.createElement("div");
+    d.style.cssText = `display:flex;align-items:center;gap:${gap||6}px;flex-wrap:wrap;`;
+    items.forEach(i => i && d.appendChild(i));
+    return d;
+}
+function _lbl(text) {
+    const l = document.createElement("label");
+    l.className = "sep-lbl";
+    l.textContent = text;
+    return l;
+}
+function _sep() {
+    const d = document.createElement("div");
+    d.style.cssText = `border-top:1px solid ${T.border2};margin:8px 0;`;
+    return d;
+}
+
+// ============================================================================
+// ██████████████████████████████ 1A — PARLER LINES ███████████████████████████
+// ============================================================================
+
+const ROLES = ["Civilian","Patrol","Military","Trader","Bandit","Special"];
+const ROLE_COLOR = {
+    Civilian:"#aaa", Patrol:"#4aafd8", Military:"#e74c3c",
+    Trader:"#f5d76e", Bandit:"#ff8a80", Special:"#ce93d8"
+};
+
+const SAMPLES = {
+    Civilian: [
+        "The harvest was poor this year. We pray for peace.",
+        "Have you heard the news from the capital?",
+        "My children sleep better now that [faction] soldiers patrol the road.",
+        "These roads were safer before the troubles began.",
+        "A merchant from the south passed through yesterday with strange goods.",
+        "I heard screaming from the east hills last night. The soldiers said nothing of it.",
+        "Our village owes much to the [faction] garrison. They kept the bandits at bay.",
+        "The fields will need tending soon, war or no war."
+    ],
+    Patrol: [
+        "Halt. State your business on this road.",
+        "Move along. These are troubled times.",
+        "We have reports of bandits to the east. Stay on the main road.",
+        "I answer to [faction] and to none other.",
+        "With [troops] men you look like trouble. Keep walking.",
+        "The roads are watched. Do not mistake our patience for weakness.",
+        "Pass. But know that [faction] eyes are everywhere.",
+        "We march at dawn. If you value your life, find shelter before then."
+    ],
+    Military: [
+        "Stand aside. [faction] forces move with urgency.",
+        "I have orders. I have no time for conversation.",
+        "Those [troops] men behind you — are they well trained?",
+        "We march at dawn. If you value your life, find shelter.",
+        "War changes a man. It changes everything.",
+        "The generals speak of victory. The soldiers speak of the dead.",
+        "Keep your blade sheathed and your feet on this road.",
+        "[playerFaction] approaches. What message do you carry?"
+    ],
+    Trader: [
+        "Excellent timing! I have goods fresh from the southern provinces.",
+        "The roads are dangerous but profit waits for no one.",
+        "I have [troops] guards — enough for most bandits.",
+        "The market at the capital is three days east. The goods are worth the risk.",
+        "You look like you could use provisions. I have food, at a fair price.",
+        "Silk from Hangzhou, spices from Malacca — if you have gold, I have wares.",
+        "I have traded under [faction] banners before. Good people, as long as you pay taxes.",
+        "A [playerFaction] convoy? Good. Bandits are less bold around soldiers."
+    ],
+    Bandit: [
+        "Your gold or your life. Choose quickly.",
+        "I used to be a farmer. Then [faction] took my land.",
+        "There are more of us in those trees. Reconsider.",
+        "Put your weapon down slowly. We do not have to make this ugly.",
+        "The road belongs to whoever is stronger. That is us today.",
+        "I do not enjoy this. But a man must eat.",
+        "You [playerFaction] people always look so surprised.",
+        "We take from those who have too much. Today, that is you."
+    ],
+    Special: [
+        "I have been waiting for someone like you.",
+        "The stars showed me this meeting. Do not waste it.",
+        "What you seek is not what you think you need.",
+        "I know who you are. I have known for some time.",
+        "These roads remember every foot that has walked them.",
+        "Speak carefully. Words carry weight in these lands.",
+        "You travel with purpose. I respect that.",
+        "Not many come this far. Fewer still leave unchanged."
+    ]
+};
+
+// Patch RandomDialogue.generateHello so scenario.parlerLines takes priority
+function _hookRandomDialogue() {
+    if (window._sepParlerHooked) return;
+
+    function _tryPatch() {
+        if (typeof window.RandomDialogue === "undefined" ||
+            typeof window.RandomDialogue.generateHello !== "function") {
+            setTimeout(_tryPatch, 600);
+            return;
+        }
+        const _orig = window.RandomDialogue.generateHello.bind(window.RandomDialogue);
+        window.RandomDialogue.generateHello = function(opts, npc) {
+            const scenario = _s();
+            if (scenario && scenario.parlerLines) {
+                const role = opts.npcType || (npc && npc.role) || "";
+                const bucket = scenario.parlerLines[role] || [];
+                if (bucket.length > 0) {
+                    let line = bucket[Math.floor(Math.random() * bucket.length)];
+                    line = line
+                        .replace(/\[faction\]/g,       opts.faction       || "")
+                        .replace(/\[playerFaction\]/g, opts.playerFaction || "")
+                        .replace(/\[troops\]/g,        opts.npcNumbers    || "");
+                    return line;
+                }
+            }
+            return _orig(opts, npc);
+        };
+        window._sepParlerHooked = true;
+        console.log("[SEP] RandomDialogue.generateHello hooked — parlerLines active.");
+    }
+    _tryPatch();
+}
+
+function openParlerEditor() {
+    _ensureCSS();
+    const s = _s();
+    if (!s) { alert("No active scenario. Open a scenario first."); return; }
+    if (!s.parlerLines || typeof s.parlerLines !== "object") s.parlerLines = {};
+    ROLES.forEach(r => { if (!Array.isArray(s.parlerLines[r])) s.parlerLines[r] = []; });
+
+    const { body } = _panel("sep-parler", "🗨 Parler Lines Editor", 550, 490);
+
+    let activeRole = ROLES[0];
+
+    function render() {
+        body.innerHTML = "";
+
+        // Info bar
+        const info = document.createElement("div");
+        info.style.cssText = `color:${T.dim};font-size:11px;margin-bottom:8px;line-height:1.6;`;
+        info.innerHTML =
+            `Override <code style="color:${T.blue}">RandomDialogue.generateHello</code> per NPC role. ` +
+            `When a bucket has lines, a random one is returned instead of the default.<br>` +
+            `Tokens: <code style="color:${T.accent}">[faction]</code> ` +
+            `<code style="color:${T.accent}">[playerFaction]</code> ` +
+            `<code style="color:${T.accent}">[troops]</code>`;
+        body.appendChild(info);
+
+        // Tabs
+        const tabs = document.createElement("div");
+        tabs.style.cssText = `display:flex;border-bottom:1px solid ${T.border2};margin-bottom:10px;flex-wrap:wrap;`;
+        ROLES.forEach(role => {
+            const t = document.createElement("button");
+            t.className = "sep-tab" + (role === activeRole ? " on" : "");
+            const n = s.parlerLines[role].length;
+            const nc = n > 0 ? T.green : "#555";
+            t.innerHTML = `${role}&thinsp;<span style="color:${nc};font-size:10px">${n||"—"}</span>`;
+            t.onclick = () => { activeRole = role; render(); };
+            tabs.appendChild(t);
+        });
+        body.appendChild(tabs);
+
+        const lines = s.parlerLines[activeRole];
+        const isActive = lines.length > 0;
+
+        // Status
+        const status = document.createElement("div");
+        status.style.cssText = `font-size:11px;margin-bottom:6px;padding:5px 8px;border-radius:3px;` +
+            `background:${isActive ? "#0d2010" : "#111"};border:1px solid ${isActive ? "#2a5a2a" : T.border2};`;
+        status.innerHTML = isActive
+            ? `<span style="color:${T.green}">●</span> &nbsp;<strong style="color:${T.green}">${lines.length} line${lines.length!==1?"s":""}</strong> defined — <span style="color:${T.green}">OVERRIDES</span> RandomDialogue for ${activeRole}`
+            : `<span style="color:#555">●</span> &nbsp;No lines — falls through to default RandomDialogue`;
+        body.appendChild(status);
+
+        // Textarea
+        const ta = _ta(lines.join("\n"), 200,
+            `Enter one dialogue line per line...\nExample: The road is clear today.\nExample: [faction] soldiers hold this pass.`);
+        body.appendChild(ta);
+
+        // Buttons
+        body.appendChild(document.createElement("br"));
+        const btnRow = _row([
+            _btn("💾 Save", "pri", () => {
+                const raw = ta.value.split("\n").map(l => l.trim()).filter(Boolean);
+                s.parlerLines[activeRole] = raw;
+                _hookRandomDialogue();
+                render();
+            }),
+            _btn("📋 Add Samples", null, () => {
+                const existing = ta.value.trim();
+                const samples = SAMPLES[activeRole].join("\n");
+                ta.value = existing ? existing + "\n" + samples : samples;
+            }),
+            _btn("🗑 Clear", "dan", () => {
+                if (!confirm(`Clear all ${activeRole} lines?`)) return;
+                ta.value = "";
+                s.parlerLines[activeRole] = [];
+                render();
+            })
+        ]);
+        body.appendChild(btnRow);
+
+        body.appendChild(_sep());
+
+        // Export preview
+        const exportBtn = _btn("📋 Copy all roles as JSON", null, () => {
+            try {
+                navigator.clipboard.writeText(JSON.stringify(s.parlerLines, null, 2));
+                exportBtn.textContent = "✓ Copied!";
+                setTimeout(() => { exportBtn.textContent = "📋 Copy all roles as JSON"; }, 1800);
+            } catch(e) { alert(JSON.stringify(s.parlerLines, null, 2)); }
+        });
+        body.appendChild(exportBtn);
+
+        const note = document.createElement("div");
+        note.className = "sep-note";
+        note.textContent = "💡 The RandomDialogue hook installs itself as soon as RandomDialogue is available. " +
+            "Changes are live immediately — no reload needed.";
+        body.appendChild(note);
+    }
+
+    render();
+    _hookRandomDialogue();
+}
+
+// ============================================================================
+// ████████████████████████████ 1B — QUEST MANAGER ████████████████████████████
+// ============================================================================
+
+function _blankQuest() {
+    return {
+        id: "sq_" + Date.now(),
+        title: "New Quest",
+        description: "",
+        x: 2000, y: 1500, radius: 320,
+        triggerOnArrive: "",
+        varOnArrive: "",
+        isMain: false,
+        autoActivate: false,
+        noAutoComplete: false,
+        dependsOn: ""
+    };
+}
+
+function openQuestManager() {
+    _ensureCSS();
+    const s = _s();
+    if (!s) { alert("No active scenario. Open a scenario first."); return; }
+    if (!Array.isArray(s.storyQuests)) s.storyQuests = [];
+
+    const { panel, body } = _panel("sep-quests", "📜 Quest Manager", 680, 520);
+    body.style.cssText = "flex:1;overflow:hidden;padding:0;display:flex;";
+
+    let sel = -1;
+
+    function render() {
+        body.innerHTML = "";
+        body.style.flexDirection = "row";
+
+        // ── LEFT LIST ────────────────────────────────────────────────────────
+        const left = document.createElement("div");
+        Object.assign(left.style, {
+            width:"200px", flexShrink:"0",
+            borderRight:"1px solid "+T.border2,
+            display:"flex", flexDirection:"column", overflow:"hidden"
+        });
+
+        const listHdr = document.createElement("div");
+        listHdr.style.cssText = `background:${T.bar};padding:7px 10px;border-bottom:1px solid ${T.border2};font-size:10px;color:${T.dim};text-transform:uppercase;letter-spacing:1px;`;
+        listHdr.textContent = `Quests (${s.storyQuests.length})`;
+        left.appendChild(listHdr);
+
+        const listBody = document.createElement("div");
+        listBody.style.cssText = "flex:1;overflow-y:auto;";
+
+        if (!s.storyQuests.length) {
+            const empty = document.createElement("div");
+            empty.style.cssText = `padding:18px 12px;color:#555;font-size:11px;text-align:center;line-height:1.7;`;
+            empty.innerHTML = `<div style="font-size:22px;margin-bottom:6px">📜</div>No quests yet.<br>Click <strong>+ New</strong> below.`;
+            listBody.appendChild(empty);
+        }
+
+        s.storyQuests.forEach((q, i) => {
+            const item = document.createElement("div");
+            const active = i === sel;
+            item.style.cssText = `
+                padding:7px 10px;cursor:pointer;border-bottom:1px solid ${T.bar};
+                background:${active ? T.hover : "none"};
+                color:${active ? "#fff" : T.text};
+            `;
+            item.innerHTML = `
+                <div style="font-weight:bold;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+                    ${q.isMain?"⭐ ":""}${q.title||q.id}
+                </div>
+                <div style="color:#555;font-size:10px;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${q.id}</div>
+            `;
+            item.onmouseenter = () => { if (i!==sel) item.style.background = T.hoverDark; };
+            item.onmouseleave = () => { if (i!==sel) item.style.background = "none"; };
+            item.onclick = () => { sel = i; render(); };
+            listBody.appendChild(item);
+        });
+        left.appendChild(listBody);
+
+        const listFoot = document.createElement("div");
+        listFoot.style.cssText = `padding:6px;border-top:1px solid ${T.border2};display:flex;gap:4px;`;
+        listFoot.appendChild(_btn("+ New", "pri", () => {
+            s.storyQuests.push(_blankQuest());
+            sel = s.storyQuests.length - 1;
+            render();
+        }));
+        const delBtn = _btn("🗑", "dan", () => {
+            if (sel < 0) return;
+            if (!confirm("Delete quest '" + s.storyQuests[sel].title + "'?")) return;
+            s.storyQuests.splice(sel, 1);
+            sel = Math.min(sel, s.storyQuests.length - 1);
+            render();
+        });
+        delBtn.title = "Delete selected quest";
+        listFoot.appendChild(delBtn);
+        left.appendChild(listFoot);
+        body.appendChild(left);
+
+        // ── RIGHT EDITOR ─────────────────────────────────────────────────────
+        const right = document.createElement("div");
+        Object.assign(right.style, { flex:"1", overflow:"auto", padding:"12px" });
+
+        if (sel < 0 || sel >= s.storyQuests.length) {
+            const ph = document.createElement("div");
+            ph.style.cssText = `color:#555;text-align:center;margin-top:60px;font-size:13px;line-height:1.8;`;
+            ph.innerHTML = `<div style="font-size:32px;margin-bottom:8px">📜</div>Select a quest to edit<br>or click <strong>+ New</strong> to create one.`;
+            right.appendChild(ph);
+            body.appendChild(right);
+            return;
+        }
+
+        const q = s.storyQuests[sel];
+
+        // Helper: labeled field row
+        function _field(label, key, type, opts) {
+            opts = opts || {};
+            const wrap = document.createElement("div");
+            wrap.style.marginBottom = "8px";
+            wrap.appendChild(_lbl(label));
+
+            if (type === "bool") {
+                const lbl = document.createElement("label");
+                lbl.style.cssText = "display:flex;align-items:center;gap:7px;cursor:pointer;font-size:12px;";
+                const cb = document.createElement("input");
+                cb.type = "checkbox"; cb.checked = !!q[key];
+                cb.onchange = () => { q[key] = cb.checked; _refreshPreview(); };
+                lbl.appendChild(cb);
+                lbl.appendChild(document.createTextNode(opts.desc || ""));
+                wrap.appendChild(lbl);
+            } else if (type === "longtext") {
+                const ta = _ta(q[key]||"", opts.h||55, opts.ph||"");
+                ta.onchange = () => { q[key] = ta.value; _refreshPreview(); };
+                ta.oninput  = () => { q[key] = ta.value; _refreshPreview(); };
+                wrap.appendChild(ta);
+            } else if (type === "number") {
+                const i = _inp(q[key]!==undefined?q[key]:"", opts.ph||"", "100%");
+                i.type = "number";
+                i.onchange = () => { q[key] = parseFloat(i.value)||0; _refreshPreview(); };
+                wrap.appendChild(i);
+            } else {
+                const i = _inp(q[key]||"", opts.ph||"", "100%");
+                i.oninput  = () => { q[key] = i.value; _refreshPreview(); };
+                i.onchange = () => { q[key] = i.value; _refreshPreview(); };
+                wrap.appendChild(i);
+            }
+            return wrap;
+        }
+
+        right.appendChild(_field("Quest ID", "id", "text", {ph:"sq_my_quest"}));
+        right.appendChild(_field("Title (quest banner header)", "title", "text", {ph:"Reach the fortress"}));
+        right.appendChild(_field("Description (banner subtext)", "description", "longtext", {h:50, ph:"March north to Mizuki fortress."}));
+
+        // Coords grid
+        const cGrid = document.createElement("div");
+        cGrid.style.cssText = "display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:8px;";
+        ["World X","World Y","Arrive Radius"].forEach((lbl, idx) => {
+            const key = ["x","y","radius"][idx];
+            const wrap = document.createElement("div");
+            const l = document.createElement("label"); l.className = "sep-lbl"; l.textContent = lbl;
+            const i = document.createElement("input"); i.type="number"; i.className="sep-inp";
+            i.style.width="100%"; i.value = q[key]!==undefined ? q[key] : 0;
+            i.onchange = () => { q[key] = parseFloat(i.value)||0; _refreshPreview(); };
+            wrap.appendChild(l); wrap.appendChild(i);
+            cGrid.appendChild(wrap);
+        });
+        right.appendChild(cGrid);
+
+        right.appendChild(_field("Fire trigger on arrive (ID)", "triggerOnArrive", "text", {ph:"my_trigger_id"}));
+        right.appendChild(_field("Set var on arrive (name=value)", "varOnArrive", "text", {ph:"phase=fort"}));
+        right.appendChild(_field("Depends on quest ID", "dependsOn", "text", {ph:"sq_previous_quest"}));
+
+        // Flags
+        const flagRow = document.createElement("div");
+        flagRow.style.cssText = "display:flex;gap:16px;flex-wrap:wrap;margin-bottom:10px;";
+        [
+            ["isMain",         "⭐ Main Quest (highlighted in UI)"],
+            ["autoActivate",   "⚡ Auto-Activate on load"],
+            ["noAutoComplete", "🔒 No Auto-Complete on arrival"]
+        ].forEach(([key, label]) => {
+            const lbl = document.createElement("label");
+            lbl.style.cssText = "display:flex;align-items:center;gap:6px;cursor:pointer;font-size:12px;";
+            const cb = document.createElement("input");
+            cb.type="checkbox"; cb.checked=!!q[key];
+            cb.onchange = () => { q[key]=cb.checked; _refreshPreview(); };
+            lbl.appendChild(cb);
+            lbl.appendChild(document.createTextNode(label));
+            flagRow.appendChild(lbl);
+        });
+        right.appendChild(flagRow);
+
+        // Live preview card
+        const preview = document.createElement("div");
+        preview.id = "sep-quest-preview";
+        Object.assign(preview.style, {
+            background:T.bar, border:"1px solid "+T.border2, borderRadius:"4px",
+            padding:"8px 12px", marginBottom:"10px"
+        });
+        right.appendChild(preview);
+        function _refreshPreview() {
+            preview.innerHTML = `
+                <div style="font-size:10px;color:${T.dim};margin-bottom:4px;">PREVIEW</div>
+                <div style="font-weight:bold;color:${T.accent};">${q.isMain?"⭐ ":""}${q.title||"—"}</div>
+                <div style="color:#aaa;font-size:11px;margin-top:2px;">${q.description||"(no description)"}</div>
+                <div style="color:#555;font-size:10px;margin-top:5px;">
+                    📍 (${q.x||0}, ${q.y||0}) · radius&nbsp;${q.radius||0}px &nbsp;|&nbsp; id: <code>${q.id}</code>
+                    ${q.dependsOn ? `<br>↳ depends on: <code>${q.dependsOn}</code>` : ""}
+                    ${q.triggerOnArrive ? `<br>→ fires trigger: <code>${q.triggerOnArrive}</code>` : ""}
+                    ${q.varOnArrive    ? `<br>→ sets var: <code>${q.varOnArrive}</code>`          : ""}
+                </div>`;
+        }
+        _refreshPreview();
+
+        // Action buttons
+        const actRow = _row([
+            _btn("⎘ Duplicate", null, () => {
+                const copy = JSON.parse(JSON.stringify(q));
+                copy.id = q.id + "_copy";
+                copy.title = q.title + " (Copy)";
+                s.storyQuests.push(copy);
+                sel = s.storyQuests.length - 1;
+                render();
+            }),
+            _btn("↑ Move Up", null, () => {
+                if (sel < 1) return;
+                [s.storyQuests[sel], s.storyQuests[sel-1]] = [s.storyQuests[sel-1], s.storyQuests[sel]];
+                sel--; render();
+            }),
+            _btn("↓ Move Down", null, () => {
+                if (sel >= s.storyQuests.length-1) return;
+                [s.storyQuests[sel], s.storyQuests[sel+1]] = [s.storyQuests[sel+1], s.storyQuests[sel]];
+                sel++; render();
+            })
+        ]);
+        right.appendChild(actRow);
+
+        const note = document.createElement("div");
+        note.className = "sep-note";
+        note.textContent = "💡 storyQuests[] are pre-defined quest catalog entries. Use story_quest_set {id} in a trigger " +
+            "to activate one at runtime, or set autoActivate:true to show it immediately on scenario boot.";
+        right.appendChild(note);
+
+        body.appendChild(right);
+    }
+
+    render();
+}
+
+// ============================================================================
+// ████████████████████████ 1C — SPAWN BANS & AI RATES ████████████████████████
+// ============================================================================
+
+const PROC_ROLES = ["Civilian","Patrol","Military","Commerce","Bandit"];
+const ROLE_COLORS_BAN = {
+    Civilian:"#aaa", Patrol:"#4aafd8", Military:"#e74c3c",
+    Commerce:"#f5d76e", Bandit:"#ff8a80"
+};
+const FALLBACK_COLORS = ["#e74c3c","#3498db","#27ae60","#f39c12","#9b59b6","#1abc9c","#e67e22","#2ecc71"];
+
+function openSpawnBans() {
+    _ensureCSS();
+    const s = _s();
+    if (!s) { alert("No active scenario. Open a scenario first."); return; }
+
+    // Ensure schema
+    if (!s.startingNpcBans || typeof s.startingNpcBans !== "object")
+        s.startingNpcBans = { factions:[], roles:[] };
+    if (!Array.isArray(s.startingNpcBans.factions)) s.startingNpcBans.factions = [];
+    if (!Array.isArray(s.startingNpcBans.roles))    s.startingNpcBans.roles    = [];
+    if (!s.proceduralAITendency || typeof s.proceduralAITendency !== "object")
+        s.proceduralAITendency = {};
+
+    const { body } = _panel("sep-spawnbans", "🚫 Spawn Bans & AI Rates", 500, 580);
+
+    function _facList() {
+        if (!s.factions || typeof s.factions !== "object") return [];
+        return Object.keys(s.factions);
+    }
+    function _facColor(name) {
+        if (s.factions && s.factions[name] && s.factions[name].color) return s.factions[name].color;
+        const idx = _facList().indexOf(name) % FALLBACK_COLORS.length;
+        return FALLBACK_COLORS[idx >= 0 ? idx : 0];
+    }
+
+    function render() {
+        body.innerHTML = "";
+        const bans = s.startingNpcBans;
+        const facs = _facList();
+
+        // ── ROLE BANS ────────────────────────────────────────────────────────
+        const roleSec = document.createElement("div");
+        roleSec.className = "sep-sec";
+
+        const roleTR = _row([
+            Object.assign(document.createElement("div"), {
+                className:"sep-sec-title", textContent:"ROLE BANS",
+                style: Object.assign(document.createElement("div").style, {flex:"1"})
+            }),
+            _btn("Ban All", null, () => { bans.roles = PROC_ROLES.slice(); render(); }),
+            _btn("Unban All", null, () => { bans.roles = []; render(); })
+        ]);
+        // Fix: the title div needs proper flex styling
+        const roleTitleDiv = document.createElement("div");
+        roleTitleDiv.style.cssText = "display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;";
+        const roleTitleLabel = document.createElement("div");
+        roleTitleLabel.className = "sep-sec-title";
+        roleTitleLabel.style.margin = "0";
+        roleTitleLabel.textContent = "ROLE BANS";
+        roleTitleDiv.appendChild(roleTitleLabel);
+        const roleBtnGrp = _row([
+            _btn("Ban All", null, () => { bans.roles = PROC_ROLES.slice(); render(); }),
+            _btn("Unban All", null, () => { bans.roles = []; render(); })
+        ], 4);
+        roleTitleDiv.appendChild(roleBtnGrp);
+        roleSec.appendChild(roleTitleDiv);
+
+        const roleDesc = document.createElement("div");
+        roleDesc.style.cssText = `font-size:10px;color:#4a6080;margin-bottom:8px;`;
+        roleDesc.textContent = "Banned roles will not spawn procedurally for ANY faction. Story-spawned NPCs (spawn_important_npc) are unaffected.";
+        roleSec.appendChild(roleDesc);
+
+        const roleGrid = document.createElement("div");
+        roleGrid.style.cssText = "display:grid;grid-template-columns:1fr 1fr 1fr;gap:5px;";
+
+        PROC_ROLES.forEach(role => {
+            const banned = bans.roles.includes(role);
+            const item = document.createElement("label");
+            item.style.cssText = `
+                display:flex;align-items:center;gap:7px;cursor:pointer;padding:6px 8px;
+                border-radius:3px;font-size:11px;
+                background:${banned ? T.redDark : T.input};
+                border:1px solid ${banned ? T.red : T.border2};
+                transition:background .1s,border-color .1s;
+            `;
+            const cb = document.createElement("input");
+            cb.type = "checkbox"; cb.checked = banned;
+            cb.onchange = () => {
+                if (cb.checked) { if (!bans.roles.includes(role)) bans.roles.push(role); }
+                else { bans.roles = bans.roles.filter(r => r !== role); }
+                render();
+            };
+            const colorDot = document.createElement("span");
+            colorDot.style.cssText = `width:7px;height:7px;border-radius:50%;background:${ROLE_COLORS_BAN[role]||"#888"};flex-shrink:0;`;
+            item.appendChild(cb);
+            item.appendChild(colorDot);
+            const nameEl = document.createElement("span");
+            nameEl.style.color = banned ? "#ff8a80" : T.text;
+            nameEl.textContent = role;
+            item.appendChild(nameEl);
+            roleGrid.appendChild(item);
+        });
+
+        roleSec.appendChild(roleGrid);
+        body.appendChild(roleSec);
+
+        // ── FACTION BANS ─────────────────────────────────────────────────────
+        const facSec = document.createElement("div");
+        facSec.className = "sep-sec";
+
+        const facTitleDiv = document.createElement("div");
+        facTitleDiv.style.cssText = "display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;";
+        const facTitleLabel = document.createElement("div");
+        facTitleLabel.className = "sep-sec-title";
+        facTitleLabel.style.margin = "0";
+        facTitleLabel.textContent = "FACTION BANS";
+        facTitleDiv.appendChild(facTitleLabel);
+        const facBtnGrp = _row([
+            _btn("Ban All", null, () => { bans.factions = facs.slice(); render(); }),
+            _btn("Unban All", null, () => { bans.factions = []; render(); })
+        ], 4);
+        facTitleDiv.appendChild(facBtnGrp);
+        facSec.appendChild(facTitleDiv);
+
+        const facDesc = document.createElement("div");
+        facDesc.style.cssText = `font-size:10px;color:#4a6080;margin-bottom:8px;`;
+        facDesc.textContent = "Banned factions will not spawn any procedural NPCs (Commerce, Patrol, Military, Civilian) for the entire session.";
+        facSec.appendChild(facDesc);
+
+        if (!facs.length) {
+            const nf = document.createElement("div");
+            nf.style.cssText = `color:#555;font-size:11px;padding:4px;`;
+            nf.textContent = "No factions defined in this scenario yet.";
+            facSec.appendChild(nf);
+        } else {
+            const facGrid = document.createElement("div");
+            facGrid.style.cssText = "display:flex;flex-direction:column;gap:4px;";
+            facs.forEach(name => {
+                const banned = bans.factions.includes(name);
+                const color  = _facColor(name);
+                const item   = document.createElement("label");
+                item.style.cssText = `
+                    display:flex;align-items:center;gap:8px;cursor:pointer;
+                    padding:5px 8px;border-radius:3px;font-size:11px;
+                    background:${banned ? T.redDark : T.input};
+                    border:1px solid ${banned ? T.red : T.border2};
+                    transition:background .1s,border-color .1s;
+                `;
+                const cb = document.createElement("input");
+                cb.type="checkbox"; cb.checked=banned;
+                cb.onchange = () => {
+                    if (cb.checked) { if (!bans.factions.includes(name)) bans.factions.push(name); }
+                    else { bans.factions = bans.factions.filter(f=>f!==name); }
+                    render();
+                };
+                const dot = document.createElement("span");
+                dot.style.cssText = `width:10px;height:10px;border-radius:50%;background:${color};flex-shrink:0;`;
+                const nameEl = document.createElement("span");
+                nameEl.style.cssText = `flex:1;color:${banned?"#ff8a80":T.text};`;
+                nameEl.textContent = name;
+                item.appendChild(cb); item.appendChild(dot); item.appendChild(nameEl);
+                if (banned) {
+                    const badge = document.createElement("span");
+                    badge.style.cssText = `color:${T.red};font-size:10px;font-weight:bold;`;
+                    badge.textContent = "BANNED";
+                    item.appendChild(badge);
+                }
+                facGrid.appendChild(item);
+            });
+            facSec.appendChild(facGrid);
+        }
+
+        body.appendChild(facSec);
+
+        // ── AI RATE MULTIPLIERS ───────────────────────────────────────────────
+        const rateSec = document.createElement("div");
+        rateSec.className = "sep-sec";
+
+        const rateTitleLabel = document.createElement("div");
+        rateTitleLabel.className = "sep-sec-title";
+        rateTitleLabel.textContent = "AI SPAWN RATE MULTIPLIERS (per faction)";
+        rateSec.appendChild(rateTitleLabel);
+
+        const rateDesc = document.createElement("div");
+        rateDesc.style.cssText = `font-size:10px;color:#4a6080;margin-bottom:8px;`;
+        rateDesc.textContent = "1.0× = default spawn frequency. 0× = effectively disabled. Stored in proceduralAITendency[faction].rate.";
+        rateSec.appendChild(rateDesc);
+
+        if (!facs.length) {
+            const nf = document.createElement("div");
+            nf.style.cssText = `color:#555;font-size:11px;padding:4px;`;
+            nf.textContent = "No factions defined.";
+            rateSec.appendChild(nf);
+        } else {
+            facs.forEach(name => {
+                if (!s.proceduralAITendency[name]) s.proceduralAITendency[name] = { rate:1.0 };
+                const cur   = parseFloat(s.proceduralAITendency[name].rate) || 1.0;
+                const color = _facColor(name);
+
+                const row = document.createElement("div");
+                row.style.cssText = "display:flex;align-items:center;gap:8px;margin-bottom:5px;";
+
+                const dot = document.createElement("span");
+                dot.style.cssText = `width:8px;height:8px;border-radius:50%;background:${color};flex-shrink:0;`;
+
+                const nameEl = document.createElement("span");
+                nameEl.style.cssText = `font-size:11px;min-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;`;
+                nameEl.textContent = name;
+
+                const slider = document.createElement("input");
+                slider.type="range"; slider.min="0"; slider.max="3";
+                slider.step="0.1"; slider.value=cur;
+                slider.style.cssText = `flex:1;accent-color:${T.blue};`;
+
+                const valEl = document.createElement("span");
+                valEl.style.cssText = `font-size:11px;color:${T.accent};min-width:36px;text-align:right;font-variant-numeric:tabular-nums;`;
+                function _updateVal(v) {
+                    valEl.textContent = parseFloat(v).toFixed(1) + "×";
+                    valEl.style.color = v == 0 ? T.red : v > 1.5 ? "#ff8a80" : T.accent;
+                }
+                _updateVal(cur);
+                slider.oninput = () => {
+                    const v = parseFloat(slider.value);
+                    s.proceduralAITendency[name].rate = v;
+                    _updateVal(v);
+                };
+
+                row.appendChild(dot); row.appendChild(nameEl);
+                row.appendChild(slider); row.appendChild(valEl);
+                rateSec.appendChild(row);
+            });
+        }
+
+        body.appendChild(rateSec);
+
+        // Footer note
+        const note = document.createElement("div");
+        note.className = "sep-note";
+        note.textContent = "✅ All changes write directly to the scenario document and take effect on the next game boot. " +
+            "For live session bans use the set_npc_spawn_ban trigger action.";
+        body.appendChild(note);
+    }
+
+    render();
+}
+
+// ============================================================================
+// ██████████████████████████ MENU INJECTION ███████████████████████████████████
+// ============================================================================
+
+let _injected = false;
+
+function _makeMenuItem(dd, emoji, label, desc, fn) {
+    const item = document.createElement("div");
+    item.style.cssText = `
+        padding:5px 14px 5px 12px;cursor:pointer;color:${T.text};
+        border-bottom:1px solid ${T.bar};font-size:12px;font-family:Tahoma,Verdana,sans-serif;
+    `;
+    item.innerHTML = `<span style="font-size:13px;">${emoji}</span>&nbsp;${label}` +
+        (desc ? `<div style="color:#4a6080;font-size:10px;margin-top:1px;">${desc}</div>` : "");
+    item.onmouseenter = () => { item.style.background=T.hover; item.style.color="#fff"; };
+    item.onmouseleave = () => { item.style.background="none"; item.style.color=T.text; };
+    item.onclick = () => { dd.style.display="none"; fn(); };
+    dd.appendChild(item);
+}
+
+function _injectMenu() {
+    const titleEl = document.getElementById("se-menu-title");
+    if (!titleEl) return false;
+    if (document.getElementById("sep-tools-wrap")) return true;
+
+    const bar = titleEl.parentElement;
+    if (!bar) return false;
+
+    const wrap = document.createElement("div");
+    wrap.id = "sep-tools-wrap";
+    wrap.style.cssText = "display:flex;position:relative;";
+
+    const btn = document.createElement("button");
+    btn.textContent = "🛠 Tools ▾";
+    Object.assign(btn.style, {
+        background:"none", border:"none", color:T.text,
+        padding:"0 14px", cursor:"pointer", fontSize:"11px",
+        height:"30px", fontFamily:"Tahoma,Verdana,sans-serif"
+    });
+
+    const dd = document.createElement("div");
+    Object.assign(dd.style, {
+        display:"none", position:"absolute", top:"29px", left:"0",
+        background:T.bg, border:"1px solid "+T.border,
+        minWidth:"260px", zIndex:"10201",
+        boxShadow:"0 6px 18px rgba(0,0,0,.7)"
+    });
+
+    // Header helper
+    function _ddHeader(text) {
+        const h = document.createElement("div");
+        h.style.cssText = `padding:5px 12px 2px;color:${T.dim};font-size:10px;text-transform:uppercase;letter-spacing:1px;pointer-events:none;`;
+        h.textContent = text;
+        dd.appendChild(h);
+    }
+    function _ddSep() {
+        const d = document.createElement("div");
+        d.style.cssText = `border-top:1px solid ${T.border2};margin:3px 0;`;
+        dd.appendChild(d);
+    }
+    function _ddNote(text) {
+        const n = document.createElement("div");
+        n.style.cssText = `padding:3px 14px 6px;color:#3a5060;font-size:10px;font-style:italic;`;
+        n.textContent = text;
+        dd.appendChild(n);
+    }
+
+    _ddHeader("Phase 1 — Story Data");
+    _makeMenuItem(dd, "🗨", "Parler Lines",         "Role-based NPC dialogue overrides",        openParlerEditor);
+    _makeMenuItem(dd, "📜", "Quest Manager",          "CRUD editor for scenario.storyQuests[]",    openQuestManager);
+    _makeMenuItem(dd, "🚫", "Spawn Bans & AI Rates",  "startingNpcBans + proceduralAITendency",    openSpawnBans);
+
+    btn.onclick = e => { e.stopPropagation(); dd.style.display = dd.style.display==="none"?"block":"none"; };
+    btn.onmouseenter = () => { btn.style.background="#2a5a8c"; };
+    btn.onmouseleave = () => { btn.style.background="none"; };
+
+    document.addEventListener("click", () => { dd.style.display="none"; });
+    dd.addEventListener("click", e => e.stopPropagation());
+
+    wrap.appendChild(btn);
+    wrap.appendChild(dd);
+
+    // Insert before the last child (Exit button wrapper)
+    if (bar.lastElementChild) {
+        bar.insertBefore(wrap, bar.lastElementChild);
+    } else {
+        bar.appendChild(wrap);
+    }
+
+    _injected = true;
+    console.log("[ScenarioEditorPatch] 🛠 Tools menu injected.");
+    return true;
+}
+
+// Poll for editor open/reopen
+(function _poll() {
+    setInterval(() => {
+        const hasEditor = !!document.getElementById("se-menu-title");
+        const hasMenu   = !!document.getElementById("sep-tools-wrap");
+        if (hasEditor && !hasMenu) { _injected=false; _injectMenu(); _hookRandomDialogue(); }
+        if (!hasEditor)            { _injected=false; }
+    }, 650);
+})();
+
+// ── Public API ────────────────────────────────────────────────────────────────
+return { VERSION, openParlerEditor, openQuestManager, openSpawnBans };
+
+})();
+
+console.log("[ScenarioEditorPatch] Phase 1 (1A · 1B · 1C) v" + window.ScenarioEditorPatch.VERSION + " loaded.");

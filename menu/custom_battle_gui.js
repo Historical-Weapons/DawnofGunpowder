@@ -177,7 +177,16 @@ const FactionUnitRules = {
 
     // --- MAIN ENTRY POINT ---
     window.showCustomBattleMenu = function (reportData = null) {
-		
+
+        // DEFENSIVE RESET: Guarantee the menu always opens with LOD completely
+        // disabled, regardless of which code path brought us here (failed launch,
+        // early-return validation, campaign bleed, crash recovery, etc.).
+        // Without this, inBattleMode can still be true while the unit card canvases
+        // are rendering, causing the optimization LOD patch to replace every
+        // unit sprite with a colored dot instead of the actual troop graphic.
+        inBattleMode = false;
+        if (typeof inSiegeBattle !== "undefined") inSiegeBattle = false;
+
 		const menu = document.createElement("div");
     menu.id = "custom-battle-menu"; // <--- This MUST match the ID used in save_system.js
     // ...
@@ -834,7 +843,12 @@ window.__IS_CUSTOM_BATTLE__ = true; // <--- NEW SURGERY
             window.cleanupCustomBattleEnvironments();
         }
 
-        inBattleMode = true;
+        // NOTE: inBattleMode is intentionally NOT set here yet.
+        // It is set only AFTER all validation passes (below), so that
+        // early-return failures (empty roster, siege minimum, funds exceeded)
+        // never leave inBattleMode = true while the setup menu is still visible.
+        // A stale inBattleMode = true causes the optimization LOD patch to
+        // replace unit card sprites with colored dots in the selection UI.
         inCityMode = false;
         customBattleActive = false;
         
@@ -887,6 +901,11 @@ window.__IS_CUSTOM_BATTLE__ = true; // <--- NEW SURGERY
             alert("Funds exceeded! Please remove some units.");
             return;
         }
+
+        // ALL VALIDATION PASSED — safe to enter battle mode now.
+        // Setting this here (rather than at the top of the function) guarantees
+        // the LOD optimization patch never fires while the setup menu is open.
+        inBattleMode = true;
 
         if (typeof player !== 'undefined') {
             player.hp = 100; 
