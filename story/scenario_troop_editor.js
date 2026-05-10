@@ -389,7 +389,10 @@ function _ensureCSS() {
         .ste-fac-row { display:flex; align-items:center; gap:5px; font-size:11px; }
         .ste-fac-dot { width:10px; height:10px; border-radius:2px; flex-shrink:0;
             border:1px solid #000; }
-       
+        .ste-tools-btn { background:none; border:none; color:${T.text};
+            padding:0 14px; cursor:pointer; font-size:11px; height:30px;
+            font-family:Tahoma,Verdana,sans-serif; }
+        .ste-tools-btn:hover { background:#2a5a8c; }
         .ste-phase2 { padding:14px; border:2px dashed ${T.border};
             border-radius:4px; text-align:center; color:${T.dim};
             background:rgba(0,0,0,0.25); font-size:11px; line-height:1.6; }
@@ -415,22 +418,14 @@ function _injectMenuButton() {
     wrap.id = "ste-menu-btn-wrap";
     wrap.style.cssText = "display:flex;position:relative;";
 
-const btn = document.createElement("button");
+    const btn = document.createElement("button");
+    btn.className = "ste-tools-btn";
     btn.textContent = "🪖 Troops";
     btn.title = "Open the Troop Editor (custom roster mods for this scenario)";
-    Object.assign(btn.style, {
-        background:  "none",
-        border:      "none",
-        color:       "#cfd8dc",
-        padding:     "0 15px",
-        cursor:      "pointer",
-        fontSize:    "11px",
-        height:      "30px",
-        fontFamily:  "Tahoma,Verdana,sans-serif"
-    });
-    btn.onclick      = (e) => { e.stopPropagation(); openEditor(); };
+    btn.onclick = (e) => { e.stopPropagation(); openEditor(); };
     btn.onmouseenter = () => { btn.style.background = "#2a5a8c"; };
     btn.onmouseleave = () => { btn.style.background = "none"; };
+
     wrap.appendChild(btn);
 
     // Insert just before the Exit wrapper (last child of the menu bar).
@@ -811,156 +806,48 @@ function _renderEditor(isVanilla, troop) {
     sec5.appendChild(ta);
     ed.appendChild(sec5);
 
-    // 6. Appearance section — wired to Phase 2 v2 parametric appearance system
+    // 6. Appearance section — button-only; preview lives inside the painter popup
     const sec6 = _section("Appearance / Animations");
-    const appWrap = document.createElement("div");
-    appWrap.style.cssText = "display:flex;align-items:flex-start;gap:14px;flex-wrap:wrap;";
 
-    // ── Thumbnail column ────────────────────────────────────────────────────
-    const thumbCol = document.createElement("div");
-    thumbCol.style.cssText = "display:flex;flex-direction:column;gap:5px;align-items:center;flex-shrink:0;";
-
-    const thumb = document.createElement("canvas");
-    thumb.width  = 120;
-    thumb.height = 150;
-    thumb.style.cssText = "border:1px solid #3a5a7a;background:#1a2230;border-radius:3px;";
-
-    // Helper: draw or show fallback text
-    const _refreshThumb = () => {
-        const ctx = thumb.getContext("2d");
-        ctx.clearRect(0, 0, thumb.width, thumb.height);
-        ctx.fillStyle = "#1a2230";
-        ctx.fillRect(0, 0, thumb.width, thumb.height);
-        // Ground line
-        ctx.fillStyle = "#2a3f2a";
-        ctx.fillRect(0, thumb.height - 20, thumb.width, 20);
-
-        if (typeof window.ScenarioTroopAppearance === "undefined") {
-            ctx.fillStyle = "#7a9ab8"; ctx.font = "10px Tahoma,sans-serif";
-            ctx.textAlign = "center"; ctx.textBaseline = "middle";
-            ctx.fillText("appearance", thumb.width/2, thumb.height/2 - 6);
-            ctx.fillText("module not loaded", thumb.width/2, thumb.height/2 + 8);
-            return;
-        }
-
-        const fc = (s.factions && s.factions[0] && s.factions[0].color) ? s.factions[0].color : "#c62828";
-        if (!troop.appearance || !window.ScenarioTroopAppearance.hasAppearance(troop)) {
-            ctx.fillStyle = "#7a9ab8"; ctx.font = "10px Tahoma,sans-serif";
-            ctx.textAlign = "center"; ctx.textBaseline = "middle";
-            ctx.fillText("Default / vanilla", thumb.width/2, thumb.height/2 - 6);
-            ctx.fillStyle = "#4aafd8"; ctx.font = "9px Tahoma,sans-serif";
-            ctx.fillText("role: " + (troop.role || "infantry"), thumb.width/2, thumb.height/2 + 8);
-            ctx.fillText("click Edit to customise", thumb.width/2, thumb.height/2 + 22);
-            return;
-        }
-
-        // Try vanilla draw at the thumbnail — it may not be available in editor mode,
-        // so we attempt it and fall back gracefully.
-        try {
-            window.ScenarioTroopAppearance.drawAppearanceThumbnail(thumb, troop.appearance, fc);
-        } catch (e) {
-            ctx.fillStyle = "#7a9ab8"; ctx.font = "10px Tahoma,sans-serif";
-            ctx.textAlign = "center"; ctx.textBaseline = "middle";
-            ctx.fillText("Preview unavailable", thumb.width/2, thumb.height/2);
-        }
-    };
-    _refreshThumb();
-    thumbCol.appendChild(thumb);
-
-    // Refresh button under thumb
-    const thumbRefreshBtn = document.createElement("button");
-    thumbRefreshBtn.className = "ste-btn";
-    thumbRefreshBtn.style.cssText = "font-size:10px;padding:2px 8px;";
-    thumbRefreshBtn.textContent = "↺ Refresh";
-    thumbRefreshBtn.onclick = _refreshThumb;
-    thumbCol.appendChild(thumbRefreshBtn);
-
-    appWrap.appendChild(thumbCol);
-
-    // ── Right column: status + buttons + info ───────────────────────────────
-    const appRight = document.createElement("div");
-    appRight.style.cssText = "flex:1;min-width:220px;display:flex;flex-direction:column;gap:7px;";
+    function _formatStatus(tr) {
+        if (typeof window.ScenarioTroopAppearance === "undefined")
+            return "(appearance module not loaded)";
+        if (!window.ScenarioTroopAppearance.hasAppearance(tr))
+            return "Default — uses role-based vanilla look.";
+        const a = tr.appearance;
+        const painted   = (a.pixels || []).filter(Boolean).length;
+        const factionPx = (a.pixels || []).filter(c => c === "F").length;
+        return `Custom sprite: ${a.w}×${a.h}px · ${painted} pixels painted · ${factionPx} faction-colored`;
+    }
 
     const appStatus = document.createElement("div");
-    appStatus.style.cssText = "font-size:11px;color:#aaa;background:rgba(0,0,0,0.2);padding:5px 8px;border-radius:3px;border:1px solid #2a3f5a;";
-    const _formatStatus = (tr) => {
-        if (typeof window.ScenarioTroopAppearance === "undefined") return "(appearance module not loaded)";
-        if (!window.ScenarioTroopAppearance.hasAppearance(tr)) return "Default — uses role-based vanilla look.";
-        const a = tr.appearance;
-        const poseLabel = (window.ScenarioTroopAppearance.POSE_TYPES.find(p => p.value === a.poseType) || {}).label || a.poseType;
-        const armorNote = (typeof tr.armor === "number") ? "Armor " + tr.armor : "";
-        return "✓ Custom: " + a.styleFaction + " — " + poseLabel +
-               (a.sizeScale !== 1 ? " · " + a.sizeScale + "× size" : "") +
-               (armorNote ? " · " + armorNote : "");
-    };
+    appStatus.style.cssText = "font-size:12px;color:#aaa;margin-bottom:8px;";
     appStatus.textContent = _formatStatus(troop);
-    appRight.appendChild(appStatus);
-
-    // Appearance info grid — shows current weapon/armor values prominently
-    const appInfoGrid = document.createElement("div");
-    appInfoGrid.style.cssText = "display:grid;grid-template-columns:1fr 1fr;gap:4px 10px;font-size:10px;color:#7a9ab8;";
-    const _infoKV = (k, v) => {
-        const row = document.createElement("div");
-        row.innerHTML = `<span style="color:#4aafd8;font-weight:bold;">${_esc(k)}:</span> ${_esc(String(v))}`;
-        return row;
-    };
-    appInfoGrid.appendChild(_infoKV("Role", troop.role || "—"));
-    appInfoGrid.appendChild(_infoKV("Armor", troop.armor || 0));
-    appInfoGrid.appendChild(_infoKV("Weapon", troop.isRanged ? (troop.role || "ranged") : "melee"));
-    appInfoGrid.appendChild(_infoKV("Pose", (troop.appearance && troop.appearance.poseType) || "(default)"));
-    appInfoGrid.appendChild(_infoKV("Style", (troop.appearance && troop.appearance.styleFaction) || "(none set)"));
-    appInfoGrid.appendChild(_infoKV("Size ×", (troop.appearance && troop.appearance.sizeScale) || "1.0"));
-    appRight.appendChild(appInfoGrid);
-
-    // Buttons row
-    const appBtns = document.createElement("div");
-    appBtns.style.cssText = "display:flex;gap:6px;flex-wrap:wrap;";
+    sec6.appendChild(appStatus);
 
     const editSprBtn = document.createElement("button");
-    editSprBtn.className = "ste-btn pri";
-    editSprBtn.textContent = "🎨 Appearance Editor";
-    editSprBtn.title = "Opens the full appearance painter — choose cultural style (helmet, armor, weapon look), pose, size, and attack animation curve.";
+    editSprBtn.className = "ste-btn";
+    editSprBtn.textContent = "🎨 Edit Appearance & Animation";
     editSprBtn.onclick = () => {
         if (typeof window.ScenarioTroopAppearance === "undefined") {
             alert("ScenarioTroopAppearance is not loaded.\nMake sure scenario_troop_appearance.js is included in index.html after scenario_troop_editor.js.");
             return;
         }
         window.ScenarioTroopAppearance.openPainter(troop, (updated) => {
-            _refreshThumb();
             appStatus.textContent = _formatStatus(updated);
-            // Refresh the info grid
-            appInfoGrid.innerHTML = "";
-            appInfoGrid.appendChild(_infoKV("Role", updated.role || "—"));
-            appInfoGrid.appendChild(_infoKV("Armor", updated.armor || 0));
-            appInfoGrid.appendChild(_infoKV("Weapon", updated.isRanged ? (updated.role || "ranged") : "melee"));
-            appInfoGrid.appendChild(_infoKV("Pose", (updated.appearance && updated.appearance.poseType) || "(default)"));
-            appInfoGrid.appendChild(_infoKV("Style", (updated.appearance && updated.appearance.styleFaction) || "(none set)"));
-            appInfoGrid.appendChild(_infoKV("Size ×", (updated.appearance && updated.appearance.sizeScale) || "1.0"));
         });
     };
-    appBtns.appendChild(editSprBtn);
-
-    // Test Animation button — opens inline animation preview in the editor
-    const testAnimBtn = document.createElement("button");
-    testAnimBtn.className = "ste-btn gn";
-    testAnimBtn.textContent = "🧪 Test Animation";
-    testAnimBtn.title = "Open a live animation test overlay — preview Idle, Walking, and Attacking states for this troop without launching a battle.";
-    testAnimBtn.onclick = () => _openAnimTestOverlay(troop, s);
-    appBtns.appendChild(testAnimBtn);
-
-    appRight.appendChild(appBtns);
+    sec6.appendChild(editSprBtn);
 
     const appHint = document.createElement("div");
-    appHint.style.cssText = "font-size:10px;color:#5a7a8a;line-height:1.5;";
+    appHint.style.cssText = "font-size:11px;color:#7e8a9a;line-height:1.5;margin-top:8px;";
     appHint.innerHTML =
-        "<strong style='color:#7a9ab8;'>Style faction</strong> picks the helmet, armor, and weapon look (e.g. Yamato kabuto, Mongol lamellar). " +
-        "<strong style='color:#7a9ab8;'>Pose</strong> sets the weapon silhouette (spear, bow, sword+shield…). " +
-        "<strong style='color:#7a9ab8;'>Attack curve</strong> retimes the swing frame-by-frame. " +
+        "Pick a <strong>style faction</strong> (Yamato, Mongol, Hong Dynasty…) " +
+        "to inherit that culture's helmet/armor/weapon look. Pick a <strong>pose</strong> " +
+        "for the silhouette. Use the <strong>animation timeline</strong> to scrub through one " +
+        "cooldown cycle frame-by-frame and tweak which pose each segment lands on. " +
         "The unit's actual team color stays driven by their faction in battle.";
-    appRight.appendChild(appHint);
-
-    appWrap.appendChild(appRight);
-    sec6.appendChild(appWrap);
+    sec6.appendChild(appHint);
     ed.appendChild(sec6);
 
     // 7. Bottom action row
@@ -1351,246 +1238,6 @@ function _factionUniquePicker(troop, s) {
 }
 
 // ╔══════════════════════════════════════════════════════════════════════════╗
-// ║ ANIMATION TEST OVERLAY                                                   ║
-// ║ A standalone animated preview of a troop launched from the editor —      ║
-// ║ no need to start a full battle.  Shows Idle / Walking / Attacking.       ║
-// ╚══════════════════════════════════════════════════════════════════════════╝
-
-function _openAnimTestOverlay(troop, s) {
-    // Remove any existing test overlay
-    const existing = document.getElementById("ste-anim-test-overlay");
-    if (existing && existing.parentNode) existing.parentNode.removeChild(existing);
-
-    const overlay = document.createElement("div");
-    overlay.id = "ste-anim-test-overlay";
-    overlay.style.cssText = `
-        position:fixed; inset:0; background:rgba(0,0,0,0.75);
-        z-index:11000; display:flex; align-items:center; justify-content:center;
-        font-family:Tahoma,Verdana,sans-serif;
-    `;
-    overlay.onclick = (e) => { if (e.target === overlay) _closeAnimTest(); };
-
-    const box = document.createElement("div");
-    box.style.cssText = `
-        background:#141d2c; border:1px solid #3a5a7a; border-radius:6px;
-        padding:16px; min-width:360px; max-width:480px;
-        box-shadow:0 12px 48px rgba(0,0,0,0.9); color:#cfd8dc;
-    `;
-
-    // Title
-    const ttl = document.createElement("div");
-    ttl.style.cssText = "display:flex;align-items:center;gap:8px;margin-bottom:12px;";
-    ttl.innerHTML = `<span style="color:#f5d76e;font-size:13px;font-weight:bold;flex:1;">🧪 Animation Test — ${_esc(troop.name)}</span>`;
-    const xBtn = document.createElement("button");
-    xBtn.className = "ste-btn";
-    xBtn.textContent = "✕ Close";
-    xBtn.onclick = _closeAnimTest;
-    ttl.appendChild(xBtn);
-    box.appendChild(ttl);
-
-    // Canvas
-    const cv = document.createElement("canvas");
-    cv.width  = 320;
-    cv.height = 220;
-    cv.style.cssText = "border:1px solid #2a3f5a;border-radius:3px;background:#1a2230;display:block;margin:0 auto 10px;width:100%;";
-    box.appendChild(cv);
-
-    // Mode controls
-    const modeRow = document.createElement("div");
-    modeRow.style.cssText = "display:flex;gap:6px;justify-content:center;margin-bottom:8px;";
-
-    let _animMode = "idle";
-    let _animFrame = 0;
-    let _animIv = null;
-
-    const modes = [
-        { id: "idle",      label: "⬛ Idle" },
-        { id: "moving",    label: "🚶 Walking" },
-        { id: "attacking", label: "⚔️ Attacking" }
-    ];
-
-    const modeBtns = {};
-    modes.forEach(m => {
-        const b = document.createElement("button");
-        b.className = "ste-btn" + (m.id === "idle" ? " pri" : "");
-        b.textContent = m.label;
-        b.onclick = () => {
-            _animMode  = m.id;
-            _animFrame = 0;
-            Object.values(modeBtns).forEach(btn => btn.classList.remove("pri"));
-            b.classList.add("pri");
-        };
-        modeBtns[m.id] = b;
-        modeRow.appendChild(b);
-    });
-    box.appendChild(modeRow);
-
-    // Team color row
-    const colorRow = document.createElement("div");
-    colorRow.style.cssText = "display:flex;gap:5px;justify-content:center;margin-bottom:8px;flex-wrap:wrap;";
-    let _teamColor = (s && s.factions && s.factions[0] && s.factions[0].color) ? s.factions[0].color : "#c62828";
-    const teamColors = ["#c62828","#1565c0","#2e7d32","#ef6c00","#ffffff","#9c27b0"];
-    const teamNames  = ["Red","Blue","Green","Amber","White","Purple"];
-    const teamBtns   = {};
-    teamColors.forEach((hex, i) => {
-        const b = document.createElement("button");
-        b.className = "ste-btn";
-        b.style.cssText = "font-size:10px;padding:2px 7px;border-left:3px solid " + hex + ";";
-        b.textContent = teamNames[i];
-        if (hex === _teamColor) b.classList.add("pri");
-        b.onclick = () => {
-            _teamColor = hex;
-            Object.values(teamBtns).forEach(btn => btn.classList.remove("pri"));
-            b.classList.add("pri");
-        };
-        teamBtns[hex] = b;
-        colorRow.appendChild(b);
-    });
-    box.appendChild(colorRow);
-
-    const infoTxt = document.createElement("div");
-    infoTxt.style.cssText = "text-align:center;font-size:10px;color:#5a7a8a;";
-    const appModule = typeof window.ScenarioTroopAppearance !== "undefined";
-    const drawAvail = typeof window.drawInfantryUnit === "function" || typeof window.drawCavalryUnit === "function";
-    infoTxt.textContent = appModule && drawAvail
-        ? "Showing full custom appearance · uses real vanilla draw functions"
-        : (!drawAvail ? "⚠ Vanilla draw functions not loaded — showing placeholder art" : "⚠ Appearance module not loaded");
-    box.appendChild(infoTxt);
-
-    overlay.appendChild(box);
-    document.body.appendChild(overlay);
-
-    // ── Animation draw loop ──────────────────────────────────────────────────
-    const app = troop.appearance && window.ScenarioTroopAppearance &&
-                window.ScenarioTroopAppearance.hasAppearance(troop) ? troop.appearance : null;
-
-    function _drawAnimFrame() {
-        const ctx = cv.getContext("2d");
-        ctx.clearRect(0, 0, cv.width, cv.height);
-
-        // Background
-        ctx.fillStyle = "#1a2230";
-        ctx.fillRect(0, 0, cv.width, cv.height);
-        ctx.fillStyle = "#2a3f2a";
-        ctx.fillRect(0, cv.height - 30, cv.width, 30);
-
-        const isCav  = app && window.ScenarioTroopAppearance &&
-                       window.ScenarioTroopAppearance.POSE_TYPES &&
-                       ["cavalry","horse_archer","camel","elephant"].includes(app.poseType);
-        const drawFn = isCav ? window.drawCavalryUnit : window.drawInfantryUnit;
-        const anchorX = cv.width / 2;
-        const anchorY = cv.height - 30;
-
-        if (typeof drawFn !== "function") {
-            // Fallback: draw a simple coloured silhouette so the test overlay
-            // still shows something useful when the vanilla draw isn't loaded yet.
-            ctx.fillStyle = _teamColor;
-            const bx = anchorX - 10, by = anchorY - 55;
-            // Head
-            ctx.beginPath();
-            ctx.arc(anchorX, by - 8, 10, 0, Math.PI * 2);
-            ctx.fill();
-            // Body
-            ctx.fillRect(bx, by, 20, 30);
-            // Legs (with wobble if moving)
-            const legOff = (_animMode !== "idle") ? Math.sin(_animFrame * 0.18) * 6 : 0;
-            ctx.fillRect(bx,      by + 30, 8, 18 + legOff);
-            ctx.fillRect(bx + 12, by + 30, 8, 18 - legOff);
-            // Weapon stub
-            if (_animMode === "attacking") {
-                const swingAngle = Math.sin(_animFrame * 0.25) * 0.8;
-                ctx.save();
-                ctx.translate(anchorX + 10, by + 10);
-                ctx.rotate(swingAngle);
-                ctx.strokeStyle = "#aaa";
-                ctx.lineWidth = 3;
-                ctx.beginPath();
-                ctx.moveTo(0, 0);
-                ctx.lineTo(30, -20);
-                ctx.stroke();
-                ctx.restore();
-            }
-            ctx.fillStyle = "#7a9ab8";
-            ctx.font = "9px Tahoma,sans-serif";
-            ctx.textAlign = "center";
-            ctx.fillText("(vanilla draw not available)", anchorX, 14);
-            _animFrame++;
-            return;
-        }
-
-        const moving      = (_animMode === "moving" || _animMode === "attacking");
-        const isAttacking = (_animMode === "attacking");
-        const maxCd       = 100;
-        const cycleP      = isAttacking ? ((_animFrame % 60) / 60) : 0;
-        const realCd      = isAttacking ? Math.round(maxCd * (1 - cycleP)) : 0;
-
-        let useCd = realCd;
-        if (isAttacking && app && window.ScenarioTroopAppearance) {
-            const inten = window.ScenarioTroopAppearance.getAttackIntensity(app, realCd, maxCd);
-            // phantom cd
-            useCd = Math.round(maxCd * (1 - Math.max(0, Math.min(1, inten))));
-        }
-
-        const styleColor = (app && window.ScenarioTroopAppearance)
-            ? (window.ScenarioTroopAppearance.resolveStyleColor(app) || _teamColor)
-            : _teamColor;
-        const pose  = (app && app.poseType) || (troop.role || "shortsword");
-        const scale = (app && app.sizeScale) || 1.0;
-        const wm    = (app && app.walkSpeedMul) || 1.0;
-        const adjFr = _animFrame * wm;
-
-        const fakeStats = {
-            role: pose, isRanged: !!troop.isRanged,
-            ammo: troop.ammo || 5, fireRate: maxCd,
-            armor: troop.armor || 15, health: troop.health || 100,
-            _customAppearance: null   // prevent wrapper recursion in preview
-        };
-        const fakeUnit = {
-            stats: fakeStats, side: "player", unitType: troop.name || "Preview",
-            x: 0, y: 0, facingDir: 1, color: _teamColor,
-            cooldown: useCd, ammo: 5, hp: 100
-        };
-
-        try {
-            ctx.save();
-            if (scale !== 1.0) {
-                ctx.translate(anchorX, anchorY);
-                ctx.scale(scale, scale);
-                ctx.translate(-anchorX, -anchorY);
-            }
-            if (isCav) {
-                drawFn(ctx, anchorX, anchorY, moving, adjFr,
-                    styleColor, isAttacking, pose, "player",
-                    troop.name || "Preview", false, useCd, 5, fakeUnit, 0);
-            } else {
-                drawFn(ctx, anchorX, anchorY, moving, adjFr,
-                    styleColor, pose, isAttacking, "player",
-                    troop.name || "Preview", false, useCd, 5, fakeUnit, 0);
-            }
-            ctx.restore();
-        } catch (e) {
-            ctx.restore();
-            ctx.fillStyle = "#e74c3c"; ctx.font = "10px Tahoma,sans-serif";
-            ctx.textAlign = "center";
-            ctx.fillText("Draw error: " + e.message, anchorX, anchorY - 60);
-        }
-        _animFrame++;
-    }
-
-    _animIv = setInterval(_drawAnimFrame, 1000 / 30);
-
-    function _closeAnimTest() {
-        if (_animIv) { clearInterval(_animIv); _animIv = null; }
-        const el = document.getElementById("ste-anim-test-overlay");
-        if (el && el.parentNode) el.parentNode.removeChild(el);
-    }
-
-    // Store close fn so overlay click can reach it
-    overlay._closeAnimTest = _closeAnimTest;
-    overlay.onclick = (e) => { if (e.target === overlay) _closeAnimTest(); };
-}
-
-// ╔══════════════════════════════════════════════════════════════════════════╗
 // ║ TOOLBAR ACTIONS                                                          ║
 // ╚══════════════════════════════════════════════════════════════════════════╝
 
@@ -1678,27 +1325,14 @@ function _exportPack() {
         alert("Nothing to export — there are no custom troops in this scenario yet.");
         return;
     }
-
-    // Collect faction→uniqueTroop assignments that reference our custom troops
-    const customNames = new Set(s.customTroops.map(t => t.name));
-    const factionAssignments = {};
-    if (s.factions && typeof s.factions === "object") {
-        Object.entries(s.factions).forEach(([fName, fData]) => {
-            if (fData && fData.uniqueTroop && customNames.has(fData.uniqueTroop)) {
-                factionAssignments[fName] = fData.uniqueTroop;
-            }
-        });
-    }
-
     const pack = {
         format:   "dog_troop_pack",
-        version:  2,                // bumped: now includes appearance + factionAssignments
+        version:  1,
         name:     (s.meta && s.meta.name ? s.meta.name : "Untitled") + " — Troop Pack",
         author:   (s.meta && s.meta.author) || "Unknown",
         exported: new Date().toISOString(),
-        troops:    JSON.parse(JSON.stringify(s.customTroops)),  // includes .appearance
-        hierarchy: JSON.parse(JSON.stringify(s.customHierarchy || {})),
-        factionAssignments  // which faction has which troop as its unique
+        troops:    JSON.parse(JSON.stringify(s.customTroops)),
+        hierarchy: JSON.parse(JSON.stringify(s.customHierarchy || {}))
     };
     const json = JSON.stringify(pack, null, 2);
     const blob = new Blob([json], { type: "application/json" });
@@ -1710,8 +1344,7 @@ function _exportPack() {
     document.body.appendChild(a);
     a.click();
     setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 100);
-    alert(`Exported ${pack.troops.length} custom troop(s) to your Downloads folder.\n` +
-          `Appearance data and faction assignments are included.`);
+    alert(`Exported ${pack.troops.length} custom troop(s) to your Downloads folder.`);
 }
 
 function _importPack() {
@@ -1787,30 +1420,7 @@ function _importPack() {
                         .filter((v, i, a) => a.indexOf(v) === i);
                 }
             }
-
-            // Restore faction → uniqueTroop assignments (v2 packs only)
-            let factionsRestored = 0;
-            if (pack.factionAssignments && typeof pack.factionAssignments === "object" &&
-                s.factions && typeof s.factions === "object") {
-                const availTroopNames = new Set(s.customTroops.map(t => t.name));
-                Object.entries(pack.factionAssignments).forEach(([fName, troopName]) => {
-                    // Only apply if this troop was actually imported and the faction exists
-                    if (!availTroopNames.has(troopName)) return;
-                    if (!s.factions[fName]) return;
-                    const cur = s.factions[fName].uniqueTroop;
-                    if (cur && cur !== troopName) return;  // don't clobber existing different assignment
-                    s.factions[fName].uniqueTroop = troopName;
-                    if (window.FACTIONS && window.FACTIONS[fName]) {
-                        window.FACTIONS[fName].uniqueTroop = troopName;
-                    }
-                    factionsRestored++;
-                });
-            }
-
-            const facMsg = factionsRestored > 0
-                ? `\n${factionsRestored} faction unique-troop assignment(s) also restored.`
-                : "";
-            alert(`Imported ${added} troop(s) successfully.${facMsg}\nAppearance data (styles, poses, attack curves) is included.`);
+            alert(`Imported ${added} troop(s) successfully.`);
             _renderList();
         };
         r.readAsText(f);
@@ -1842,20 +1452,7 @@ function _normalizeTroopSchema(raw) {
       "ammo","accuracy","missileBaseDamage","missileAPDamage"
     ].forEach(k => { out[k] = _num(out[k], blank[k], 0); });
     out.desc = String(out.desc || "");
-    // Preserve appearance data — validate its structure if the appearance module is available,
-    // otherwise keep it verbatim so it survives a round-trip even in a Phase-1-only environment.
-    if (raw.appearance && typeof raw.appearance === "object") {
-        if (typeof window.ScenarioTroopAppearance !== "undefined" &&
-            typeof window.ScenarioTroopAppearance.normalizeAppearance === "function") {
-            out.appearance = window.ScenarioTroopAppearance.normalizeAppearance(raw.appearance);
-        } else {
-            // Appearance module not loaded — keep the raw object verbatim so the data
-            // isn't lost. Basic sanity guard: must at least have a string styleFaction.
-            out.appearance = (typeof raw.appearance.styleFaction === "string") ? raw.appearance : null;
-        }
-    } else {
-        out.appearance = null;
-    }
+    if (out.appearance === undefined) out.appearance = null;
     return out;
 }
 
@@ -1959,15 +1556,17 @@ function _applyCustomsAtRuntime(scenarioDoc) {
             // Source-tracking flag
             inst._customScenarioSource = true;
 
-            // Appearance — copy onto stats so the Phase 2 draw hook can read it.
-            // The hook checks unit.stats._customAppearance; setting it here
-            // means it flows through every system that already holds a stats ref
-            // (Object.assign in battlefield_launch.js spawn copies it through).
-            // v2 schema check: needs styleFaction + poseType + useCustomDraw.
-            if (t.appearance && typeof t.appearance === "object" &&
-                typeof t.appearance.styleFaction === "string" &&
-                typeof t.appearance.poseType === "string" &&
-                t.appearance.useCustomDraw !== false) {
+            // Appearance — Phase 2: copy pixel-grid appearance onto the instance.
+            // The runtime hook in scenario_troop_appearance.js reads _customAppearance
+            // and calls drawCustomSprite() instead of the role-based renderer.
+            // Guard checks for the ACTUAL schema saved by openPainter(): { w, h, pixels }.
+            // The old check (styleFaction / useCustomDraw) was for a Phase 3 design that
+            // was never implemented — it caused _customAppearance to NEVER be set.
+            if (t.appearance &&
+                typeof t.appearance === "object" &&
+                Array.isArray(t.appearance.pixels) &&
+                t.appearance.w &&
+                t.appearance.h) {
                 inst._customAppearance = t.appearance;
             }
 

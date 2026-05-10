@@ -296,6 +296,67 @@ function initiateParleWithNPC(npc, tile) {
         }
     }
 
+    // ── STORY NPC PROXIMITY RE-TRIGGER GUARD ─────────────────────────────────
+    // In Story 1 or Story 2, if the player has already spoken to this specific
+    // NPC in the current session, block parle from re-firing while the player
+    // remains near the NPC. This prevents convoy/escort NPCs and mission-critical
+    // characters from spamming parle dialogues when the player stays close to
+    // them between triggers.
+    //
+    // The guard is NPC-identity based (storyId / id) and proximity-based:
+    //   - "Already spoken" is tracked in window.__parle_storySpokenIds (Set).
+    //   - Once the player moves > 300 px away from the NPC, the entry is cleared
+    //     so a second approach in a different part of the map CAN re-trigger.
+    //   - Convoy NPCs (id starts with "convoy_npc_") are always suppressed once
+    //     spoken to, since they travel with the player indefinitely.
+    if (window.__campaignStory1Active || window.__campaignStory2Active) {
+        if (!window.__parle_storySpokenIds) window.__parle_storySpokenIds = new Set();
+        if (!window.__parle_storySpokenPositions) window.__parle_storySpokenPositions = {};
+
+        const _npcKey = npc.storyId || npc.id || (npc.name + "_" + Math.round(npc.x) + "_" + Math.round(npc.y));
+        const _isConvoyNpc = _npcKey && _npcKey.indexOf("convoy_npc_") === 0;
+
+        if (window.__parle_storySpokenIds.has(_npcKey)) {
+            // Check if the player has moved far enough away to reset the cooldown
+            // (only for non-convoy NPCs that physically move away themselves).
+            if (!_isConvoyNpc && window.player && npc) {
+                const _lastPos = window.__parle_storySpokenPositions[_npcKey];
+                if (_lastPos) {
+                    const _dx = window.player.x - _lastPos.px;
+                    const _dy = window.player.y - _lastPos.py;
+                    const _distFromLastSpeak = Math.sqrt(_dx * _dx + _dy * _dy);
+                    if (_distFromLastSpeak > 300) {
+                        // Player has moved far enough — allow a re-trigger
+                        window.__parle_storySpokenIds.delete(_npcKey);
+                        delete window.__parle_storySpokenPositions[_npcKey];
+                        console.log("[Parle] Story NPC cooldown cleared (player moved away):", _npcKey);
+                    } else {
+                        console.log("[Parle] Blocked: story NPC already spoken to, player still nearby:", _npcKey);
+                        return;
+                    }
+                } else {
+                    console.log("[Parle] Blocked: story NPC already spoken to (no position record):", _npcKey);
+                    return;
+                }
+            } else {
+                // Convoy NPC — always block re-trigger
+                console.log("[Parle] Blocked: convoy NPC already spoken to in this story session:", _npcKey);
+                return;
+            }
+        }
+
+        // Mark this NPC as spoken to and record the player's current position.
+        window.__parle_storySpokenIds.add(_npcKey);
+        if (window.player) {
+            window.__parle_storySpokenPositions[_npcKey] = {
+                px: window.player.x,
+                py: window.player.y
+            };
+        }
+        console.log("[Parle] Story NPC dialogue recorded:", _npcKey);
+    }
+    // ── END STORY NPC PROXIMITY RE-TRIGGER GUARD ─────────────────────────────
+
     // Legacy 2-second boot guard (kept for non-campaign edge cases)
     if (window.__DoG_scenarioBootTime && !window.__campaignStory1Active &&
         (Date.now() - window.__DoG_scenarioBootTime) < 2000) {
@@ -495,6 +556,11 @@ function leaveParle(playerObj, isGoingToBattle = false) {
     if (typeof RandomDialogue !== 'undefined') {
         RandomDialogue.resetSession();
     }
+
+    // ── Clear this specific NPC's story-proximity record on leave ─────────────
+    // When the player intentionally leaves parle (as opposed to being blocked),
+    // we keep the NPC in the spoken-ids set so they can't immediately re-trigger.
+    // The distance check in initiateParleWithNPC handles eventual re-enables.
  
     // ---> THE FIX: Push the NPC away to prevent infinite Parle loops <---
     if (!isGoingToBattle && currentParleNPC) {

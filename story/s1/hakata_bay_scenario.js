@@ -298,30 +298,22 @@ const CONFIG = {
     },
 
     // ── VILLAGE RECRUIT ROSTERS ───────────────────────────────────────────────
-    // Exactly 20 units each. Same as v2.x — still CSV for give_player_units.
+    // 5 units per city total (3 here + 2 from the volunteer wave below).
     villageRecruits: {
         Torikai: {
-            count: 20,
+            count: 3,
             flavor: "mountain archers",
-            roster: "Archer,Archer,Archer,Archer,Archer,Archer,Archer,Archer," +
-                    "Spearman,Spearman,Spearman,Spearman,Spearman,Spearman," +
-                    "Militia,Militia,Militia,Militia,Militia,Militia"
+            roster: "Archer,Archer,Archer"
         },
         Imazu: {
-            count: 20,
+            count: 3,
             flavor: "coastal spearmen",
-            roster: "Glaiveman,Glaiveman,Glaiveman,Glaiveman,Glaiveman," +
-                    "Spearman,Spearman,Spearman,Spearman,Spearman," +
-                    "Spearman,Spearman,Spearman," +
-                    "Militia,Militia,Militia,Militia,Militia,Militia,Militia"
+            roster: "Spearman,Spearman,Spearman"
         },
         Hakozaki: {
-            count: 20,
+            count: 3,
             flavor: "eastern shore guardsmen",
-            roster: "Archer,Archer,Archer,Archer,Archer,Archer,Archer,Archer," +
-                    "Spearman,Spearman,Spearman,Spearman," +
-                    "Glaiveman,Glaiveman,Glaiveman,Glaiveman," +
-                    "Militia,Militia,Militia,Militia"
+            roster: "Spearman,Spearman,Spearman"
         }
     },
 
@@ -331,8 +323,8 @@ const CONFIG = {
     timing: {
         mongolFleetSailDuration: 60,    // legacy alias (unused in v3.0)
         mongolsLandAfterArrival: 60,    // legacy alias
-        windRisesAfterReturn:    25,
-        stormAfterWind:          10,
+        windRisesAfterReturn:     1,   // v3.5: cut to 1s — Yuan debate fires ~1s after Mizuki return
+        stormAfterWind:           0,   // v3.5: 0s gap — t3_kamikaze fires as soon as storm_started=1
         victoryAfterRetreat:     12,
         mongolRevealDelay:        3     // seconds after meeting generals before Mongols appear
     },
@@ -858,6 +850,13 @@ var TRIGGERS = [
              
             { type: "set_relation", params: { a: FAC.PLAYER, b: FAC.ENEMY, rel: "War" } },
 
+            // ── Lock the Visit Settlement button for the entire beach phase ────
+            // The player is in the middle of a military crisis — city-interior
+            // access would break immersion and allow bypassing cutscene triggers.
+            // It is re-enabled by enable_visit_settlement in t1_beach_defeat,
+            // just before the Mizuki teleportation fires.
+            { type: "disable_visit_settlement", params: {} },
+
             // ── Initialize player gold & food at scenario start ────────────────
             // Uses set_player_stats (the engine action path) so the values stick
             // even if the runtime re-initialises window.player after install().
@@ -959,7 +958,7 @@ var TRIGGERS = [
                 roster: CONFIG.villageRecruits.Imazu.roster
             }},
             { type: "increment_var", params: { name: "militia_count", n: 1 } },
-            _log("🛡 +20 " + CONFIG.villageRecruits.Imazu.flavor + " from Imazu."),
+            _log("🛡 +3 " + CONFIG.villageRecruits.Imazu.flavor + " from Imazu."),
 
             // ── v3.2: Bonus militia joining dialogue (10–15 men) ─────────────────
             // Simulates additional townsfolk stepping forward after the formal levy.
@@ -969,9 +968,9 @@ var TRIGGERS = [
                   text: "We are ready to join your ranks, sir. "  }
             ], { letterbox: false }),
             { type: "give_player_units", params: {
-                roster: "Spearman,Spearman,Spearman,Militia,Militia,Militia,Militia,Militia,Militia,Militia,Militia,Militia"
+                roster: "Spearman,Light Two Handed"
             }},
-            _log("🛡 +12 additional volunteers joined from Imazu."),
+            _log("🛡 +2 additional volunteers joined from Imazu."),
             _sub("Imazu volunteers join your ranks!", 4000, "#8bc34a"),
 
             // Next waypoint: Torikai
@@ -1006,7 +1005,7 @@ var TRIGGERS = [
                 roster: CONFIG.villageRecruits.Torikai.roster
             }},
             { type: "increment_var", params: { name: "militia_count", n: 1 } },
-            _log("🏹 +20 " + CONFIG.villageRecruits.Torikai.flavor + " from Torikai."),
+            _log("🏹 +3 " + CONFIG.villageRecruits.Torikai.flavor + " from Torikai."),
 
             // ── v3.2: Bonus militia joining dialogue (10–15 men) ─────────────────
             _dlg([
@@ -1017,9 +1016,9 @@ var TRIGGERS = [
                         "burns. We pledge our arms to you." }
             ], { letterbox: false }),
             { type: "give_player_units", params: {
-                roster: "Archer,Archer,Archer,Archer,Archer,Militia,Militia,Militia,Militia,Militia,Spearman,Spearman,Spearman,Archer,Archer"
+                roster: "Archer,Archer"
             }},
-            _log("🏹 +15 additional volunteers joined from Torikai."),
+            _log("🏹 +2 additional volunteers joined from Torikai."),
             _sub("Torikai volunteers answer the call!", 4000, "#8bc34a"),
 
             // Next waypoint: Hakozaki
@@ -1055,7 +1054,7 @@ var TRIGGERS = [
                 roster: CONFIG.villageRecruits.Hakozaki.roster
             }},
             { type: "increment_var", params: { name: "militia_count", n: 1 } },
-            _log("🏹 +20 " + CONFIG.villageRecruits.Hakozaki.flavor + " from Hakozaki."),
+            _log("🏹 +3 " + CONFIG.villageRecruits.Hakozaki.flavor + " from Hakozaki."),
 
             // ── v3.2: Bonus militia joining dialogue (10–15 men) ─────────────────
             _dlg([
@@ -1066,9 +1065,9 @@ var TRIGGERS = [
                         "We are yours to command." }
             ], { letterbox: false }),
             { type: "give_player_units", params: {
-                roster: "Militia,Militia,Militia,Militia,Militia,Militia,Militia,Militia,Spearman,Spearman,Archer,Archer,Glaiveman,Glaiveman,Glaiveman,Glaiveman,Glaiveman,Glaiveman,Glaiveman,Glaiveman"
+                roster: "Light Two Handed,Light Two Handed"
             }},
-            _log("🏹 +20 additional volunteers joined from Hakozaki."),
+            _log("🏹 +2 additional volunteers joined from Hakozaki."),
             _sub("Hakozaki rallies behind you!", 4000, "#8bc34a")
         ]
     },
@@ -1456,6 +1455,10 @@ _dlg([
                     "}"
                 ].join("\n")
             }},
+            // ── Re-enable Visit Settlement before teleporting to Mizuki ──────────
+            // The beach phase is over — the player is now at Mizuki Fortress,
+            // a friendly city they should be able to explore normally.
+            { type: "enable_visit_settlement", params: {} },
             { type: "set_player_pos", params: { x: C.MIZUKI_RALLY.x, y: C.MIZUKI_RALLY.y } }
         ].concat(_defenderDespawnActions())
          .concat(_mongolDespawnActions())
@@ -1654,7 +1657,7 @@ _dlg([
             title:       "Retrieve supplies from Dazaifu",
             description: "Ride east to the Dazaifu granaries and bring back everything " +
                          "that can keep through a long siege.",
-            x:           C.DAZAIFU.x,
+            x:           C.DAZAIFU.x + 200,   // waypoint marker shifted 200 px east
             y:           C.DAZAIFU.y,
             radius:      RAD.cityTrigger
         }},
@@ -1806,7 +1809,7 @@ _dlg([
   text: "And I choose not to march an army into the unknown with a bleeding rear and an unfinished siege." },
 
 { side: "left", name: "Narrator", color: "#d4b886",
-  text: "The argument hardened. Voices rose, then cut off again as maps were slammed flat and re-read. No consensus came easily, only the growing weight of urgency pressing both sides toward a decision neither fully trusted." }
+  text: "The argument hardened. Voices rose, then fell silent as maps were slammed flat and studied again. No consensus came easily, but worsening logistical strain, dwindling supplies, and the difficulty of sustaining the invasion forced the commanders toward a reluctant decision to withdraw." }
 
         ]),
         { type: "fade_flash", params: { color: "#ffffff", ms: 250 } },
@@ -1833,7 +1836,7 @@ _dlg([
         { type: "set_npc_waypoint", params: {
             id: "mongol_wave_0", x: C.YUAN_RETREAT.x, y: C.YUAN_RETREAT.y
         }},
-        _sub("The Yuan left Japan for now.", 8000, "#8bc34a"),
+        _sub("The Yuan are making decisions on next steps.", 5000, "#8bc34a"),
         _log("🏯 The Yuan withdraw from the Hakata.", "peace")
     ]
 },
@@ -1883,7 +1886,11 @@ _dlg([
 			{ type: "win_scenario", params: {
 				title:    "Victory!",
 				subtitle: "By the grace of the kami, Kyushu was spared."
-			}}
+			}},
+            // ── v3.5: Hard-reload to main menu 2 seconds after victory screen ──
+            { type: "custom_js", params: {
+                code: "setTimeout(function() { window.location.reload(); }, 2000);"
+            }}
 		]
     },
 

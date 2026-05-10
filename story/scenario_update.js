@@ -127,6 +127,147 @@ function _movieFromLegacyIntro(intro, name) {
     return m;
 }
 
+// ── Story 1 Campaign Boot Hook ───────────────────────────────────────────────
+// Mirror of _maybeBootStory2Campaign for the Hakata Bay / Bun'ei 1274 campaign.
+//
+// When the player launches the Story_1_Custom_Scenario via "Launch Scenario"
+// (editor or menu), ScenarioRuntime.launch() → _applyToLiveEngine() runs, but
+// initGame_story1() is now called by ScenarioRuntime.launch() when a Story 1
+// doc is detected (campaignScript/importedFrom/Kamakura), so __campaignStory1Active
+// will be set by initGame_story1 itself.  This function fires as a secondary
+// check only for the "game-already-running" in-place path.
+// and HakataBayScenario.install() bails on its guard check immediately.
+//
+// Detection order (first match wins):
+//   1. meta.campaignScript === 'story1'   (explicit tag — add to Story_1_Dev.js)
+//   2. meta.importedFrom   === 'story1'   (set by senario_devmade_import.js)
+//   3. 'Kamakura Shogunate' faction present (unique to Story 1 map)
+function _maybeBootStory1Campaign(scenarioDoc) {
+    if (!scenarioDoc) return;
+    if (!window.HakataBayScenario ||
+            typeof window.HakataBayScenario.install !== 'function') return;
+
+    const _meta     = scenarioDoc.meta || {};
+    const _fac      = scenarioDoc.factions || {};
+    const _facNames = Array.isArray(_fac) ? _fac : Object.keys(_fac);
+
+    const _isMeta     = _meta.campaignScript === 'story1';
+    const _isImported = _meta.importedFrom   === 'story1';
+    const _isKamakura = _facNames.includes('Kamakura Shogunate');
+
+    if (!_isMeta && !_isImported && !_isKamakura) return;
+
+    if (window.__campaignStory1Active) {
+        // Already booted (e.g. initGame_story1 ran this session) — skip.
+        return;
+    }
+
+    console.log('[ScenarioRuntime] 🏯 Story 1 scenario detected — booting HakataBayScenario campaign script…');
+    window.__campaignStory1Active = true;
+
+    // install() builds movies[0] from STORY_INTRO, merges triggers/NPCs, and
+    // calls ScenarioTriggers.start() — which fires _maybePlayStoryIntro.
+    try {
+        window.HakataBayScenario.install();
+        console.log('[ScenarioRuntime] ✅ HakataBayScenario.install() complete via _maybeBootStory1Campaign.');
+    } catch (e) {
+        console.error('[ScenarioRuntime] HakataBayScenario.install() threw:', e);
+    }
+}
+
+// ── Story 2 Campaign Boot Hook ───────────────────────────────────────────────
+// When the player launches the Story_2_Custom_Scenario via "Launch Scenario"
+// (editor or menu), ScenarioRuntime.launch() → _applyToLiveEngine() runs,
+// initGame_story2() is now called by ScenarioRuntime.launch() when a Story 2
+// doc is detected (campaignScript/importedFrom/Xiaran Dominion), so
+// __campaignStory2Active will be set by initGame_story2 itself.  This function
+// fires as a secondary check only for the "game-already-running" in-place path.
+// set and SuzhouScenario.install() bails immediately, leaving the player with
+// no triggers and no intro.
+//
+// This helper is called synchronously after _applyToLiveEngine() in both
+// launch paths (game-already-running and post-init).  It fires BEFORE the
+// scenario_triggers.js watcher detects __activeScenario (watcher polls every
+// 300ms + 150ms delay = 150-450ms), so install() builds movies[0] and calls
+// ScenarioTriggers.start() FIRST — the watcher's later start() call hits
+// __introPlayed=true and is a no-op.
+function _maybeBootStory2Campaign(scenarioDoc) {
+    if (!scenarioDoc) return;
+
+    // FIX: The Story 2 campaign script is window.MongolConquestScenario
+    // (mongolconquestxia_scenario.js), NOT window.SuzhouScenario.
+    // The old name caused a silent bail-out on every load — install() was
+    // never called, ScenarioTriggers.start() never fired, and the convoy
+    // never spawned, leaving the game stuck on the loading screen.
+    const _campaignModule = window.MongolConquestScenario || window.SuzhouScenario;
+    if (!_campaignModule || typeof _campaignModule.install !== 'function') return;
+
+    // Detect Story 2 by meta tag OR by the presence of the "Xiaran Dominion"
+    // faction (unique to Story 2). importedFrom is set by senario_devmade_import.js
+    // on the exported JSON; campaignScript is set manually in Story_2_Dev.js.
+    // Both must be checked for symmetry with Story 1's _maybeBootStory1Campaign.
+    const _meta2     = scenarioDoc.meta || {};
+    const _fac2      = scenarioDoc.factions || {};
+    const _facNames2 = Array.isArray(_fac2) ? _fac2 : Object.keys(_fac2);
+    const _isMeta2   = _meta2.campaignScript === 'story2';
+    const _isImported2 = _meta2.importedFrom === 'story2';
+    const _isXiaran  = _facNames2.includes('Xiaran Dominion');
+    if (!_isMeta2 && !_isImported2 && !_isXiaran) return;
+
+    if (window.__campaignStory2Active) {
+        // Already booted (e.g. initGame_story2 ran this session) — skip.
+        return;
+    }
+
+    console.log('[ScenarioRuntime] 🏯 Story 2 scenario detected — booting MongolConquestScenario campaign script…');
+    window.__campaignStory2Active = true;
+
+    // ── PRE-INSTALL CAMPAIGN DOC PATCHES ────────────────────────────────────
+    // The exported Story_2_Dev.js JSON is a map snapshot from the scenario editor.
+    // It carries a dev-time playerSetup (Xiaran Dominion / 20 Militia) and has
+    // storyIntro.enabled = false — both correct for the editor context but wrong
+    // for campaign runtime.
+    //
+    // We patch scenarioDoc in-place here, BEFORE install() runs, so that:
+    //   • _placePlayer() (already called by _applyToLiveEngine above) is
+    //     overridden by install()'s own staggered _reapply() — but more
+    //     importantly, ScenarioTriggers.start() → _applyPlayerSetup() reads
+    //     scenarioDoc.playerSetup, which must already be the campaign version.
+    //   • _maybePlayStoryIntro() checks scenarioDoc.storyIntro.enabled — must be
+    //     true or the cinematic is silently skipped and t0_boot never fires.
+    //
+    // The campaign module is the authoritative source for both.  We pull from its
+    // DATA object rather than hardcoding values here.
+    if (_campaignModule.DATA) {
+        // Overwrite playerSetup so ScenarioTriggers.start() → _applyPlayerSetup
+        // uses campaign values (Mongol Empire, 100 troops at convoy position).
+        if (_campaignModule.DATA.playerSetup) {
+            scenarioDoc.playerSetup = _campaignModule.DATA.playerSetup;
+            console.log('[ScenarioRuntime] Story 2 playerSetup patched from campaign DATA.');
+        }
+        // Enable storyIntro so _maybePlayStoryIntro plays the cinematic and
+        // signals _onIntroDone, which gates scenario_start and t0_boot.
+        if (_campaignModule.DATA.storyIntro) {
+            scenarioDoc.storyIntro = _campaignModule.DATA.storyIntro;
+            console.log('[ScenarioRuntime] Story 2 storyIntro patched from campaign DATA (enabled:',
+                        _campaignModule.DATA.storyIntro.enabled, ').');
+        }
+    }
+
+    // Clear the intro-played flag so install()'s ScenarioTriggers.start() call
+    // actually plays the cinematic (install() resets it, but belt-and-suspenders).
+    scenarioDoc.__introPlayed = false;
+
+    // install() merges triggers/importantNpcs/storyIntro onto __activeScenario
+    // and calls ScenarioTriggers.start() — which fires _maybePlayStoryIntro.
+    try {
+        _campaignModule.install();
+        console.log('[ScenarioRuntime] ✅ MongolConquestScenario.install() complete via _maybeBootStory2Campaign.');
+    } catch (e) {
+        console.error('[ScenarioRuntime] MongolConquestScenario.install() threw:', e);
+    }
+}
+
 function launch(scenarioDoc) {
     if (!scenarioDoc) { console.error("[ScenarioRuntime] No scenario provided."); return; }
 
@@ -157,37 +298,153 @@ function launch(scenarioDoc) {
     setTimeout(() => {
         if (window.__DoG_drawLoopActive) {
             // Draw loop is already active — the world is fully generated.
-            // Apply the scenario directly without going through initGame again.
-            console.log("[ScenarioRuntime] Game already running, applying scenario in-place.");
-            window.__DoG_gameMode = "custom";
-            try {
-                _applyToLiveEngine(rt.pending);
-                rt.active = rt.pending;
-            } catch (err) {
-                console.error("[ScenarioRuntime] Failed to apply scenario in-place:", err);
+            // HOWEVER: story maps have their own terrain generators and cannot
+            // be applied in-place over a stale sandbox/story world.  If this
+            // is a story doc, fall through to the terrain-regen routing below
+            // by resetting the draw-loop flag.  Non-story custom scenarios are
+            // safe to apply in-place as before.
+            const _inPlaceDoc  = rt.pending;
+            const _inPlaceMeta = (_inPlaceDoc && _inPlaceDoc.meta)     || {};
+            const _inPlaceFacs = Object.keys((_inPlaceDoc && _inPlaceDoc.factions) || {});
+            const _inPlaceIsStory =
+                _inPlaceMeta.campaignScript === 'story1' ||
+                _inPlaceMeta.importedFrom   === 'story1' ||
+                _inPlaceFacs.includes('Kamakura Shogunate') ||
+                _inPlaceMeta.campaignScript === 'story2' ||
+                _inPlaceMeta.importedFrom   === 'story2' ||
+                _inPlaceFacs.includes('Xiaran Dominion');
+
+            if (_inPlaceIsStory) {
+                // Let the story routing block below handle it with a fresh initGame_storyN call.
+                console.log("[ScenarioRuntime] Story doc detected on active draw loop — deferring to story terrain regen.");
+                window.__DoG_drawLoopActive = false;
+                // fall through to story routing below
+            } else {
+                // Original in-place path for sandbox/custom scenarios.
+                console.log("[ScenarioRuntime] Game already running, applying scenario in-place.");
+                window.__DoG_gameMode = "custom";
+                try {
+                    _applyToLiveEngine(rt.pending);
+                    rt.active = rt.pending;
+                    _maybeBootStory1Campaign(rt.active);  // Story 1 campaign boot
+                    _maybeBootStory2Campaign(rt.active);  // Story 2 campaign boot
+                } catch (err) {
+                    console.error("[ScenarioRuntime] Failed to apply scenario in-place:", err);
+                }
+                rt.pending = null;
+                return;
             }
-            rt.pending = null;
-            return;
         }
 
-        // Game is not yet running — queue a one-shot callback so that
-        // save_system.js fires it after initGame resolves, before applying any
-        // pending player save.  This is the cooperative v4.0 hook path.
-        _ensurePostInitHook();
+        // Game is not yet running — choose the correct engine boot path.
+        //
+        // ── Story Campaign Routing ────────────────────────────────────────────
+        // Previously launch() ALWAYS called window.initGame() (sandbox China
+        // terrain), then _applyToLiveEngine() tried to reskin it from the compact
+        // {e,m,r} tiles — producing a black or wrong-terrain map for both stories.
+        //
+        // Now we detect story1/story2 by meta + faction and call the story-specific
+        // initGame directly.  That gives proper Hexi Corridor / Hakata Bay terrain.
+        //
+        // We pre-seed window.__activeScenario BEFORE calling the story initGame so
+        // its internal priority chain (window.Story_2_Data → __activeScenario →
+        // fallback) picks up the real scenario doc from the file rather than the
+        // embedded snapshot.
+        //
+        // Guards that must be reset so the story initGame runs fully:
+        //   __gameStarted — both story initGames bail immediately if true
+        //   __suzhouInstalled / __hakataBayInstalled — one-shot install guards
+        //
+        // After the story initGame resolves (it is async), we finalize the
+        // runtime and apply any extras the story initGame doesn't handle
+        // (diplomacy matrix from the scenario doc).
+        // ─────────────────────────────────────────────────────────────────────
+        const _lPendingDoc  = rt.pending;
+        const _lPendingMeta = (_lPendingDoc && _lPendingDoc.meta)     || {};
+        const _lPendingFacs = Object.keys((_lPendingDoc && _lPendingDoc.factions) || {});
 
-        // Start the engine (mirrors menu.js's startGameSafe path).
-        if (window.__gameStarted) {
-            // Defensive: __gameStarted is true but draw loop isn't active yet —
-            // reset the flag so the guard inside patchInitGame doesn't block us.
-            console.warn("[ScenarioRuntime] __gameStarted=true but draw loop inactive — resetting guard.");
-            window.__gameStarted         = false;
-            window.__DoG_gameInitRunning = false;
-        }
-        window.__gameStarted = true;
-        if (typeof window.initGame === "function") {
-            window.initGame();
+        const _lIsStory2 =
+            _lPendingMeta.campaignScript === 'story2' ||
+            _lPendingMeta.importedFrom   === 'story2' ||
+            _lPendingFacs.includes('Xiaran Dominion')||
+            _lPendingFacs.includes('Xia');
+
+        const _lIsStory1 =
+            _lPendingMeta.campaignScript === 'story1' ||
+            _lPendingMeta.importedFrom   === 'story1' ||
+            _lPendingFacs.includes('Kamakura Shogunate');
+
+     if (_lIsStory2 && typeof window.initGame_story2 === 'function') {
+            // ── Story 2 path ─────────────────────────────────────────────────
+            console.log('[ScenarioRuntime] Story 2 doc detected — routing to initGame_story2() for Hexi terrain.');
+            window.__gameStarted          = false;   // reset so story2 guard does not bail
+            window.__DoG_gameInitRunning  = false;
+            window.__suzhouInstalled      = false;   // reset one-shot guard so install runs fresh
+            
+            // ✅ ADD THIS LINE RIGHT HERE:
+            window.__campaignStory2Active = false;   // reset Story 2 state to prevent data leakage
+            window.__mc_installed         = false;   // FIX: reset install guard so MongolConquestScenario
+                                                     // reinstalls cleanly on every launch (without this,
+                                                     // re-launching from the menu skips install entirely
+                                                     // because the guard from the previous session is still true)
+            
+            window.__activeScenario       = _lPendingDoc;  // pre-seed priority chain in initGame_story2
+            window.initGame_story2().then(function () {
+                window.__DoG_gameMode = 'custom';
+                rt.active             = rt.pending;
+                rt.pending            = null;
+                rt.postInitHooked     = false;
+                // Apply diplomacy matrix from the scenario doc (initGame_story2
+                // does not call applyDiplomacyMatrix with custom scenario data).
+                const _sd = rt.active;
+                if (_sd && _sd.initialDiplomacy && typeof window.applyDiplomacyMatrix === 'function') {
+                    try { window.applyDiplomacyMatrix(_sd.initialDiplomacy); }
+                    catch (e) { console.warn('[ScenarioRuntime] applyDiplomacyMatrix failed:', e); }
+                }
+                console.log('[ScenarioRuntime] ✅ Story 2 post-init via initGame_story2() complete.');
+            }).catch(function (err) {
+                console.error('[ScenarioRuntime] initGame_story2() threw:', err);
+            });
+
         } else {
-            console.error("[ScenarioRuntime] window.initGame not found — engine probably not loaded.");
+            // ── Story 1 falls through to the standard postInitHook path ──────
+            // Story 1 uses the ORIGINAL path (same as sandbox/custom scenarios):
+            //   1. _ensurePostInitHook() queues _scenarioPostInit on __DoG_postInitCallbacks
+            //   2. window.initGame() runs (sandbox China terrain — just a scaffold)
+            //   3. save_system.js fires __DoG_postInitCallbacks after initGame resolves
+            //   4. _scenarioPostInit calls _applyToLiveEngine(rt.pending) — where
+            //      rt.pending IS the Story_1_Dev.js scenarioDoc — and rewrites all
+            //      terrain tiles and cities from the JSON.
+            //   5. _applyToLiveEngine calls _maybeBootStory1Campaign which installs
+            //      HakataBayScenario triggers.
+            //
+            // DO NOT route Story 1 through initGame_story1() here. That function
+            // generates a PROCEDURAL scaffold only and never calls _applyToLiveEngine
+            // with the JSON doc. The Story_1_Dev.js tile/city data is therefore
+            // NEVER applied when routed that way — you always get the procedural map.
+            //
+            // initGame_story1() is only for the import tool (senario_devmade_import.js)
+            // when capturing the dev map for the first time.
+            if (_lIsStory1) {
+                console.log('[ScenarioRuntime] Story 1 doc detected — using standard postInitHook path (JSON reskin via _applyToLiveEngine).');
+                window.__campaignStory1Active = false;  // reset so install() runs fresh
+                window.__hakataBayInstalled   = false;
+            }
+            // ── Sandbox / custom scenario path (original behaviour) ───────────
+            _ensurePostInitHook();
+            if (window.__gameStarted) {
+                // Defensive: __gameStarted is true but draw loop isn't active yet —
+                // reset the flag so the guard inside patchInitGame doesn't block us.
+                console.warn("[ScenarioRuntime] __gameStarted=true but draw loop inactive — resetting guard.");
+                window.__gameStarted         = false;
+                window.__DoG_gameInitRunning = false;
+            }
+            window.__gameStarted = true;
+            if (typeof window.initGame === "function") {
+                window.initGame();
+            } else {
+                console.error("[ScenarioRuntime] window.initGame not found — engine probably not loaded.");
+            }
         }
     }, 100);
 }
@@ -229,6 +486,8 @@ function _ensurePostInitHook() {
         try {
             _applyToLiveEngine(rt.pending);
             rt.active = rt.pending;
+            _maybeBootStory1Campaign(rt.active);  // Story 1 campaign boot
+            _maybeBootStory2Campaign(rt.active);  // Story 2 campaign boot
         } catch (err) {
             console.error("[ScenarioRuntime] Failed to apply scenario post-init:", err);
         }
@@ -326,6 +585,36 @@ function _applyToLiveEngine(scenarioDoc) {
     // We ALWAYS hard-reset __npcSpawnBans to exactly what this scenario defines —
     // never merge/push onto whatever stale state a previous session left behind.
     // This is the authoritative source of truth for the lifetime of this scenario.
+    //
+    // CAMPAIGN STORY FIX: Exported JSON docs (Story_N_Dev.js) are produced by the
+    // scenario editor which has no knowledge of story-specific spawn bans, so their
+    // startingNpcBans is always {factions:[], roles:[]}.  For campaign story docs
+    // we merge the bans that the campaign module stamped at module-load time
+    // (window.__npcSpawnBans) into scenarioDoc.startingNpcBans BEFORE the hard-reset
+    // overwrites them.  This means the JSON never needs to be touched — the campaign
+    // scenario module (e.g. MongolConquestScenario) is the authoritative source for
+    // its own spawn bans, and the runtime preserves them correctly here.
+    (function _mergeCampaignBansIntoDoc() {
+        var _preBans = window.__npcSpawnBans;
+        if (!_preBans) return;  // nothing was stamped — nothing to merge
+        var _docBans = scenarioDoc.startingNpcBans;
+        if (!_docBans) { scenarioDoc.startingNpcBans = { factions: [], roles: [] }; _docBans = scenarioDoc.startingNpcBans; }
+        // Merge roles: add any module-stamped role that the doc doesn't already list
+        if (Array.isArray(_preBans.roles)) {
+            _preBans.roles.forEach(function(r) {
+                if (!_docBans.roles) _docBans.roles = [];
+                if (!_docBans.roles.includes(r)) _docBans.roles.push(r);
+            });
+        }
+        // Merge factions: same pattern
+        if (Array.isArray(_preBans.factions)) {
+            _preBans.factions.forEach(function(f) {
+                if (!_docBans.factions) _docBans.factions = [];
+                if (!_docBans.factions.includes(f)) _docBans.factions.push(f);
+            });
+        }
+    })();
+
     window.__npcSpawnBans = {
         factions: ((scenarioDoc.startingNpcBans && scenarioDoc.startingNpcBans.factions) || []).slice(),
         roles:    ((scenarioDoc.startingNpcBans && scenarioDoc.startingNpcBans.roles)    || []).slice()
@@ -469,12 +758,76 @@ function _reskinWorldMap(scenarioDoc, worldMap, TILE_SIZE) {
             // Mutate the engine's tile object IN PLACE so all engine refs stay valid.
             const dst = worldMap[i][j];
             if (!dst) continue;
-            dst.name       = src.name;
-            dst.color      = src.color;
-            dst.speed      = src.speed;
-            dst.impassable = !!src.impassable;
-            dst.e          = src.e;
-            dst.m          = src.m;
+
+            // ── Compact-tile hydration ────────────────────────────────────────
+            // Story_N_Dev.js and the exported JSON store tiles in the compact
+            // {e, m, r} format produced by senario_devmade_import.js (raw noise
+            // values only — no name/color/speed).  Without this hydration step,
+            // dst.name/color/speed would all be set to `undefined`, causing
+            // _repaintBgCanvas to paint `fillStyle = undefined` (black map) and
+            // breaking movement speed across the whole world.
+            // We derive the biome properties using the IDENTICAL thresholds used
+            // by sandboxmode_overworld.js PALETTE + tile-assignment block.
+            const _e = src.e, _m = src.m;
+            const _r = src.r; // isRiver flag
+            let _name, _color, _speed, _impassable = false;
+
+            if (src.name) {
+                // Full tile format (from editor or older export) — use as-is.
+                _name       = src.name;
+                _color      = src.color;
+                _speed      = src.speed;
+                _impassable = !!src.impassable;
+            } else if (_e !== undefined && _m !== undefined) {
+                // Compact {e, m, r} format — derive biome from noise values.
+                // These thresholds + colors MUST stay in sync with sandboxmode_overworld.js.
+                const _PAL = {
+                    ocean:     "#2b4a5f", coastal: "#3a5f75",
+                    desert:    "#bfa373", dune:    "#cfae7e",
+                    plains:    "#a3a073", meadow:  "#6b7a4a",
+                    forest:    "#425232", jungle:  "#244222",
+                    highlands: "#626b42", mountains: "#3E2723", snow: "#7B5E3F"
+                };
+                if (_r) {
+                    _name = "River";          _color = _PAL.coastal;   _speed = 1.5;
+                } else if (_e < 0.25) {
+                    _name = "Ocean";          _color = _PAL.ocean;     _speed = 1.5;
+                } else if (_e < 0.35) {
+                    _name = "Coastal";        _color = _PAL.coastal;   _speed = 1.3;
+                } else if (_e > 0.82) {
+                    _name = "Large Mountains";_color = _PAL.snow;      _speed = 0.3;
+                } else if (_e > 0.72) {
+                    _name = "Mountains";      _color = _PAL.mountains; _speed = 0.4;
+                } else if (_e > 0.58) {
+                    if (_m < 0.2 || _m <= 0.4) {
+                        _name = "Highlands";  _color = _PAL.highlands; _speed = 0.45;
+                    } else {
+                        _name = "Dense Forest";_color = _PAL.jungle;   _speed = 0.3;
+                    }
+                } else {
+                    if (_m < 0.25) {
+                        _name = "Desert";     _color = _PAL.desert;    _speed = 0.4;
+                    } else if (_m < 0.35) {
+                        _name = "Dunes";      _color = _PAL.dune;      _speed = 0.65;
+                    } else if (_m > 0.55) {
+                        _name = "Forest";     _color = _PAL.forest;    _speed = 0.4;
+                    } else if (_m > 0.42) {
+                        _name = "Plains";     _color = _PAL.meadow;    _speed = 0.85;
+                    } else {
+                        _name = "Steppes";    _color = _PAL.plains;    _speed = 0.8;
+                    }
+                }
+            } else {
+                // No usable data in src — skip this tile entirely.
+                continue;
+            }
+
+            dst.name       = _name;
+            dst.color      = _color;
+            dst.speed      = _speed;
+            dst.impassable = _impassable;
+            dst.e          = _e !== undefined ? _e : dst.e;
+            dst.m          = _m !== undefined ? _m : dst.m;
             // We do not touch dst.id (engine may use it).
         }
     }
@@ -647,7 +1000,11 @@ function _paintCosmeticDetails(scenarioDoc) {
                 }
             }
             // ── Other land tiles get a faint grass stroke ─────────────
-            else if (tile.name !== "Ocean" && tile.name !== "River" && tile.name !== "Coastal") {
+            // Mountains and Large Mountains are excluded — they have their own
+            // PHASE A/B painter and must not receive grass strokes, which were
+            // producing the unwanted brown contour lines around peaks.
+            else if (tile.name !== "Ocean" && tile.name !== "River" && tile.name !== "Coastal" &&
+                     !tile.name.includes("Mountain")) {
                 if (Math.random() > 0.98) {
                     bgc.strokeStyle = "rgba(30, 50, 20, 0.3)";
                     bgc.lineWidth = 1;
@@ -755,6 +1112,81 @@ function _paintCosmeticDetails(scenarioDoc) {
             if (tile.name && (tile.name.includes("Mountain") || tile.name.includes("Large Mountains"))) {
                 const isDryMountains = tile.name.includes("Large Mountains");
                 const isExtremePeak  = tile.name === "Large Mountains";
+
+                // ═══════════════════════════════════════════════════════════
+                // PHASE A — Sub-pixel ridge shading (ALL mountains)
+                // Large Mountains: snow/grey palette (_sbPickMtnColor)
+                // Regular Mountains: olive-green palette (_sbPickMtnColorGreen)
+                // ═══════════════════════════════════════════════════════════
+                if (typeof _sbRidgeMtnElev === 'function' &&
+                    typeof _sbRgbStr       === 'function' &&
+                    typeof fbm             === 'function') {
+
+                    const _colorFn = (isDryMountains && typeof _sbPickMtnColor === 'function')
+                        ? _sbPickMtnColor
+                        : (typeof _sbPickMtnColorGreen === 'function' ? _sbPickMtnColorGreen : null);
+
+                    if (_colorFn) {
+                        const _WORLD_W = bg.width;
+                        const _WORLD_H = bg.height;
+                        const _SUB     = isMobile ? 8 : 4;
+                        const _dNx     = _SUB * 0.55 / _WORLD_W;
+                        const _dNy     = _SUB * 0.55 / _WORLD_H;
+
+                        for (let _cx = 0; _cx < TILE_SIZE; _cx += _SUB) {
+                            for (let _cy = 0; _cy < TILE_SIZE; _cy += _SUB) {
+                                const _snx = (px + _cx + _SUB * 0.5) / _WORLD_W;
+                                const _sny = (py + _cy + _SUB * 0.5) / _WORLD_H;
+
+                                const _eC = _sbRidgeMtnElev(_snx,          _sny        );
+                                const _eR = _sbRidgeMtnElev(_snx + _dNx,   _sny        );
+                                const _eL = _sbRidgeMtnElev(_snx - _dNx,   _sny        );
+                                const _eD = _sbRidgeMtnElev(_snx,           _sny + _dNy);
+                                const _eU = _sbRidgeMtnElev(_snx,           _sny - _dNy);
+
+                                const _gx = _eR - _eL;
+                                const _gy = _eD - _eU;
+                                let _shading = 0.5 - (_gx * (-0.7071) + _gy * (-0.7071)) * 18.0;
+                                if (_shading < 0) _shading = 0;
+                                if (_shading > 1) _shading = 1;
+
+                                if (_eC > _eL && _eC > _eR && _eC > _eU && _eC > _eD && _eC > 0.55)
+                                    _shading = Math.min(1, _shading + 0.18);
+                                if (_eC < _eL && _eC < _eR && _eC < _eU && _eC < _eD && _eC < 0.42)
+                                    _shading = Math.max(0, _shading - 0.20);
+
+                                const _vegN = fbm(_snx * 7 + 4.4, _sny * 7 + 9.1);
+                                const _rgb  = _colorFn(_eC, _shading, _vegN);
+                                bgc.fillStyle = _sbRgbStr(_rgb[0], _rgb[1], _rgb[2]);
+                                bgc.fillRect(px + _cx, py + _cy, _SUB, _SUB);
+                            }
+                        }
+
+                        // Snow speckles only on Large Mountains
+                        if (isDryMountains) {
+                            const _nSpeck = tile.e > 0.82 ? 3 : tile.e > 0.74 ? 1 : 0;
+                            for (let _k = 0; _k < _nSpeck; _k++) {
+                                bgc.fillStyle = "rgba(244,248,252,"
+                                    + (0.40 + hash(i * 3 + _k, j) * 0.32).toFixed(2) + ")";
+                                bgc.beginPath();
+                                bgc.arc(
+                                    px + hash(i,       j + _k) * TILE_SIZE,
+                                    py + hash(i + _k,  j      ) * TILE_SIZE,
+                                    0.5 + hash(j, i + _k) * 0.7,
+                                    0, Math.PI * 2
+                                );
+                                bgc.fill();
+                            }
+                        }
+                    }
+                }
+
+                // ═══════════════════════════════════════════════════════════
+                // PHASE B — Snowy peak icons
+                // Deterministic jitter (hash not Math.random) so icons are
+                // stable across map redraws.  Elevation-weighted alpha means
+                // high-ridge peaks are more opaque, fringe peaks fade in.
+                // ═══════════════════════════════════════════════════════════
                 const peakSpawnThreshold = isMobile ? 0.991 : 0.984;
 
                 if (hash(i, j) > peakSpawnThreshold) {
@@ -776,22 +1208,27 @@ function _paintCosmeticDetails(scenarioDoc) {
                         }
                     }
                     if (!isInvalidTerrain) {
-                        const scaleMult = isDryMountains ? 4 : 2;
-                        const randomXOff = (Math.random() - 0.5) * 120;
-                        const randomYOff = (Math.random() - 0.5) * 120;
-                        const finalPx = px + randomXOff;
-                        const finalPy = py + randomYOff;
-                        const heightVar = (Math.random() - 0.5) * (15 * (scaleMult / 4));
-                        const widthVar  = (Math.random() - 0.5) * (30 * (scaleMult / 4));
-                        const baseHeight = Math.max(8, (tile.e - 0.5) * 25 + 5);
-                        const height = (baseHeight * (scaleMult / 2.5)) + heightVar;
-                        const width  = (TILE_SIZE * scaleMult) + widthVar;
-                        let alpha = 0.75;
+                        const scaleMult  = isDryMountains ? 4 : 2;
+                        // Deterministic positional jitter — no Math.random → no shimmer
+                        const _ox        = (hash(i * 211 + 1, j * 197 + 3) - 0.5) * 120;
+                        const _oy        = (hash(i * 197 + 5, j * 211 + 7) - 0.5) * 120;
+                        const finalPx    = px + _ox;
+                        const finalPy    = py + _oy;
+                        const heightVar  = (hash(i + 100, j + 200) - 0.5) * (15 * (scaleMult / 4));
+                        const widthVar   = (hash(i + 200, j + 100) - 0.5) * (30 * (scaleMult / 4));
+                        const baseHeight = Math.max(8, ((tile.e || 0.75) - 0.5) * 25 + 5);
+                        const height     = (baseHeight * (scaleMult / 2.5)) + heightVar;
+                        const width      = (TILE_SIZE * scaleMult) + widthVar;
+                        // Elevation-weighted alpha: higher peaks are more opaque
+                        // (mirrors story2 PHASE 5c: 0.72–0.94 range)
+                        let alpha = isDryMountains
+                            ? Math.min(0.94, 0.72 + ((tile.e || 0.75) - 0.50) * 0.22)
+                            : 0.75;
                         const taperPad = 500;
-                        if (px < taperPad)         alpha = Math.min(alpha, px / taperPad);
-                        if (px > bg.width - taperPad)  alpha = Math.min(alpha, (bg.width  - px) / taperPad);
-                        if (py < taperPad)         alpha = Math.min(alpha, py / taperPad);
-                        if (py > bg.height - taperPad) alpha = Math.min(alpha, (bg.height - py) / taperPad);
+                        if (px < taperPad)                  alpha = Math.min(alpha, px / taperPad);
+                        if (px > bg.width  - taperPad)      alpha = Math.min(alpha, (bg.width  - px) / taperPad);
+                        if (py < taperPad)                  alpha = Math.min(alpha, py / taperPad);
+                        if (py > bg.height - taperPad)      alpha = Math.min(alpha, (bg.height - py) / taperPad);
 
                         bgc.save();
                         bgc.globalAlpha = alpha;
@@ -804,62 +1241,7 @@ function _paintCosmeticDetails(scenarioDoc) {
                     }
                 }
 
-                // Timberline trees on mountain tiles
-                const treeDensity = isDryMountains ? 0.95 : 0.60;
-                const maxTrees    = isDryMountains ? 1 : 2;
-                for (let t = 0; t < maxTrees; t++) {
-                    if (Math.random() > treeDensity) {
-                        const tX = px + TILE_SIZE / 2 + ((Math.random() - 0.5) * TILE_SIZE * 0.9);
-                        const tY = py + TILE_SIZE / 2 + ((Math.random() - 0.5) * TILE_SIZE * 0.9);
-                        const treeRand = Math.random();
-                        bgc.save();
-                        if (isDryMountains) {
-                            // Highland pine — tiered
-                            const tiers = 2 + Math.floor(Math.random() * 2);
-                            const treeWidth = TILE_SIZE * (0.4 + Math.random() * 0.3);
-                            bgc.fillStyle = `rgb(${15 + Math.random() * 10}, ${25 + Math.random() * 10}, 20)`;
-                            for (let k = 0; k < tiers; k++) {
-                                const levelY = tY - (k * 3);
-                                const levelW = treeWidth * (1 - (k * 0.3));
-                                bgc.beginPath();
-                                bgc.moveTo(tX, levelY - 5);
-                                bgc.lineTo(tX - levelW, levelY);
-                                bgc.lineTo(tX + levelW, levelY);
-                                bgc.closePath();
-                                bgc.fill();
-                            }
-                        } else if (treeRand > 0.6) {
-                            // Southern banyan
-                            const canopy = TILE_SIZE * (0.5 + Math.random() * 0.4);
-                            const leafColors = ["#1A2F18", "#0D1F1D", "#223311", "#142414"];
-                            for (let k = 0; k < 2; k++) {
-                                bgc.fillStyle = leafColors[k];
-                                const offX = (Math.random() - 0.5) * canopy;
-                                const offY = (Math.random() - 0.5) * canopy;
-                                bgc.beginPath();
-                                bgc.ellipse(tX + offX, tY + offY, canopy * 0.6, canopy * 0.4, Math.random() * Math.PI, 0, Math.PI * 2);
-                                bgc.fill();
-                            }
-                        } else {
-                            // Bamboo thicket
-                            for (let s = 0; s < 2; s++) {
-                                const sX = tX + (s * 2) - 1;
-                                const sH = 6 + Math.random() * 6;
-                                bgc.strokeStyle = "#2D3B1E";
-                                bgc.lineWidth = 1.2;
-                                bgc.beginPath();
-                                bgc.moveTo(sX, tY);
-                                bgc.lineTo(sX + (Math.random() - 0.5), tY - sH);
-                                bgc.stroke();
-                                bgc.fillStyle = "#3E4D26";
-                                bgc.beginPath();
-                                bgc.arc(sX, tY - sH, 1.5, 0, Math.PI * 2);
-                                bgc.fill();
-                            }
-                        }
-                        bgc.restore();
-                    }
-                }
+                // [Timberline trees removed]
             }
         }
     }
@@ -908,12 +1290,12 @@ function _fallbackGetMountainAlpha(size, tileSize) {
 }
 function _fallbackDrawMountain(ctx, x, y, width, height, tileSize) {
     const alpha = _fallbackGetMountainAlpha(height, tileSize);
-    ctx.fillStyle = `rgba(62, 52, 42, ${alpha})`;
+    ctx.fillStyle = `rgba(0, 0, 0, 0.30)`;  // was dark brown rgba(62,52,42) — replaced with neutral 30% overlay
     ctx.beginPath();
     ctx.moveTo(x - width / 2, y + tileSize);
     ctx.quadraticCurveTo(x, y + tileSize - (height * 1.4), x + width / 2, y + tileSize);
     ctx.fill();
-    ctx.fillStyle = `rgba(117, 102, 84, ${Math.min(0.98, alpha + 0.02)})`;
+    ctx.fillStyle = `rgba(0, 0, 0, 0.18)`;  // was mid-brown rgba(117,102,84) — softened to 18% overlay
     for (let b = 0; b < 2; b++) {
         const shift = (b - 0.5) * (width * 0.3);
         const bWidth = width * 0.6;
@@ -1328,7 +1710,43 @@ return {
         console.log("[ScenarioRuntime] prepareRestore() — scenario queued for post-init application.");
     },
 
-    _state: rt
+    _state: rt,
+
+    /**
+     * applyDevScenario(scenarioDoc)
+     *
+     * Called by initGame_story2 (and any future story initGame) AFTER the
+     * worldMap scaffold has been built by generateMap_storyN().
+     *
+     * Delegates directly to the private _applyToLiveEngine() which:
+     *   • Reskins all worldMap tiles from the JSON tile data
+     *   • Replaces window.cities_sandbox / window.cities from the JSON cities
+     *   • Sets window.__activeScenario to the supplied doc
+     *   • Fires _maybeBootStory1Campaign / _maybeBootStory2Campaign as needed
+     *
+     * This lets story initGames load their imported JSON map without going
+     * through the full ScenarioRuntime.launch() flow (which re-runs menus etc).
+     */
+    applyDevScenario: function(scenarioDoc) {
+        if (!scenarioDoc) {
+            console.error("[ScenarioRuntime] applyDevScenario() called with no scenarioDoc.");
+            return;
+        }
+        _migrateScenarioShape(scenarioDoc);
+        window.__activeScenario = scenarioDoc;
+        _applyToLiveEngine(scenarioDoc);
+
+        // FIX: _applyToLiveEngine does NOT call _maybeBootStory2Campaign —
+        // that call only existed in the launch() paths.  Without it, the
+        // initGame_story2 path (which calls applyDevScenario directly) never
+        // booted the MongolConquestScenario triggers, so the convoy was never
+        // spawned and the loading screen never dismissed.
+        // We call it here so both paths (launch + applyDevScenario) are covered.
+        _maybeBootStory1Campaign(scenarioDoc);
+        _maybeBootStory2Campaign(scenarioDoc);
+
+        console.log("[ScenarioRuntime] applyDevScenario() complete.");
+    }
 };
 
 })();

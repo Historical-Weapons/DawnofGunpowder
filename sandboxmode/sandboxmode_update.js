@@ -215,7 +215,7 @@ function calculateMovement(speed, map, tileSize, cols, rows, isCity = false) {
             ntx < (cols || 0) &&
             nty >= 0 &&
             nty < (rows || 0) &&
-            (destTile?.impassable === false || isWaterTile)
+            (!destTile?.impassable || isWaterTile)
         ) {
             player.x = nextX;
             player.y = nextY;
@@ -306,7 +306,8 @@ function enterOverworldMode() {
     // so this is a no-op during scenario play.
     // IMPORTANT: do NOT touch __activeScenario here — clearing it mid-session
     // destroys the trigger/dialogue system every time the player exits a battle.
-    if (!window.__campaignStory1Active) {
+    // FIX: protect both Story 1 and Story 2 campaign sessions.
+    if (!window.__campaignStory1Active && !window.__campaignStory2Active) {
         window.__npcSpawnBans      = null;
         window.__mongolWaveAllowed = false;
     }
@@ -615,6 +616,17 @@ function update() {
             let desertFactor = (typeof window.campCohesionDesertionFactor === 'function') ? window.campCohesionDesertionFactor() : 1;
             let diffMulti = (typeof window.attritionDifficultyMultiplier !== 'undefined') ? window.attritionDifficultyMultiplier : 1.0;
 
+            // ── Per-story attrition override ─────────────────────────────────────
+            // Allows each story campaign to tune resource burn independently.
+            // 1.0 = normal sandbox rate.  0.2 = 5× slower (Story 1 pacing).
+            // Add future stories here — they are checked in order so only the
+            // first matching flag applies.
+            let storyAttritionMultiplier = 1.0;
+            if      (window.__campaignStory1Active) storyAttritionMultiplier = 0.2;  // Story 1 — Hakata Bay: 5× slower
+            else if (window.__campaignStory2Active) storyAttritionMultiplier = 0.2;  // Story 2 — Suzhou: 5× slower
+            // else if (window.__campaignStory3Active) storyAttritionMultiplier = X; // Story 3 — placeholder
+            // else if (window.__campaignStory4Active) storyAttritionMultiplier = X; // Story 4 — placeholder
+
             // --- PRECISE WAGE CALCULATION ---
             let totalWageCost = 0;
             if (player.roster && player.roster.length > 0) {
@@ -628,6 +640,7 @@ function update() {
             }
 
             totalWageCost *= diffMulti;
+            totalWageCost *= storyAttritionMultiplier;  // story-specific rate (e.g. 0.2 = 5× slower)
             player.pendingWages = (player.pendingWages || 0) + totalWageCost;
             let wagesToPay = Math.floor(player.pendingWages);
 
@@ -644,7 +657,7 @@ function update() {
                 player.pendingWages -= wagesToPay;
             }
 
-            let foodCost = (2 + Math.floor(player.troops / 3)) * diffMulti;
+            let foodCost = (2 + Math.floor(player.troops / 3)) * diffMulti * storyAttritionMultiplier;
 
             // CASCADING FAILURES
             if (outOfGold) {
@@ -760,7 +773,7 @@ function update() {
                 // is set.
                 const _introDone   = !!window.__DoG_introDone;
                 const _bootMs      = window.__DoG_scenarioBootTime;
-                const _inCampaign  = !!window.__campaignStory1Active;
+                const _inCampaign  = !!window.__campaignStory1Active || !!window.__campaignStory2Active;
                 const _bootBlocking = _inCampaign && !_introDone &&
                     _bootMs && (Date.now() - _bootMs) < 5000;
 
@@ -786,9 +799,10 @@ function update() {
                         keys['w'] = keys['a'] = keys['s'] = keys['d'] = keys['arrowup'] = keys['arrowleft'] = keys['arrowdown'] = keys['arrowright'] = false;
                     }
 
-                    // Refresh recruit + food button state whenever we enter a new city
-                    if (typeof updateRecruitButton === 'function') updateRecruitButton();
-                    if (typeof updateBuyFoodButton === 'function') updateBuyFoodButton();
+                    // Refresh recruit + food + visit-settlement button state whenever we enter a new city
+                    if (typeof updateRecruitButton         === 'function') updateRecruitButton();
+                    if (typeof updateBuyFoodButton         === 'function') updateBuyFoodButton();
+                    if (typeof updateVisitSettlementButton === 'function') updateVisitSettlementButton();
                 }
 
                 // Guard: activeCity may still be null during story mode if the
@@ -1769,9 +1783,113 @@ function showGameToast(msg, isError) {
     el._t = setTimeout(() => { el.style.opacity = '0'; }, isError ? 3000 : 2000);
 }
 
+// ---------------------------------------------------------------------------
+// UI: Update the Visit Settlement button enabled/disabled state
+// ---------------------------------------------------------------------------
+// The global flag window.__visitSettlementEnabled controls access.
+//   • undefined / true  → button is enabled (default sandbox behaviour)
+//   • false             → button is disabled (scenario gate, e.g. Hakata Bay
+//                         disables it until after the Mizuki teleportation so
+//                         the player cannot duck into a city during a cutscene)
+//
+// Scenarios set the flag via the trigger actions  enable_visit_settlement /
+// disable_visit_settlement defined in scenario_triggers.js.
+// ---------------------------------------------------------------------------
+function updateVisitSettlementButton() {
+    const btn = document.getElementById('visit-settlement-btn');
+    if (!btn) return;
+
+    // Default to enabled when the flag has never been set
+    const enabled = (window.__visitSettlementEnabled !== false);
+
+    if (enabled) {
+        btn.disabled          = false;
+        btn.style.opacity     = "1";
+        btn.style.cursor      = "pointer";
+        btn.style.pointerEvents = "auto";
+        // Restore label in case it was changed
+        if (btn.innerHTML !== "Visit Settlement") btn.innerHTML = "Visit Settlement";
+    } else {
+        btn.disabled          = true;
+        btn.style.opacity     = "0.40";
+        btn.style.cursor      = "not-allowed";
+        btn.style.pointerEvents = "none";
+        btn.innerHTML =
+            `🚫 Visit Settlement` +
+            `<br><small style="font-size:0.72em;color:#ff9999;font-weight:normal;">` +
+            `Not available right now</small>`;
+    }
+
+    // ── Mirror the same gate onto Recruit and Upgrade Troops buttons ─────────
+    // Locked/unlocked in sync with Visit Settlement so the player cannot access
+    // city functions during scripted beach-phase cutscenes in story missions.
+    // Re-enabled automatically when enable_visit_settlement fires (after Mizuki).
+    const recruitBtn = document.getElementById('recruit-militia-btn');
+    if (recruitBtn) {
+        if (enabled) {
+            // Only restore if it was locked by this system (check our marker)
+            if (recruitBtn._visitGateLocked) {
+                recruitBtn.disabled            = false;
+                recruitBtn.style.opacity       = "1";
+                recruitBtn.style.cursor        = "pointer";
+                recruitBtn.style.pointerEvents = "auto";
+                if (recruitBtn._visitGateLabel) {
+                    recruitBtn.innerHTML = recruitBtn._visitGateLabel;
+                    delete recruitBtn._visitGateLabel;
+                }
+                delete recruitBtn._visitGateLocked;
+            }
+        } else {
+            if (!recruitBtn._visitGateLocked) {
+                recruitBtn._visitGateLocked = true;
+                recruitBtn._visitGateLabel  = recruitBtn.innerHTML;
+            }
+            recruitBtn.disabled            = true;
+            recruitBtn.style.opacity       = "0.40";
+            recruitBtn.style.cursor        = "not-allowed";
+            recruitBtn.style.pointerEvents = "none";
+            recruitBtn.innerHTML =
+                `🚫 Recruit` +
+                `<br><small style="font-size:0.72em;color:#ff9999;font-weight:normal;">` +
+                `Not available right now</small>`;
+        }
+    }
+
+    const upgradeBtn = document.getElementById('upgrade-troops-btn');
+    if (upgradeBtn) {
+        if (enabled) {
+            if (upgradeBtn._visitGateLocked) {
+                upgradeBtn.disabled            = false;
+                upgradeBtn.style.opacity       = "1";
+                upgradeBtn.style.cursor        = "pointer";
+                upgradeBtn.style.pointerEvents = "auto";
+                if (upgradeBtn._visitGateLabel) {
+                    upgradeBtn.innerHTML = upgradeBtn._visitGateLabel;
+                    delete upgradeBtn._visitGateLabel;
+                }
+                delete upgradeBtn._visitGateLocked;
+            }
+        } else {
+            if (!upgradeBtn._visitGateLocked) {
+                upgradeBtn._visitGateLocked = true;
+                upgradeBtn._visitGateLabel  = upgradeBtn.innerHTML;
+            }
+            upgradeBtn.disabled            = true;
+            upgradeBtn.style.opacity       = "0.40";
+            upgradeBtn.style.cursor        = "not-allowed";
+            upgradeBtn.style.pointerEvents = "none";
+            upgradeBtn.innerHTML =
+                `🚫 Upgrade Troops` +
+                `<br><small style="font-size:0.72em;color:#ff9999;font-weight:normal;">` +
+                `Not available right now</small>`;
+        }
+    }
+}
+
 // Expose to global scope (called from index.html inline onclick fallbacks)
-window.recruitMilitiaFromCity = recruitMilitiaFromCity;
-window.buyFoodFromCity        = buyFoodFromCity;
-window.updateRecruitButton    = updateRecruitButton;
-window.updateBuyFoodButton    = updateBuyFoodButton;
-window.showGameToast          = showGameToast;
+window.recruitMilitiaFromCity      = recruitMilitiaFromCity;
+window.buyFoodFromCity             = buyFoodFromCity;
+window.updateRecruitButton         = updateRecruitButton;
+window.updateBuyFoodButton         = updateBuyFoodButton;
+window.updateVisitSettlementButton = updateVisitSettlementButton;
+window.showGameToast               = showGameToast;

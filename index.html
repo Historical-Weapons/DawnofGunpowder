@@ -172,7 +172,10 @@ if (document.readyState === 'loading') {
     Recruit Militia...
 </button>
 
-<button class="menu-btn" onclick="if(activeCity) { 
+<!-- VISIT SETTLEMENT BUTTON — enabled/disabled state is controlled by
+     updateVisitSettlementButton() in sandboxmode_update.js.
+     Scenarios can call window.__visitSettlementEnabled = false/true to gate it. -->
+<button id="visit-settlement-btn" class="menu-btn" onclick="if(activeCity) { 
                 if(typeof AudioManager !== 'undefined') AudioManager.playSound('ui_click'); 
                 
                 /* SURGERY: Enter the native architecture dimension */
@@ -181,7 +184,7 @@ if (document.readyState === 'loading') {
                 document.getElementById('city-panel').style.display = 'none'; 
             }">Visit Settlement</button>
             
-            <button class="menu-btn" onclick="
+            <button id="upgrade-troops-btn" class="menu-btn" onclick="
                 if(typeof troopGUI !== 'undefined') {
                     if(typeof AudioManager !== 'undefined') AudioManager.playSound('ui_click');
                     troopGUI.openUpgradeMenu();
@@ -372,6 +375,7 @@ function toggleDipLog() {
 </script>
 	<script src="core/camera_effects.js"></script>
 	<script src="story/s1/Story_1_Dev.js"></script>
+ 	<script src="story/s2/Story_2_Dev.js"></script>
  
     <script src="sandboxmode/sandboxmode_npc_system.js"></script>
     <script src="core/fortification_system.js"></script>
@@ -415,7 +419,7 @@ function toggleDipLog() {
  
 	<script src="story/scenario_import_triggerNPC.js"></script>  <!-- used to be below hakata bay, Adds an import button inside the Trigger Editor so you can pull triggers, NPCs, and story data from a pre-written .js scenario module into whatever scenario you currently have open. -->
    <script src="story/s1/hakata_bay_scenario.js"></script>  
-   
+     <script src="story/s2/mongolconquestxia_scenario.js"></script>   
     <script src="menu/menu.js"></script>
     <script src="menu/menu-units-guide.js"></script>
   
@@ -432,6 +436,7 @@ function toggleDipLog() {
     <script src="core/faction_dynamics.js"></script>
     <script src="sandboxmode/sandboxmode_overworld.js"></script>
 	<script src="story/s1/story1_map_and_update.js"></script>  
+	
 	<script src="story/s2/story2_map_and_update.js"></script>  
     <script src="core/camp_system.js"></script>
     <script src="core/camp_system_combat.js"></script>

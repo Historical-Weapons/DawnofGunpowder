@@ -68,23 +68,23 @@
 
 // ── Faction registry ──────────────────────────────────────────────────────────
 const FACTIONS_story2 = {
-    "Western Xia": {
-        color: "#b5451b",
+    "Xiaran Dominion": {
+        color: "#fbc02d",
         geoWeight: { north: 0.30, south: 0.80, west: 0.10, east: 0.85 }
     },
     "Mongol Empire": {
-        color: "#1565c0",
+        color: "#8b1a1a",   // dark-crimson — no blue on Xia map
         geoWeight: { north: 0.02, south: 0.12, west: 0.02, east: 0.20 }
     },
     "Bandits": {
-        color: "#333333",
+        color: "#6d4c41",   // earthen brown — desert raiders look
         geoWeight: { north: 0.50, south: 0.50, west: 0.50, east: 0.50 }
     }
 };
 
 // ── Syllable pools for procedural settlement names ────────────────────────────
 const SYLLABLE_POOLS_story2 = {
-    "Western Xia": [
+    "Xiaran Dominion": [
         "Su","Gan","Sha","Gua","Chan","Wei","Wu","Ling","He","Xia",
         "Qin","Tang","Lan","Ning","Yin","Zhong","He","Huang","Xian","Tao",
         "Qili","Helan","Xiu","Fu","Ji","Xing","Ding","Shun","Liang",
@@ -108,7 +108,7 @@ function applyStory2Factions() {
     Object.keys(SYLLABLE_POOLS).forEach(k => delete SYLLABLE_POOLS[k]);
     Object.assign(SYLLABLE_POOLS, SYLLABLE_POOLS_story2);
     if (typeof initDiplomacy === 'function') { initDiplomacy(FACTIONS); }
-    console.log("[Story2] ✅ Historical 1226 factions applied.");
+    console.log("[Story2] ✅ Xiaran Dominion factions applied.");
     console.log("[Story2]    Active factions:", Object.keys(FACTIONS).join(", "));
 }
 
@@ -252,6 +252,7 @@ const YELLOW_RIVER_MAIN = [
 ];
 
 // ── Heishui River (Black Water / Hei River) ───────────────────────────────────
+// FIX: Added final points to close the ~0.011-unit gap — river now enters LAKE_HEISHUI
 const HEISHUI_RIVER = [
     [0.3400, 0.5600], [0.3415, 0.5525], [0.3440, 0.5450], [0.3475, 0.5375],
     [0.3520, 0.5300], [0.3565, 0.5225], [0.3605, 0.5150], [0.3645, 0.5075],
@@ -266,7 +267,10 @@ const HEISHUI_RIVER = [
     [0.4370, 0.2600], [0.4360, 0.2525], [0.4350, 0.2450], [0.4340, 0.2375],
     [0.4335, 0.2300], [0.4335, 0.2225], [0.4340, 0.2150], [0.4355, 0.2075],
     [0.4380, 0.2000], [0.4410, 0.1925], [0.4445, 0.1850], [0.4485, 0.1775],
-    [0.4525, 0.1700], [0.4570, 0.1625], [0.4610, 0.1550], [0.4650, 0.1475]
+    [0.4525, 0.1700], [0.4570, 0.1625], [0.4610, 0.1550], [0.4650, 0.1475],
+    // Extended to meet LAKE_HEISHUI (polygon starts at ny≈0.158)
+    [0.4640, 0.1550], [0.4620, 0.1600], [0.4590, 0.1640], [0.4555, 0.1670],
+    [0.4520, 0.1680]  // ← enters LAKE_HEISHUI polygon
 ];
 
 // ── Southwest Plateau River (Tongtian / upper Yangtze tributary) ──────────────
@@ -324,10 +328,13 @@ const WUDING_RIVER = [
     [0.9270, 0.6189], [0.9293, 0.6200], [0.9316, 0.6211], [0.9339, 0.6222], [0.9362, 0.6233], [0.9385, 0.6244],
     [0.9408, 0.6255], [0.9431, 0.6266], [0.9454, 0.6277], [0.9477, 0.6288], [0.9500, 0.6299], [0.9523, 0.6310],
     [0.9546, 0.6321], [0.9569, 0.6332], [0.9592, 0.6343], [0.9615, 0.6354], [0.9638, 0.6365], [0.9661, 0.6376],
-    [0.9684, 0.6387], [0.9707, 0.6398], [0.9730, 0.6409], [0.9753, 0.6420], [0.9776, 0.6431], [0.9800, 0.6442]
+    [0.9684, 0.6387], [0.9707, 0.6398], [0.9730, 0.6409], [0.9753, 0.6420], [0.9776, 0.6431], [0.9800, 0.6442],
+    // Extended to reach LAKE_WUDING_TERMINUS
+    [0.9820, 0.6390], [0.9840, 0.6365], [0.9860, 0.6338], [0.9872, 0.6312]  // ← enters LAKE_WUDING_TERMINUS
 ];
 
 // ── Shule River (Bulunggir River) ─────────────────────────────────────────────
+// FIX: Extended final points west to enter LAKE_CRESCENT_MOON (nx≈0.004–0.019)
 const SHULE_RIVER = [
     [0.2800, 0.4200], [0.2776, 0.4190], [0.2752, 0.4180], [0.2728, 0.4169], [0.2704, 0.4159], [0.2680, 0.4149],
     [0.2656, 0.4139], [0.2632, 0.4128], [0.2608, 0.4118], [0.2584, 0.4108], [0.2560, 0.4098], [0.2536, 0.4087],
@@ -346,7 +353,10 @@ const SHULE_RIVER = [
     [0.0784, 0.3339], [0.0760, 0.3329], [0.0736, 0.3319], [0.0712, 0.3308], [0.0688, 0.3298], [0.0664, 0.3288],
     [0.0640, 0.3278], [0.0616, 0.3267], [0.0592, 0.3257], [0.0568, 0.3247], [0.0544, 0.3237], [0.0520, 0.3226],
     [0.0496, 0.3216], [0.0472, 0.3206], [0.0448, 0.3196], [0.0424, 0.3185], [0.0400, 0.3175], [0.0376, 0.3165],
-    [0.0352, 0.3155], [0.0328, 0.3144], [0.0304, 0.3134], [0.0280, 0.3124], [0.0256, 0.3114], [0.0232, 0.3104]
+    [0.0352, 0.3155], [0.0328, 0.3144], [0.0304, 0.3134], [0.0280, 0.3124], [0.0256, 0.3114], [0.0232, 0.3104],
+    // Extended to LAKE_CRESCENT_MOON terminal basin
+    [0.0200, 0.3082], [0.0168, 0.3062], [0.0138, 0.3042], [0.0112, 0.3020],
+    [0.0088, 0.3000], [0.0072, 0.2978], [0.0058, 0.2960]  // ← enters LAKE_CRESCENT_MOON
 ];
 
 // ── Wei River ─────────────────────────────────────────────────────────────────
@@ -423,8 +433,27 @@ const LAKE_FAR_WEST = [
     [0.0860, 0.6820]
 ];
 
+// ── Lake Crescent — Shule/Bulunggir terminal marsh (far NW, Kumtag fringe) ───
+// The Shule River loses itself in desert sands west of Dunhuang; this small
+// playa-lake represents the end-of-river terminal basin.
+const LAKE_CRESCENT_MOON = [
+    [0.0045, 0.2960], [0.0080, 0.2910], [0.0120, 0.2895], [0.0155, 0.2905],
+    [0.0180, 0.2935], [0.0192, 0.2970], [0.0182, 0.3010], [0.0158, 0.3042],
+    [0.0122, 0.3058], [0.0085, 0.3050], [0.0058, 0.3025], [0.0042, 0.2995]
+];
+
+// ── Lake Wuding — Wuding River eastern terminus (joins Yellow River basin) ────
+// Historical confluence zone east of Yan'an; represented here as a small
+// floodplain lake where the Wuding meets the Yellow River corridor.
+const LAKE_WUDING_TERMINUS = [
+    [0.9760, 0.6295], [0.9800, 0.6260], [0.9838, 0.6255], [0.9868, 0.6270],
+    [0.9888, 0.6300], [0.9892, 0.6338], [0.9878, 0.6372], [0.9848, 0.6395],
+    [0.9812, 0.6400], [0.9778, 0.6384], [0.9758, 0.6355], [0.9752, 0.6320]
+];
+
 const _S2_ALL_LAKE_POLYS = [
-    LAKE_QINGHAI, LAKE_HEISHUI, LAKE_TWIN_WEST, LAKE_TWIN_EAST, LAKE_FAR_WEST
+    LAKE_QINGHAI, LAKE_HEISHUI, LAKE_TWIN_WEST, LAKE_TWIN_EAST,
+    LAKE_FAR_WEST, LAKE_CRESCENT_MOON, LAKE_WUDING_TERMINUS
 ];
 
 
@@ -530,19 +559,25 @@ function _s2PIP(px, py, poly) {
     return inside;
 }
 
-function _s2InLakeZone(nx, ny) {
+// FBM-warped PIP — displaces the query point by smooth noise before testing
+// so the lake boundary becomes organically jagged rather than a smooth polygon.
+function _s2WarpedLakePIP(nx, ny) {
+    const wx = (_s2Fbm(nx * 13.1 + 5.3, ny * 13.1 + 3.7, 3) - 0.5) * 0.028;
+    const wy = (_s2Fbm(nx * 13.1 + 9.9, ny * 13.1 + 7.5, 3) - 0.5) * 0.028;
+    const wnx = nx + wx, wny = ny + wy;
     for (let i = 0; i < _S2_ALL_LAKE_POLYS.length; i++) {
-        if (_s2PIP(nx, ny, _S2_ALL_LAKE_POLYS[i])) return true;
+        if (_s2PIP(wnx, wny, _S2_ALL_LAKE_POLYS[i])) return true;
     }
     return false;
 }
 
+function _s2InLakeZone(nx, ny) {
+    return _s2WarpedLakePIP(nx, ny);
+}
+
 // Soft-falloff distance to nearest lake edge (0 outside, 1 at centre)
 function _s2LakeStrength(nx, ny) {
-    for (let i = 0; i < _S2_ALL_LAKE_POLYS.length; i++) {
-        if (_s2PIP(nx, ny, _S2_ALL_LAKE_POLYS[i])) return 1.0;
-    }
-    return 0.0;
+    return _s2WarpedLakePIP(nx, ny) ? 1.0 : 0.0;
 }
 
 // =============================================================================
@@ -558,18 +593,39 @@ function _s2QilianMask(nx, ny) {
     const lengthFactor = Math.exp(-Math.pow((nx - 0.32) * 2.4, 2));
     const halfWidth    = 0.060 + 0.075 * lengthFactor;        // 0.06 – 0.135
 
-    // Boundary noise — fuzzy organic edge that blends to dunes
-    const edgeNoise = (_s2Fbm(nx * 4.7 + 11.3, ny * 4.7 + 19.1, 4) - 0.5) * 0.075;
+    // ── Primary large-scale edge warp (big lobes, fingers) ────────────────────
+    // This is the main "looks random not like a strip" driver — large amplitude,
+    // low frequency so you get genuine peninsulas and bays in the outline.
+    const edgeNoise = (_s2Fbm(nx * 3.8 + 11.3, ny * 3.8 + 19.1, 5) - 0.5) * 0.16;
 
-    // Secondary high-frequency edge wobble
-    const detailNoise = (_s2Fbm(nx * 14 + 33, ny * 14 + 41, 3) - 0.5) * 0.018;
+    // ── Medium-frequency crenellation — irregular lumps ────────────────────
+    const midNoise  = (_s2Fbm(nx * 8.1 + 27.7, ny * 8.1 + 33.5, 4) - 0.5) * 0.058;
 
-    const warpedD = d - edgeNoise - detailNoise;
+    // ── Fine-scale edge fuzz — grain at the transition ────────────────────────
+    const detailNoise = (_s2Fbm(nx * 18 + 33, ny * 18 + 41, 3) - 0.5) * 0.030;
 
-    if (warpedD <= halfWidth * 0.45) return 1.0;
-    if (warpedD >= halfWidth)        return 0.0;
+    // ── Rare "overshoot" peninsulas — random long fingers into the desert ─────
+    // A second low-frequency field offset from the first so the two create
+    // independent features.  Clamped positive so they only ADD territory.
+    const peninsulaRaw = _s2Fbm(nx * 2.3 + 53.1, ny * 2.3 + 47.9, 4);
+    const peninsula    = Math.max(0, (peninsulaRaw - 0.54) * 0.28);   // 0 – ~0.13
 
-    const t = (halfWidth - warpedD) / (halfWidth * 0.55);
+    // ── Receding bays (opposite sign of peninsula) ────────────────────────────
+    const bayRaw = _s2Fbm(nx * 2.7 + 71.3, ny * 2.7 + 61.7, 4);
+    const bay    = Math.max(0, (bayRaw - 0.56) * 0.18);               // cuts in
+
+    const warpedD = d - edgeNoise - midNoise - detailNoise - peninsula + bay;
+
+    // Solid core threshold is tighter (0.30) to keep a real mountain spine;
+    // the outer blend zone is much wider (to halfWidth * 1.25) so the
+    // transition visually "overdraws" into the desert before fading out.
+    const solidCore   = halfWidth * 0.30;
+    const outerEdge   = halfWidth * 1.25;
+
+    if (warpedD <= solidCore) return 1.0;
+    if (warpedD >= outerEdge) return 0.0;
+
+    const t = (outerEdge - warpedD) / (outerEdge - solidCore);
     return t * t * (3.0 - 2.0 * t);     // smoothstep
 }
 
@@ -616,13 +672,13 @@ function _s2QilianVeg(nx, ny) {
 // =============================================================================
 
 const _S2_RIVER_REGISTRY = [
-    { pts: YELLOW_RIVER_MAIN,       thickness: 0.0140 },   // major
-    { pts: HEISHUI_RIVER,           thickness: 0.0080 },
-    { pts: HUANGSHUI_RIVER,         thickness: 0.0070 },
-    { pts: SHULE_RIVER,             thickness: 0.0070 },
-    { pts: WEI_RIVER,               thickness: 0.0065 },
-    { pts: WUDING_RIVER,            thickness: 0.0060 },
-    { pts: SOUTHWEST_PLATEAU_RIVER, thickness: 0.0060 }
+    { pts: YELLOW_RIVER_MAIN,       thickness: 0.0067 },   // major — wide river
+    { pts: HEISHUI_RIVER,           thickness: 0.0040 },
+    { pts: HUANGSHUI_RIVER,         thickness: 0.0035 },
+    { pts: SHULE_RIVER,             thickness: 0.0035 },
+    { pts: WEI_RIVER,               thickness: 0.0032 },
+    { pts: WUDING_RIVER,            thickness: 0.0030 },
+    { pts: SOUTHWEST_PLATEAU_RIVER, thickness: 0.0030 }
 ];
 
 function _s2RiverField(nx, ny) {
@@ -735,57 +791,76 @@ function _s2PickMountainColor(e, shading, vegN) {
 
 
 // =============================================================================
-// LAKE PAINTING — polygon fill + edge stroke + shimmer
+// LAKE PAINTING — smooth organic edges via FBM-warped path + canvas blur
 // =============================================================================
-function _s2DrawLakePoly(poly, fillColor, strokeColor, fillAlpha, strokeAlpha, strokeW) {
-    if (!poly || poly.length < 3) return;
-    bgCtx.save();
+
+// Build a FBM-warped canvas path for a lake polygon.
+// Each vertex is displaced by smooth noise → organic jagged coastline.
+function _s2LakeWarpedPath(poly) {
     bgCtx.beginPath();
-    bgCtx.moveTo(poly[0][0] * WORLD_WIDTH, poly[0][1] * WORLD_HEIGHT);
-    for (let k = 1; k < poly.length; k++) {
-        bgCtx.lineTo(poly[k][0] * WORLD_WIDTH, poly[k][1] * WORLD_HEIGHT);
+    for (let k = 0; k < poly.length; k++) {
+        const nx = poly[k][0], ny = poly[k][1];
+        const wx = (_s2Fbm(nx * 15.3 + 5.1 + k * 0.31, ny * 15.3 + 3.7, 3) - 0.5) * 0.024;
+        const wy = (_s2Fbm(nx * 15.3 + 9.9, ny * 15.3 + 7.5 + k * 0.31, 3) - 0.5) * 0.024;
+        const px = (nx + wx) * WORLD_WIDTH;
+        const py = (ny + wy) * WORLD_HEIGHT;
+        if (k === 0) bgCtx.moveTo(px, py); else bgCtx.lineTo(px, py);
     }
     bgCtx.closePath();
-    bgCtx.globalAlpha = fillAlpha;
-    bgCtx.fillStyle   = fillColor;
-    bgCtx.fill();
-    bgCtx.globalAlpha = strokeAlpha;
-    bgCtx.strokeStyle = strokeColor;
-    bgCtx.lineWidth   = strokeW;
+}
+
+// Draw a lake with:
+//   1. Sandy-steppe blurred ring outside the polygon (visible ring of dry grass)
+//   2. Blurred lake-fill for smooth anti-aliased shoreline
+//   3. Crisp solid interior clipped inside the polygon
+//
+// TWO-PASS PATTERN: call _s2DrawLakeSteppeRing for ALL lakes first, then
+// _s2DrawLakeFill for ALL lakes — prevents nearby lakes' steppe rings from
+// bleeding green onto each other's water.
+function _s2DrawLakeSteppeRing(poly) {
+    if (!poly || poly.length < 3) return;
+    bgCtx.save();
+    // Reduced blur+width so the dry-grass ring stays OUTSIDE the polygon,
+    // preventing the green haze from bleeding over adjacent water tiles.
+    bgCtx.filter = "blur(10px)";
+    bgCtx.lineWidth = 55;
+    bgCtx.strokeStyle = "rgba(130, 148, 85, 0.55)";  // dry-grass steppe tint
+    bgCtx.lineCap = "round";
+    bgCtx.lineJoin = "round";
+    _s2LakeWarpedPath(poly);
     bgCtx.stroke();
     bgCtx.restore();
 }
 
-function _s2DrawLakeShimmer(poly) {
+function _s2DrawLakeFill(poly) {
     if (!poly || poly.length < 3) return;
-    let cx = 0, cy = 0;
-    for (let p = 0; p < poly.length; p++) {
-        cx += poly[p][0];
-        cy += poly[p][1];
-    }
-    cx = (cx / poly.length) * WORLD_WIDTH;
-    cy = (cy / poly.length) * WORLD_HEIGHT;
 
+    // Blurred fill: solid in the interior, feathers ~12 px at edge.
     bgCtx.save();
-    bgCtx.globalAlpha = 0.18;
-    bgCtx.strokeStyle = "#a4d4e8";
-    bgCtx.lineWidth   = 0.8;
-    bgCtx.beginPath();
-    bgCtx.moveTo(poly[0][0] * WORLD_WIDTH, poly[0][1] * WORLD_HEIGHT);
-    for (let k = 1; k < poly.length; k++) {
-        bgCtx.lineTo(poly[k][0] * WORLD_WIDTH, poly[k][1] * WORLD_HEIGHT);
-    }
-    bgCtx.closePath();
-    bgCtx.clip();
-    for (let r = 0; r < 7; r++) {
-        const rx = cx + Math.sin(r * 71.3) * 0.022 * WORLD_WIDTH;
-        const ry = cy + Math.cos(r * 63.7) * 0.018 * WORLD_HEIGHT;
-        const rw = (8 + r * 3.6 + Math.sin(r * 47.1) * 4);
-        bgCtx.beginPath();
-        bgCtx.arc(rx, ry, rw, 0, Math.PI * 2);
-        bgCtx.stroke();
-    }
+    bgCtx.filter = "blur(12px)";
+    bgCtx.fillStyle = "rgba(48, 102, 148, 0.97)";
+    _s2LakeWarpedPath(poly);
+    bgCtx.fill();
     bgCtx.restore();
+
+    // Crisp interior: clipped solid fill so the blur interior isn't faded.
+    bgCtx.save();
+    _s2LakeWarpedPath(poly);
+    bgCtx.clip();
+    bgCtx.filter = "none";
+    bgCtx.fillStyle = "#3a6e98";
+    bgCtx.fillRect(0, 0, WORLD_WIDTH, WORLD_HEIGHT);
+    bgCtx.restore();
+}
+
+function _s2DrawLakeSmooth(poly) {
+    _s2DrawLakeSteppeRing(poly);
+    _s2DrawLakeFill(poly);
+}
+
+// Legacy polygon draw — kept for reference but no longer called.
+function _s2DrawLakePoly(poly, fillColor, strokeColor, fillAlpha, strokeAlpha, strokeW) {
+    _s2DrawLakeSmooth(poly);  // redirect to new renderer
 }
 
 // =============================================================================
@@ -826,7 +901,9 @@ async function generateMap_story2() {
 
     // =========================================================================
     // PHASE 1 — FULL TILE CLASSIFICATION
-    // Priority: lake > river > oasis > mountain > foothill > steppe > dune
+    // Priority: lake > mountain > foothill > dune
+    // Rivers are cosmetic-only hairlines (Phase 6) — no River tiles exist.
+    // Oasis / Plains removed — cities stand in open desert.
     // =========================================================================
     for (let i = 0; i < COLS; i++) {
         worldMap_story2[i] = [];
@@ -842,87 +919,64 @@ async function generateMap_story2() {
             let impassable = false;
             let isRiver = false;
 
-            // 1. LAKES
+            // 1. LAKES only — real water bodies that block movement
             if (_s2InLakeZone(nx, ny)) {
                 tileName  = "Coastal";
                 tileColor = PALETTE.coastal;
-                speed = 0.30; elev = 0.05; moisture = 0.85; isRiver = true;
+                // Triple speed vs land (land ≈ 0.62), impassable blocks NPC/city placement
+                speed = 1.8; elev = 0.05; moisture = 0.85; isRiver = true;
+                impassable = true;  // FIX: prevents NPCs and Commerce from spawning on water
 
-            // 2. RIVERS — noisy distance field, no centre stroke
             } else {
+                // 2. RIVERS — actual tile-classified watercourses (tile must be
+                //    checked BEFORE mountains so rivers crossing the foothills register)
                 const riverI = _s2RiverField(nx, ny);
-                if (riverI > 0.10) {
+                if (riverI > 0) {
                     tileName  = "River";
                     tileColor = PALETTE.coastal;
-                    speed = 0.48; elev = 0.07; moisture = 0.78; isRiver = true;
-
-                // 3. OASIS — cities sit in plains regardless of mountain mask
-                } else if (_s2InOasis(nx, ny)) {
-                    tileName  = "Plains";
-                    tileColor = PALETTE.plains;
-                    speed = 0.82; elev = 0.36; moisture = 0.50;
+                    // Triple speed vs land: rivers are fast travel corridors
+                    speed = 1.8; elev = 0.02; moisture = 0.92; isRiver = true;
 
                 } else {
-                    // 4. QILIAN MOUNTAIN MASK
-                    const mtnMask = _s2QilianMask(nx, ny);
+                // 3. QILIAN MOUNTAIN MASK
+                const mtnMask = _s2QilianMask(nx, ny);
 
-                    if (mtnMask > 0.40) {
-                        // Inside the strip
-                        const e = _s2QilianElev(nx, ny);
-
-                        if (e > 0.30) {
-                            // All real mountain tiles unified as Large Mountains
-                            // (matches the player's palette-name request)
-                            tileName  = "Large Mountains";
-                            tileColor = PALETTE.snow;            // "#7B5E3F"
-                            speed = Math.max(0.22, 0.45 - e * 0.22);
-                            elev  = e;
-                            moisture = 0.10 + e * 0.15;
-                        } else {
-                            // Low elevation inside mask → highlands fringe
-                            tileName  = "Highlands";
-                            tileColor = PALETTE.highlands;       // "#626b42"
-                            speed = 0.45;
-                            elev = 0.40;
-                            moisture = 0.18;
-                        }
-
-                    } else if (mtnMask > 0.10) {
-                        // Foothill transition between mountain strip and dunes
-                        const fe = 0.30 + 0.22 * Math.abs(_s2Noise(nx * 22, ny * 22) * 2 - 1);
-                        if (fe > 0.40) {
-                            tileName  = "Highlands";
-                            tileColor = PALETTE.highlands;
-                        } else {
-                            tileName  = "Steppes";
-                            tileColor = PALETTE.plains;
-                        }
-                        speed = 0.60; elev = fe; moisture = 0.20;
-
-                    } else if (ny < 0.16) {
-                        // 5. NORTH STEPPE (Mongolian steppe band)
-                        tileName  = "Steppes";
-                        tileColor = PALETTE.plains;
-                        speed = 0.78;
-                        elev = 0.30 + hv * 0.06;
-                        moisture = 0.20;
-
-                    } else if (nx > 0.62 && ny < 0.42 && hv > 0.55) {
-                        // 6. ORDOS STEPPE — semi-arid pockets in the NE
-                        tileName  = "Steppes";
-                        tileColor = PALETTE.plains;
-                        speed = 0.72; elev = 0.32; moisture = 0.16;
-
+                if (mtnMask > 0.40) {
+                    const e = _s2QilianElev(nx, ny);
+                    if (e > 0.30) {
+                        tileName  = "Large Mountains";
+                        tileColor = PALETTE.snow;
+                        speed = Math.max(0.22, 0.45 - e * 0.22);
+                        elev  = e;
+                        moisture = 0.10 + e * 0.15;
                     } else {
-                        // 7. DEFAULT — Gobi / Hexi desert dunes
+                        tileName  = "Highlands";
+                        tileColor = PALETTE.highlands;
+                        speed = 0.45; elev = 0.40; moisture = 0.18;
+                    }
+
+                } else if (mtnMask > 0.06) {
+                    const fe = 0.30 + 0.22 * Math.abs(_s2Noise(nx * 22, ny * 22) * 2 - 1);
+                    if (fe > 0.40) {
+                        tileName  = "Highlands";
+                        tileColor = PALETTE.highlands;
+                    } else {
                         tileName  = "Dunes";
                         tileColor = PALETTE.dune;
-                        speed = 0.62 + hv * 0.05;
-                        elev  = 0.45 + hv * 0.04;
-                        moisture = 0.22;
                     }
+                    speed = 0.60; elev = fe; moisture = 0.20;
+
+                } else {
+                    // 4. DEFAULT — all open terrain is Dunes
+                    // Steppe/desert sub-biome colouring is handled in Phase 3.
+                    tileName  = "Dunes";
+                    tileColor = PALETTE.dune;
+                    speed = 0.62 + hv * 0.05;
+                    elev  = 0.45 + hv * 0.04;
+                    moisture = 0.22;
                 }
-            }
+                } // end mountain/dune else (river check)
+            } // end lake else
 
             worldMap_story2[i][j] = {
                 name:       tileName,
@@ -950,56 +1004,140 @@ async function generateMap_story2() {
         }
     }
 
-    await setLoading(36, "Drifting the dunes…");
+    await setLoading(36, "Sculpting the Gobi Desert…");
 
     // =========================================================================
-    // PHASE 3 — DUNE / DESERT SUBTLE TEXTURE
-    // The user wants the dune areas to look "almost bare with nothing."
-    // We use a low-frequency FBM colour modulation for soft tonal variation,
-    // plus very rare wind streaks.  No crescent moons, no chevrons.
+    // PHASE 3 — RICH PROCEDURAL DESERT + STEPPE SYSTEM
+    // ─────────────────────────────────────────────────────────────────────────
+    // Four sub-biomes blend entirely via independent FBM fields:
+    //
+    //   ERG   — classic Gobi sand-dune terrain.  Warm golden, soft ridges.
+    //   REG   — stony gravel plain.  Cooler grey-brown, slightly darker.
+    //           Very common in the real Gobi; gives the "nothing grows here" look.
+    //   HAM   — hammada flat rock.  Darker reddish-brown, blocky.
+    //   STEP  — semi-arid steppe.  Dry olive-khaki, bleached grass.
+    //           Strong near the northern edge (ny ≈ 0–0.20), fades south.
+    //           A secondary pocket covers the Ordos region (NE).
+    //
+    // Blending is weighted by three independent slow FBM fields at geographic
+    // scale so you get large coherent regions rather than salt-and-pepper noise.
+    // Each region is further modulated by mid-frequency and fine-grain noise
+    // for internal texture variation (dune crests, pebble clusters, rockiness).
+    // Directional slope shading (NW light) gives micro-relief.
+    //
+    // Wind streaks are drawn per-tile at the end: density is biome-aware
+    // (rarer in steppe, denser in erg sand), angles cluster around westerly.
     // =========================================================================
     {
-        // 8-px sub-cells for whole-map subtle dune drift
-        const DSUB = _isMobile ? 16 : 8;
+        const DSUB  = _isMobile ? 8 : 4;   // 4-px cells — fine enough to see texture
         const DCOLS = Math.ceil(WORLD_WIDTH  / DSUB);
         const DROWS = Math.ceil(WORLD_HEIGHT / DSUB);
+
         for (let si = 0; si < DCOLS; si++) {
             const nx = (si * DSUB + DSUB * 0.5) / WORLD_WIDTH;
             const px = si * DSUB;
+            if ((si & 63) === 0) {
+                await setLoading(36 + Math.floor((si / DCOLS) * 8), "Sculpting the Gobi Desert…");
+            }
             for (let sj = 0; sj < DROWS; sj++) {
                 const ny = (sj * DSUB + DSUB * 0.5) / WORLD_HEIGHT;
                 const py = sj * DSUB;
 
-                // Skip any non-dune tile entirely
+                // Skip non-Dune tiles — mountains and lakes painted separately
                 const ti = Math.min(COLS - 1, (px / TILE_SIZE) | 0);
                 const tj = Math.min(ROWS - 1, (py / TILE_SIZE) | 0);
                 const t  = worldMap_story2[ti][tj];
-                if (t.name !== "Dunes" && t.name !== "Steppes") continue;
+                if (t.name !== "Dunes") continue;
 
-                // Soft FBM tone variation — dune undulations, very subtle
-                const dn = _s2Fbm(nx * 6.0 +  3.7, ny * 6.0 +  1.9, 4);     // 0–1
-                const sandTone = (dn - 0.5) * 28;     // ±14 brightness shift
+                // ── Geographic-scale biome selectors (very slow, 5-6 octaves) ──
+                // Three independent fields so biome boundaries don't correlate.
+                const B1 = _s2Fbm(nx * 2.4 +  0.7, ny * 2.4 +  1.3, 6); // 0–1
+                const B2 = _s2Fbm(nx * 3.8 + 17.0, ny * 3.8 +  9.4, 5);
+                const B3 = _s2Fbm(nx * 1.9 + 31.5, ny * 1.9 + 22.7, 5);
 
-                // Slope-direction shading: faint NW-lit relief on the dune sea
-                const dnL = _s2Fbm(nx * 6.0 + 3.6, ny * 6.0 + 1.8, 3);
-                const dnR = _s2Fbm(nx * 6.0 + 3.8, ny * 6.0 + 2.0, 3);
-                const dnU = _s2Fbm(nx * 6.0 + 3.7, ny * 6.0 + 1.7, 3);
-                const dnD = _s2Fbm(nx * 6.0 + 3.7, ny * 6.0 + 2.1, 3);
-                const gx = dnR - dnL;
-                const gy = dnD - dnU;
-                let lightFactor = -(gx * (-0.7071) + gy * (-0.7071)) * 80;
-                if (lightFactor >  9) lightFactor =  9;
-                if (lightFactor < -9) lightFactor = -9;
+                // ── Mid-frequency texture (dune-ridge / gravel clusters) ────────
+                const MID  = _s2Fbm(nx * 10.0 +  3.1, ny * 10.0 +  7.4, 4);
+                // ── Fine grain ─────────────────────────────────────────────────
+                const FIN  = _s2Fbm(nx * 32.0 + 11.0, ny * 32.0 +  4.8, 3);
+                // ── Ultra-fine sparkle/grit ─────────────────────────────────────
+                const SPK  = _s2Fbm(nx * 80.0 +  5.5, ny * 80.0 +  9.1, 2);
 
-                let baseR, baseG, baseB;
-                if (t.name === "Dunes") {
-                    baseR = 207; baseG = 174; baseB = 126;     // PALETTE.dune
-                } else {
-                    baseR = 163; baseG = 160; baseB = 115;     // PALETTE.plains
-                }
-                const r = baseR + sandTone + lightFactor;
-                const g = baseG + sandTone * 0.85 + lightFactor * 0.85;
-                const b = baseB + sandTone * 0.55 + lightFactor * 0.55;
+                // ── Directional slope shading (NW light source) ─────────────────
+                const dE = 0.002;
+                const hL = _s2Fbm((nx - dE) * 10.0 + 3.1, ny * 10.0 + 7.4, 3);
+                const hR = _s2Fbm((nx + dE) * 10.0 + 3.1, ny * 10.0 + 7.4, 3);
+                const hU = _s2Fbm(nx * 10.0 + 3.1, (ny - dE) * 10.0 + 7.4, 3);
+                const hD = _s2Fbm(nx * 10.0 + 3.1, (ny + dE) * 10.0 + 7.4, 3);
+                let lightF = -((hR - hL) * (-0.7071) + (hD - hU) * (-0.7071)) * 55;
+                if (lightF >  9) lightF =  9;
+                if (lightF < -9) lightF = -9;
+
+                // ── Steppe gradient ─────────────────────────────────────────────
+                // Core steppe band: full at ny=0, gone by ny=0.22
+                const stepCore  = Math.max(0, Math.min(1, (0.21 - ny) / 0.19));
+                // Soft FBM warp so the steppe boundary is a ragged fringe
+                const stepWarp  = (_s2Fbm(nx * 7.0 + 4.4, ny * 7.0 + 2.2, 4) - 0.5) * 0.07;
+                // Secondary Ordos steppe pocket in the northeast
+                const ordosCore = (nx > 0.57 && ny < 0.50)
+                    ? Math.max(0, Math.min(1, (0.44 - ny) / 0.24))
+                      * Math.max(0, Math.min(1, (nx - 0.55) / 0.06)) * 0.52
+                    : 0;
+                // Blend steppe noise into the boundary for irregular edge
+                const steppeBlend = Math.max(0, Math.min(1,
+                    stepCore + stepWarp + ordosCore
+                    + (_s2Fbm(nx * 4.2 + 8.3, ny * 4.2 + 5.7, 4) - 0.5) * 0.04));
+
+                // ── Biome weights ───────────────────────────────────────────────
+                const ergW = B1 * B1 * (1.0 - B2 * 0.4);           // warm sand erg
+                const regW = (1.0 - B1) * B3 * 1.1;                // stony gravel reg
+                const hamW = B2 * (1.0 - B3) * 0.70;               // hammada rock
+                const wSum = ergW + regW + hamW + 0.0001;
+
+                // ── Desert sub-biome colour endpoints ───────────────────────────
+                // Each endpoint has three layers of variation:
+                //   MV = mid-freq   (large tonal swings, dune ridges)
+                //   FV = fine-grain (pebble/sand grain texture)
+                //   SV = sparkle    (glint / ultra-fine surface)
+                const MV = MID - 0.5, FV = FIN - 0.5, SV = SPK - 0.5;
+
+                // ERG: warm gold, brightest, high mid-freq contrast for dune ridges
+                const ergR = 215 + MV * 30 + FV * 16 + SV * 7;
+                const ergG = 180 + MV * 24 + FV * 13 + SV * 5;
+                const ergB = 118 + MV * 14 + FV *  9 + SV * 3;
+
+                // REG: cooler, greyer, less contrast — flat stony
+                const regR = 182 + MV * 18 + FV * 14 + SV * 4;
+                const regG = 162 + MV * 16 + FV * 12 + SV * 3;
+                const regB = 126 + MV * 10 + FV *  8 + SV * 3;
+
+                // HAMMADA: darker reddish-brown flat rock
+                const hamR = 196 + MV * 14 + FV * 10 + SV * 4;
+                const hamG = 152 + MV * 12 + FV *  8 + SV * 3;
+                const hamB = 106 + MV *  8 + FV *  6 + SV * 2;
+
+                // ── Weighted desert blend ───────────────────────────────────────
+                let r = (ergR * ergW + regR * regW + hamR * hamW) / wSum;
+                let g = (ergG * ergW + regG * regW + hamG * hamW) / wSum;
+                let b = (ergB * ergW + regB * regW + hamB * hamW) / wSum;
+
+                // ── STEPPE colour ───────────────────────────────────────────────
+                // Dry bleached grass / scrub: olive-khaki near north, fading
+                // to nearly indistinguishable from dune by the transition zone.
+                // The "greenness" of the steppe itself fades as ny increases.
+                const greenBoost = stepCore * 0.80;          // 0 at ny>0.21, up to 0.8
+                const stepR = 172 + MV * 14 + FV * 9 - greenBoost * 20;
+                const stepG = 170 + MV * 13 + FV * 8 + greenBoost * 10;
+                const stepB = 112 + MV *  9 + FV * 5 - greenBoost *  8;
+
+                // Blend steppe over desert
+                r = r + (stepR - r) * steppeBlend;
+                g = g + (stepG - g) * steppeBlend;
+                b = b + (stepB - b) * steppeBlend;
+
+                // Directional shading
+                r += lightF;
+                g += lightF * 0.87;
+                b += lightF * 0.60;
 
                 bgCtx.fillStyle = _s2RgbStr(r, g, b);
                 bgCtx.fillRect(px, py, DSUB, DSUB);
@@ -1007,64 +1145,45 @@ async function generateMap_story2() {
         }
     }
 
-    // Ultra-rare wind streaks on dune tiles only
-    for (let i = 0; i < COLS; i += 1) {
-        for (let j = 0; j < ROWS; j += 1) {
-            const t = worldMap_story2[i][j];
-            if (t.name !== "Dunes") continue;
-            if (_s2Hash(i * 9 + 7, j * 11 + 13) < 0.985) continue;
-            const px = i * TILE_SIZE;
-            const py = j * TILE_SIZE;
-            bgCtx.strokeStyle = "rgba(168, 138, 92, 0.22)";
-            bgCtx.lineWidth = 0.6;
-            bgCtx.beginPath();
-            const sx = px + 2 + _s2Hash(i, j + 1) * 10;
-            const sy = py + TILE_SIZE * 0.5 + (_s2Hash(i + 1, j) - 0.5) * 4;
-            bgCtx.moveTo(sx, sy);
-            bgCtx.lineTo(sx + 8, sy + (_s2Hash(i + 2, j) - 0.5) * 1.4);
-            bgCtx.stroke();
+    // ── Wind streaks — biome-aware, directional, varied density ───────────────
+    // More numerous in erg sand, rare in reg, absent in steppe.
+    // Angle clusters ~westerly (positive x) with ±20° random wobble.
+    {
+        for (let i = 0; i < COLS; i++) {
+            for (let j = 0; j < ROWS; j++) {
+                const t = worldMap_story2[i][j];
+                if (t.name !== "Dunes") continue;
+                const nx = (i + 0.5) / COLS;
+                const ny = (j + 0.5) / ROWS;
+                if (ny < 0.21) continue;   // no wind streaks in steppe zone
+
+                // Density via biome-noise: erg gets more streaks
+                const B1 = _s2Fbm(nx * 2.4 + 0.7, ny * 2.4 + 1.3, 3);
+                const thresh = 0.962 + (1.0 - B1) * 0.022;  // 0.962–0.984
+                if (_s2Hash(i * 9 + 7, j * 11 + 13) < thresh) continue;
+
+                const px  = i * TILE_SIZE;
+                const py  = j * TILE_SIZE;
+                const len = 9 + _s2Hash(i * 3, j * 7) * 22;
+                const alp = 0.10 + _s2Hash(i + 2, j + 5) * 0.18;
+                const ang = (_s2Hash(i * 5, j * 3) - 0.5) * 0.38; // ±~22° from E
+                const sx  = px + 2 + _s2Hash(i, j + 1) * (TILE_SIZE - 4);
+                const sy  = py + TILE_SIZE * 0.5 + (_s2Hash(i + 1, j) - 0.5) * TILE_SIZE * 0.55;
+                bgCtx.strokeStyle = `rgba(158,126,82,${alp.toFixed(2)})`;
+                bgCtx.lineWidth   = 0.4 + _s2Hash(i * 2 + 1, j * 3 + 1) * 0.5;
+                bgCtx.beginPath();
+                bgCtx.moveTo(sx, sy);
+                bgCtx.lineTo(sx + Math.cos(ang) * len, sy + Math.sin(ang) * len);
+                bgCtx.stroke();
+            }
         }
     }
 
-    await setLoading(44, "Watering the oases…");
+    await setLoading(44, "Placing desert settlements…");
 
     // =========================================================================
-    // PHASE 4 — OASIS SOFT GREEN GRADIENT  (around every city)
-    // Replaces the harsh hard-edged plain blobs of v2 with smooth radial fades.
+    // PHASE 4 — (REMOVED) Oasis gradients abolished — cities in open desert.
     // =========================================================================
-    for (let z = 0; z < _S2_OASIS_ZONES.length; z++) {
-        const zone = _S2_OASIS_ZONES[z];
-        const cxPx = zone[0] * WORLD_WIDTH;
-        const cyPx = zone[1] * WORLD_HEIGHT;
-        const rPx  = zone[2] * WORLD_WIDTH;
-
-        // Radial gradient for the oasis halo — fades to dune tan
-        const grad = bgCtx.createRadialGradient(
-            cxPx, cyPx, rPx * 0.10,
-            cxPx, cyPx, rPx * 1.15
-        );
-        grad.addColorStop(0.00, "rgba(118, 138, 78, 0.55)");      // greenish core
-        grad.addColorStop(0.45, "rgba(140, 152, 90, 0.38)");
-        grad.addColorStop(0.85, "rgba(180, 168, 110, 0.18)");
-        grad.addColorStop(1.00, "rgba(207, 174, 126, 0.00)");
-        bgCtx.fillStyle = grad;
-        bgCtx.beginPath();
-        bgCtx.arc(cxPx, cyPx, rPx * 1.2, 0, Math.PI * 2);
-        bgCtx.fill();
-
-        // Sparse dark grass tufts in the bright core only
-        const dotCount = 5 + ((rPx / 24) | 0);
-        bgCtx.fillStyle = "rgba(82, 102, 56, 0.55)";
-        for (let k = 0; k < dotCount; k++) {
-            const a = (k / dotCount) * Math.PI * 2 + _s2Hash(z, k);
-            const rr = rPx * (0.18 + _s2Hash(z * 3, k * 5) * 0.55);
-            const tx = cxPx + Math.cos(a) * rr;
-            const ty = cyPx + Math.sin(a) * rr;
-            bgCtx.beginPath();
-            bgCtx.arc(tx, ty, 1.4 + _s2Hash(k, z) * 1.4, 0, Math.PI * 2);
-            bgCtx.fill();
-        }
-    }
 
     await setLoading(50, "Sculpting the Qilian ridges…");
 
@@ -1084,8 +1203,6 @@ async function generateMap_story2() {
         const dNx = SUB * 0.55 / WORLD_WIDTH;
         const dNy = SUB * 0.55 / WORLD_HEIGHT;
 
-        // Dune RGB used for blend at the strip edge
-        const duneR = 207, duneG = 174, duneB = 126;
 
         for (let si = 0; si < SCOLS; si++) {
             const nx = (si * SUB + SUB * 0.5) / WORLD_WIDTH;
@@ -1101,14 +1218,13 @@ async function generateMap_story2() {
                 const py = sj * SUB;
 
                 const mask = _s2QilianMask(nx, ny);
-                if (mask < 0.04) continue;
+                if (mask < 0.012) continue;
 
                 // Skip painting over rivers/lakes/oases
                 const ti = Math.min(COLS - 1, (px / TILE_SIZE) | 0);
                 const tj = Math.min(ROWS - 1, (py / TILE_SIZE) | 0);
                 const t  = worldMap_story2[ti][tj];
-                if (t.name === "River" || t.name === "Coastal" ||
-                    t.name === "Plains") continue;
+                if (t.name === "River" || t.name === "Coastal") continue;
 
                 // Sample elevation at centre + 4 cardinal neighbours
                 const eC = _s2QilianElev(nx,        ny       );
@@ -1139,6 +1255,19 @@ async function generateMap_story2() {
 
                 const rgb = _s2PickMountainColor(eC, shading, vegN);
                 let r = rgb[0], g = rgb[1], b = rgb[2];
+
+                // Local desert base — samples biome fields so mountain fringe
+                // blends into whichever desert sub-type lies beneath
+                const _bB1 = _s2Fbm(nx * 2.4 + 0.7,  ny * 2.4 + 1.3,  3);
+                const _bB2 = _s2Fbm(nx * 3.8 + 17.0, ny * 3.8 + 9.4,  2);
+                const _bB3 = _s2Fbm(nx * 1.9 + 31.5, ny * 1.9 + 22.7, 2);
+                const _bEW = _bB1 * _bB1 * (1.0 - _bB2 * 0.4);
+                const _bRW = (1.0 - _bB1) * _bB3 * 1.1;
+                const _bHW = _bB2 * (1.0 - _bB3) * 0.70;
+                const _bWS = _bEW + _bRW + _bHW + 0.0001;
+                const duneR = (_bEW * 215 + _bRW * 182 + _bHW * 196) / _bWS;
+                const duneG = (_bEW * 180 + _bRW * 162 + _bHW * 152) / _bWS;
+                const duneB = (_bEW * 118 + _bRW * 126 + _bHW * 106) / _bWS;
 
                 // Mask-blend with dune at the strip edge
                 if (mask < 1.0) {
@@ -1280,59 +1409,54 @@ async function generateMap_story2() {
 
     // =========================================================================
     // PHASE 6 — RIVER & LAKE TILE PAINTING
-    // Rivers are tile-coloured ribbons only.  Variable depth/edge from the
-    // river-field intensity.  No centre polyline — exactly what the player
-    // requested.  Sparse highlight ripples at sub-tile resolution.
+    // Lakes (Coastal) get full tile-colour fill.
+    // Rivers are drawn as hairline 1-px polylines — this is the desert; rivers
+    // are thin seasonal watercourses, not the wide blue ribbons of wetter maps.
     // =========================================================================
     for (let i = 0; i < COLS; i++) {
         const px = i * TILE_SIZE;
         const nx = (i + 0.5) / COLS;
         for (let j = 0; j < ROWS; j++) {
             const t = worldMap_story2[i][j];
-            if (t.name !== "River" && t.name !== "Coastal") continue;
+            // Only paint Coastal (lake) tiles here — rivers handled below
+            if (t.name !== "Coastal") continue;
             const py = j * TILE_SIZE;
             const ny = (j + 0.5) / ROWS;
 
-            // Determine intensity: 1 inside lake, river-field otherwise
-            let intensity;
-            if (t.name === "Coastal") {
-                intensity = 0.95;
-            } else {
-                intensity = _s2RiverField(nx, ny);
-                if (intensity < 0.10) intensity = 0.10;     // sanity floor
-            }
-
-            // Paint full tile with depth-graded water colour.  Sub-divide into
-            // 4×4 cells for soft edge variation that doesn't look like a stripe.
+            // Full lake tile: depth-graded water colour at 4×4 sub-resolution
             const SUB_R = 4;
             for (let cx = 0; cx < TILE_SIZE; cx += SUB_R) {
                 const rx = (i + (cx + SUB_R * 0.5) / TILE_SIZE) / COLS;
                 for (let cy = 0; cy < TILE_SIZE; cy += SUB_R) {
                     const ry = (j + (cy + SUB_R * 0.5) / TILE_SIZE) / ROWS;
-                    let subI;
-                    if (t.name === "Coastal") {
-                        subI = 0.92;
-                    } else {
-                        subI = _s2RiverField(rx, ry);
-                        if (subI < 0.08) subI = 0.08;
-                    }
+                    const subI = 0.92;
                     const seed = _s2Hash(i * 97 + cx, j * 89 + cy);
                     const col = _s2RiverColor(subI, seed);
                     bgCtx.fillStyle = _s2RgbStr(col[0], col[1], col[2]);
                     bgCtx.fillRect(px + cx, py + cy, SUB_R, SUB_R);
                 }
             }
+        }
+    }
 
-            // Sparse white shimmer arc on bigger river tiles
-            if (intensity > 0.55 && _s2Hash(i + 7, j + 11) > 0.78) {
-                bgCtx.strokeStyle = "rgba(214, 232, 244, 0.42)";
-                bgCtx.lineWidth = 0.7;
-                bgCtx.beginPath();
-                const a0 = _s2Hash(i, j) * Math.PI * 2;
-                const cxP = px + TILE_SIZE * 0.5 + (_s2Hash(i, j+1) - 0.5) * 4;
-                const cyP = py + TILE_SIZE * 0.5 + (_s2Hash(i+1, j) - 0.5) * 4;
-                bgCtx.arc(cxP, cyP, 1.6 + _s2Hash(i+1, j+1) * 1.4, a0, a0 + Math.PI * 0.7);
-                bgCtx.stroke();
+    // ── River tile painting — sub-pixel water fill for actual River tiles ────────
+    // Cosmetic hairlines are removed; all river visuals come from tile classification.
+    {
+        const SUB_R = 4;
+        for (let i = 0; i < COLS; i++) {
+            const px = i * TILE_SIZE;
+            for (let j = 0; j < ROWS; j++) {
+                const t = worldMap_story2[i][j];
+                if (t.name !== "River") continue;
+                const py = j * TILE_SIZE;
+                for (let cx = 0; cx < TILE_SIZE; cx += SUB_R) {
+                    for (let cy = 0; cy < TILE_SIZE; cy += SUB_R) {
+                        const seed = _s2Hash(i * 83 + cx, j * 71 + cy);
+                        const col = _s2RiverColor(0.74, seed);  // lighter than lake
+                        bgCtx.fillStyle = _s2RgbStr(col[0], col[1], col[2]);
+                        bgCtx.fillRect(px + cx, py + cy, SUB_R, SUB_R);
+                    }
+                }
             }
         }
     }
@@ -1340,24 +1464,73 @@ async function generateMap_story2() {
     await setLoading(88, "Filling the lakes…");
 
     // =========================================================================
-    // PHASE 7 — LAKES (polygon overlay for the bigger highland lakes)
-    // The polygon-fill gives the lakes a clean shoreline that the noisy
-    // tile-pass can't quite produce.  Drawn after rivers so they sit on top.
+    // PHASE 7 — LAKES (smooth organic polygon overlay, two-pass)
+    // Pass 1: all steppe rings first — so nearby lakes don't paint green
+    //         over each other's water.
+    // Pass 2: all lake fills on top — covers any ring overlap.
     // =========================================================================
-    const _C_LAKE_FILL = "#3e7a98";
-    const _C_LAKE_EDGE = "#2e6280";
 
-    _s2DrawLakePoly(LAKE_QINGHAI,   _C_LAKE_FILL, _C_LAKE_EDGE, 0.86, 0.62, 1.8);
-    _s2DrawLakePoly(LAKE_HEISHUI,   _C_LAKE_FILL, _C_LAKE_EDGE, 0.84, 0.58, 1.6);
-    _s2DrawLakePoly(LAKE_TWIN_WEST, _C_LAKE_FILL, _C_LAKE_EDGE, 0.82, 0.56, 1.3);
-    _s2DrawLakePoly(LAKE_TWIN_EAST, _C_LAKE_FILL, _C_LAKE_EDGE, 0.82, 0.56, 1.3);
-    _s2DrawLakePoly(LAKE_FAR_WEST,  _C_LAKE_FILL, _C_LAKE_EDGE, 0.78, 0.54, 1.2);
+    // Pass 1 — steppe rings
+    _s2DrawLakeSteppeRing(LAKE_QINGHAI);
+    _s2DrawLakeSteppeRing(LAKE_HEISHUI);
+ 
+    _s2DrawLakeSteppeRing(LAKE_FAR_WEST);
+    _s2DrawLakeSteppeRing(LAKE_CRESCENT_MOON);
+    _s2DrawLakeSteppeRing(LAKE_WUDING_TERMINUS);
 
-    _s2DrawLakeShimmer(LAKE_QINGHAI);
-    _s2DrawLakeShimmer(LAKE_HEISHUI);
-    _s2DrawLakeShimmer(LAKE_TWIN_WEST);
-    _s2DrawLakeShimmer(LAKE_TWIN_EAST);
-    _s2DrawLakeShimmer(LAKE_FAR_WEST);
+    // Pass 2 — lake fills
+    _s2DrawLakeFill(LAKE_QINGHAI);
+    _s2DrawLakeFill(LAKE_HEISHUI);
+    _s2DrawLakeFill(LAKE_TWIN_WEST);
+    _s2DrawLakeFill(LAKE_TWIN_EAST);
+    _s2DrawLakeFill(LAKE_FAR_WEST);
+    _s2DrawLakeFill(LAKE_CRESCENT_MOON);
+    _s2DrawLakeFill(LAKE_WUDING_TERMINUS);
+
+    // =========================================================================
+    // PHASE 7b — LARGE MOUNTAIN EDGE-BLEND PASS
+    // Paints a soft 3-tile gradient wedge wherever Large Mountains border
+    // Dunes or Highlands, so the transition looks natural rather than a hard cut.
+    // =========================================================================
+    (function _s2BlendMountainEdges() {
+        const BLEND_BIOMES = new Set(["Dunes","Highlands"]);
+        const MTN_EDGE_R = 110, MTN_EDGE_G = 88, MTN_EDGE_B = 62;
+        const BIOME_RGB = {
+            "Dunes":     [207, 174, 126],
+            "Highlands": [184, 150, 106],   // matches updated lighter highlands palette
+        };
+        const DIRS = [[-1,0],[1,0],[0,-1],[0,1]];
+        const GRAD_STEPS = 3;
+
+        for (let i = 0; i < COLS; i++) {
+            for (let j = 0; j < ROWS; j++) {
+                const tile = worldMap_story2[i]?.[j];
+                if (!tile || tile.name !== "Large Mountains") continue;
+
+                for (const [di, dj] of DIRS) {
+                    for (let step = 1; step <= GRAD_STEPS; step++) {
+                        const ni = i + di * step;
+                        const nj = j + dj * step;
+                        if (ni < 0 || ni >= COLS || nj < 0 || nj >= ROWS) break;
+                        const nbTile = worldMap_story2[ni]?.[nj];
+                        if (!nbTile || !BLEND_BIOMES.has(nbTile.name)) break;
+
+                        const tgt = BIOME_RGB[nbTile.name];
+                        if (!tgt) break;
+
+                        const t = step / (GRAD_STEPS + 1);
+                        const r = (MTN_EDGE_R + (tgt[0] - MTN_EDGE_R) * t) | 0;
+                        const g = (MTN_EDGE_G + (tgt[1] - MTN_EDGE_G) * t) | 0;
+                        const b = (MTN_EDGE_B + (tgt[2] - MTN_EDGE_B) * t) | 0;
+                        const alpha = 0.55 - t * 0.42;
+
+                        bgCtx.fillStyle = `rgba(${r},${g},${b},${alpha.toFixed(2)})`;
+                        bgCtx.fillRect(ni * TILE_SIZE, nj * TILE_SIZE, TILE_SIZE, TILE_SIZE);
+                    }
+                }
+            }
+        }
+    })();
 
     await setLoading(94, "Aging parchment map…");
 
@@ -1421,57 +1594,58 @@ function _s2SnapToPassable(px, py) {
 const FIXED_SETTLEMENTS_story2 = [
 
     // ── Far Western Corridor ──────────────────────────────────────────────────
-    { name: "Yumen Pass",   nx: 0.03, ny: 0.32, pop:   800, isVillage: true,  faction: "Mongol Empire" },
-    { name: "Shazhou",      nx: 0.07, ny: 0.35, pop:  6500, isVillage: false, faction: "Mongol Empire" },
-    { name: "Changle",      nx: 0.14, ny: 0.35, pop:  1400, isVillage: true,  faction: "Mongol Empire" },
-    { name: "Guazhou",      nx: 0.18, ny: 0.34, pop:  4800, isVillage: false, faction: "Mongol Empire" },
+    // NOTE: Historically these fell to Subutai, but all cities display as Xia
+    { name: "Yumen Pass",   nx: 0.03, ny: 0.32, pop:   800, isVillage: true,  faction: "Xiaran Dominion" },
+    { name: "Shazhou",      nx: 0.07, ny: 0.35, pop:  6500, isVillage: false, faction: "Xiaran Dominion" },
+    { name: "Changle",      nx: 0.14, ny: 0.35, pop:  1400, isVillage: true,  faction: "Xiaran Dominion" },
+    { name: "Guazhou",      nx: 0.18, ny: 0.34, pop:  4800, isVillage: false, faction: "Xiaran Dominion" },
 
     // ── Suzhou — The Siege City ───────────────────────────────────────────────
-    { name: "Suzhou",       nx: 0.29, ny: 0.42, pop:  9200, isVillage: false, faction: "Western Xia" },
+    { name: "Suzhou",       nx: 0.29, ny: 0.42, pop:  9200, isVillage: false, faction: "Xiaran Dominion" },
 
     // ── Northern & Central ────────────────────────────────────────────────────
-    { name: "Heishui Commandary", nx: 0.43, ny: 0.20, pop: 3200, isVillage: false, faction: "Mongol Empire" },
-    { name: "Ganzhou",      nx: 0.39, ny: 0.50, pop: 12000, isVillage: false, faction: "Western Xia" },
-    { name: "Xiliang",      nx: 0.51, ny: 0.60, pop:  8000, isVillage: false, faction: "Western Xia" },
-    { name: "Renduo Spring",nx: 0.46, ny: 0.67, pop:   700, isVillage: true,  faction: "Western Xia" },
+    { name: "Heishui Commandary", nx: 0.43, ny: 0.20, pop: 3200, isVillage: false, faction: "Xiaran Dominion" },
+    { name: "Ganzhou",      nx: 0.39, ny: 0.50, pop: 12000, isVillage: false, faction: "Xiaran Dominion" },
+    { name: "Xiliang",      nx: 0.51, ny: 0.60, pop:  8000, isVillage: false, faction: "Xiaran Dominion" },
+    { name: "Renduo Spring",nx: 0.46, ny: 0.67, pop:   700, isVillage: true,  faction: "Xiaran Dominion" },
 
-    // ── Northeastern / Mongol approach ────────────────────────────────────────
-    { name: "Wulahai",      nx: 0.77, ny: 0.25, pop:  3500, isVillage: false, faction: "Mongol Empire" },
-    { name: "Sanjiaochuan", nx: 0.91, ny: 0.34, pop:  1800, isVillage: true,  faction: "Western Xia" },
-    { name: "Heqing Circuit",nx:0.92, ny: 0.37, pop:  1500, isVillage: true,  faction: "Western Xia" },
-    { name: "Jinsu Circuit", nx: 0.96, ny: 0.39, pop:  1600, isVillage: true, faction: "Western Xia" },
+    // ── Northeastern ──────────────────────────────────────────────────────────
+    { name: "Wulahai",      nx: 0.77, ny: 0.25, pop:  3500, isVillage: false, faction: "Xiaran Dominion" },
+    { name: "Sanjiaochuan", nx: 0.91, ny: 0.34, pop:  1800, isVillage: true,  faction: "Xiaran Dominion" },
+    { name: "Heqing Circuit",nx:0.92, ny: 0.37, pop:  1500, isVillage: true,  faction: "Xiaran Dominion" },
+    { name: "Jinsu Circuit", nx: 0.96, ny: 0.39, pop:  1600, isVillage: true, faction: "Xiaran Dominion" },
 
     // ── Capital Region ────────────────────────────────────────────────────────
-    { name: "Right Tributary Commandary", nx: 0.72, ny: 0.44, pop: 2500, isVillage: true,  faction: "Western Xia" },
-    { name: "Dingzhou",     nx: 0.72, ny: 0.51, pop:  3200, isVillage: false, faction: "Western Xia" },
-    { name: "Xingqing (Zhongxing)", nx: 0.72, ny: 0.54, pop: 18000, isVillage: false, faction: "Western Xia" },
-    { name: "Shunzhou",     nx: 0.71, ny: 0.57, pop:  2200, isVillage: true,  faction: "Western Xia" },
-    { name: "Xiping",       nx: 0.72, ny: 0.59, pop:  2800, isVillage: true,  faction: "Western Xia" },
-    { name: "Jingsai Commandary", nx: 0.72, ny: 0.66, pop: 2400, isVillage: true, faction: "Western Xia" },
+    { name: "Right Tributary Commandary", nx: 0.72, ny: 0.44, pop: 2500, isVillage: true,  faction: "Xiaran Dominion" },
+    { name: "Dingzhou",     nx: 0.72, ny: 0.51, pop:  3200, isVillage: false, faction: "Xiaran Dominion" },
+    { name: "Xingqing (Zhongxing)", nx: 0.72, ny: 0.54, pop: 18000, isVillage: false, faction: "Xiaran Dominion" },
+    { name: "Shunzhou",     nx: 0.71, ny: 0.57, pop:  2200, isVillage: true,  faction: "Xiaran Dominion" },
+    { name: "Xiping",       nx: 0.72, ny: 0.59, pop:  2800, isVillage: true,  faction: "Xiaran Dominion" },
+    { name: "Jingsai Commandary", nx: 0.72, ny: 0.66, pop: 2400, isVillage: true, faction: "Xiaran Dominion" },
 
     // ── Eastern Region ────────────────────────────────────────────────────────
-    { name: "Left Tributary Commandary", nx: 0.92, ny: 0.52, pop: 2000, isVillage: true,  faction: "Western Xia" },
-    { name: "Xiazhou",      nx: 0.86, ny: 0.56, pop:  3500, isVillage: false, faction: "Western Xia" },
-    { name: "Yinzhou",      nx: 0.92, ny: 0.58, pop:  4200, isVillage: false, faction: "Western Xia" },
-    { name: "Niuxinting",   nx: 0.88, ny: 0.62, pop:  1500, isVillage: true,  faction: "Western Xia" },
-    { name: "Longzhou",     nx: 0.88, ny: 0.64, pop:  2800, isVillage: true,  faction: "Western Xia" },
-    { name: "Hongzhou",     nx: 0.86, ny: 0.66, pop:  2200, isVillage: true,  faction: "Western Xia" },
-    { name: "Sanchuankou",  nx: 0.90, ny: 0.72, pop:  1800, isVillage: true,  faction: "Western Xia" },
-    { name: "Yan'an",       nx: 0.94, ny: 0.74, pop:  3800, isVillage: false, faction: "Western Xia" },
+    { name: "Left Tributary Commandary", nx: 0.92, ny: 0.52, pop: 2000, isVillage: true,  faction: "Xiaran Dominion" },
+    { name: "Xiazhou",      nx: 0.86, ny: 0.56, pop:  3500, isVillage: false, faction: "Xiaran Dominion" },
+    { name: "Yinzhou",      nx: 0.92, ny: 0.58, pop:  4200, isVillage: false, faction: "Xiaran Dominion" },
+    { name: "Niuxinting",   nx: 0.88, ny: 0.62, pop:  1500, isVillage: true,  faction: "Xiaran Dominion" },
+    { name: "Longzhou",     nx: 0.88, ny: 0.64, pop:  2800, isVillage: true,  faction: "Xiaran Dominion" },
+    { name: "Hongzhou",     nx: 0.86, ny: 0.66, pop:  2200, isVillage: true,  faction: "Xiaran Dominion" },
+    { name: "Sanchuankou",  nx: 0.90, ny: 0.72, pop:  1800, isVillage: true,  faction: "Xiaran Dominion" },
+    { name: "Yan'an",       nx: 0.94, ny: 0.74, pop:  3800, isVillage: false, faction: "Xiaran Dominion" },
 
     // ── Southern Region ───────────────────────────────────────────────────────
-    { name: "Xi'anzhou",    nx: 0.66, ny: 0.73, pop:  2600, isVillage: true,  faction: "Western Xia" },
-    { name: "Huizhou",      nx: 0.64, ny: 0.77, pop:  1900, isVillage: true,  faction: "Western Xia" },
-    { name: "Qingzhou",     nx: 0.81, ny: 0.79, pop:  2800, isVillage: true,  faction: "Western Xia" },
-    { name: "Haoshuichuan", nx: 0.71, ny: 0.82, pop:  1400, isVillage: true,  faction: "Western Xia" },
-    { name: "Longzhou (South)", nx: 0.74, ny: 0.90, pop: 2200, isVillage: true, faction: "Western Xia" },
-    { name: "Fengxiang",    nx: 0.88, ny: 0.98, pop:  4000, isVillage: false, faction: "Western Xia" },
+    { name: "Xi'anzhou",    nx: 0.66, ny: 0.73, pop:  2600, isVillage: true,  faction: "Xiaran Dominion" },
+    { name: "Huizhou",      nx: 0.64, ny: 0.77, pop:  1900, isVillage: true,  faction: "Xiaran Dominion" },
+    { name: "Qingzhou",     nx: 0.81, ny: 0.79, pop:  2800, isVillage: true,  faction: "Xiaran Dominion" },
+    { name: "Haoshuichuan", nx: 0.71, ny: 0.82, pop:  1400, isVillage: true,  faction: "Xiaran Dominion" },
+    { name: "Longzhou (South)", nx: 0.74, ny: 0.90, pop: 2200, isVillage: true, faction: "Xiaran Dominion" },
+    { name: "Fengxiang",    nx: 0.88, ny: 0.98, pop:  4000, isVillage: false, faction: "Xiaran Dominion" },
 
     // ── Southwestern Region ───────────────────────────────────────────────────
-    { name: "Xining",       nx: 0.46, ny: 0.75, pop:  4500, isVillage: false, faction: "Western Xia" },
-    { name: "Huangzhou",    nx: 0.49, ny: 0.75, pop:  2000, isVillage: true,  faction: "Western Xia" },
-    { name: "Jishi Circuit",nx: 0.44, ny: 0.81, pop:  1800, isVillage: true,  faction: "Western Xia" },
-    { name: "Lanzhou",      nx: 0.58, ny: 0.81, pop:  5800, isVillage: false, faction: "Western Xia" },
+    { name: "Xining",       nx: 0.46, ny: 0.75, pop:  4500, isVillage: false, faction: "Xiaran Dominion" },
+    { name: "Huangzhou",    nx: 0.49, ny: 0.75, pop:  2000, isVillage: true,  faction: "Xiaran Dominion" },
+    { name: "Jishi Circuit",nx: 0.44, ny: 0.81, pop:  1800, isVillage: true,  faction: "Xiaran Dominion" },
+    { name: "Lanzhou",      nx: 0.58, ny: 0.81, pop:  5800, isVillage: false, faction: "Xiaran Dominion" },
 ];
 
 // =============================================================================
@@ -1492,7 +1666,7 @@ function populateHistoricalCities_story2() {
             faction:      site.faction,
             pop:          site.pop,
             isVillage:    site.isVillage,
-            isPlayerHome: site.name === "Suzhou"
+            isPlayerHome: site.name === "Heishui Commandary"
         });
     });
 }
@@ -1520,64 +1694,179 @@ window.initGame_story2 = async function () {
         console.error("[Story2] applyStory2Factions() not found.");
     }
 
-    // ── 2. Generate map ───────────────────────────────────────────────────────
+    // ── 2. Build terrain SCAFFOLD ─────────────────────────────────────────────
+    // generateMap_story2() is NOT the final map — it exists only to build a
+    // correctly-sized, fully-populated worldMap[i][j] grid (and bgCanvas) that
+    // ScenarioRuntime.applyDevScenario() can mutate in-place with the real tile
+    // data from window.Story_2_Data (the imported JSON from Story_2_Dev.js).
+    // Without this scaffold, _reskinWorldMap has no tile objects to overwrite.
     await generateMap_story2();
 
-    // ── 3. Place settlements ──────────────────────────────────────────────────
-    await setLoading(96, "Founding oasis garrisons and Mongol encampments…");
-    populateCities_story2();
-
-    // ── 4. Swap story2 data into shared engine arrays ─────────────────────────
+    // ── 3. Expose engine refs BEFORE applying the JSON ────────────────────────
+    // _applyToLiveEngine reads these to locate worldMap and cities.
     worldMap.length = 0;
     worldMap_story2.forEach((col, i) => { worldMap[i] = col; });
-    cities.length = 0;
-    cities_story2.forEach(c => cities.push(c));
     if (typeof worldMapRef !== 'undefined') worldMapRef = worldMap;
 
     window.cities_sandbox       = cities;
     window._tradeWorldRef       = worldMap;
     window.WORLD_WIDTH_sandbox  = (typeof WORLD_WIDTH  !== 'undefined') ? WORLD_WIDTH  : 4000;
     window.WORLD_HEIGHT_sandbox = (typeof WORLD_HEIGHT !== 'undefined') ? WORLD_HEIGHT : 3000;
+    window.__sandboxBgCanvas    = bgCanvas;
+    window.__sandboxBgCtx       = bgCtx;
 
-    // Expose bg canvas (engine convention)
-    window.__sandboxBgCanvas = bgCanvas;
-    window.__sandboxBgCtx    = bgCtx;
+    // ── 4. Mark Story 2 ACTIVE — set BEFORE applyDevScenario so that
+    //       _maybeBootStory2Campaign (called inside applyDevScenario) can see
+    //       the flag is already true and skip its own install attempt, letting
+    //       the direct install() call below be the single authority.
+    //       (Previously was set AFTER applyDevScenario — Bug 1 from prior fix.)
+    window.__campaignStory2Active = true;
 
-    // ── 5. Spawn NPC armies ───────────────────────────────────────────────────
+    // ── 4b. PRE-PATCH Story_2_Data before applyDevScenario consumes it ─────────
+    // Story_2_Data is an exported map snapshot from the scenario editor. It carries
+    // three values that are correct for the editor but wrong for campaign runtime:
+    //
+    //   startingNpcBans  — {factions:[], roles:[]} (editor has no story bans)
+    //   storyIntro       — {enabled: false} (editor left it disabled)
+    //   playerSetup      — faction:"Xiaran Dominion", 20 Militia (dev view)
+    //
+    // Both _applyToLiveEngine (scenario_update.js) AND ScenarioTriggers.start()
+    // hard-reset window.__npcSpawnBans from scenarioDoc.startingNpcBans, so if the
+    // JSON has empty roles the ban stamped by mongolconquestxia_scenario.js at
+    // module-load time is wiped and Xiaran NPCs flood globalNPCs during steps 6-7.
+    //
+    // We patch in-place here — BEFORE applyDevScenario — so every consumer that
+    // reads from the doc object gets campaign-correct values. Story_2_Data itself
+    // is not modified on disk; this is a runtime-only patch to the live JS object.
+    (function _patchStory2DocForCampaign() {
+        var _doc = window.Story_2_Data;
+        if (!_doc) return;
+        var _mc = window.MongolConquestScenario;
+
+        // 1. NPC spawn bans — campaign module is authoritative, not the JSON.
+        //
+        // STORY 2 FIX (random Mongol city bug):
+        // Also ban the "Mongol Empire" faction from procedural city seeding.
+        // The player IS Mongol Empire and there are no static Mongol cities in
+        // this scenario — without this ban, ensureAllFactionsSpawned() in
+        // sandboxmode_npc_system.js force-converts the closest Xiaran city into
+        // a Mongol-owned city. The faction is also stamped at module-load time
+        // by mongolconquestxia_scenario.js _stampInitialBan; we re-assert it
+        // here so the doc itself carries the ban (both _applyToLiveEngine and
+        // ScenarioTriggers.start() hard-reset window.__npcSpawnBans from the
+        // doc, so the doc must be authoritative).
+        var _banRoles    = ["Commerce", "Patrol", "Civilian", "Military"];
+        var _banFactions = ["Mongol Empire"];
+        if (!_doc.startingNpcBans) _doc.startingNpcBans = { factions: [], roles: [] };
+        _doc.startingNpcBans.roles    = _banRoles.slice();
+        _doc.startingNpcBans.factions = _banFactions.slice();
+        // Also reinstate the live global immediately.
+        if (!window.__npcSpawnBans) window.__npcSpawnBans = { factions: [], roles: [] };
+        _banRoles.forEach(function(r) {
+            if (!window.__npcSpawnBans.roles.includes(r)) window.__npcSpawnBans.roles.push(r);
+        });
+        _banFactions.forEach(function(f) {
+            if (!window.__npcSpawnBans.factions.includes(f)) window.__npcSpawnBans.factions.push(f);
+        });
+
+        // 2. storyIntro — copy from campaign DATA so _maybePlayStoryIntro plays
+        //    the cinematic, which gates scenario_start and t0_boot.
+        if (_mc && _mc.DATA && _mc.DATA.storyIntro) {
+            _doc.storyIntro = _mc.DATA.storyIntro;
+        } else if (_doc.storyIntro) {
+            _doc.storyIntro.enabled = true;
+        }
+
+        // 3. playerSetup — copy from campaign DATA so faction/position/troops
+        //    are correct for the Mongol perspective from the start.
+        if (_mc && _mc.DATA && _mc.DATA.playerSetup) {
+            _doc.playerSetup = _mc.DATA.playerSetup;
+        }
+
+        console.log("[Story2] Story_2_Data pre-patched for campaign runtime.",
+                    "bans.roles:",     _doc.startingNpcBans.roles,
+                    "| bans.factions:", _doc.startingNpcBans.factions,
+                    "| storyIntro.enabled:", _doc.storyIntro && _doc.storyIntro.enabled,
+                    "| playerSetup.faction:", _doc.playerSetup && _doc.playerSetup.faction);
+    })();
+
+    // ── 5. Apply the imported JSON — tiles, cities, factions, player setup ────
+    // applyDevScenario() now also calls _maybeBootStory2Campaign() internally,
+    // which calls MongolConquestScenario.install() → ScenarioTriggers.start().
+    // The __mc_installed guard prevents double-install if the _autoInstall
+    // interval in mongolconquestxia_scenario.js fires concurrently.
+    const _s2Doc = window.Story_2_Data;
+    if (!_s2Doc) {
+        console.error("[Story2] window.Story_2_Data not found — is Story_2_Dev.js loaded?");
+        // Fall back to FIXED_SETTLEMENTS so the game still boots
+        populateCities_story2();
+        cities.length = 0;
+        cities_story2.forEach(c => cities.push(c));
+    } else if (window.ScenarioRuntime && typeof window.ScenarioRuntime.applyDevScenario === 'function') {
+        await setLoading(94, "Loading imported Hexi Corridor map…");
+        window.ScenarioRuntime.applyDevScenario(_s2Doc);
+        console.log("[Story2] ✅ Story_2_Data applied via ScenarioRuntime.applyDevScenario().");
+    } else {
+        console.error("[Story2] ScenarioRuntime.applyDevScenario() not found — scenario_update.js may be outdated.");
+        populateCities_story2();
+        cities.length = 0;
+        cities_story2.forEach(c => cities.push(c));
+    }
+
+    // ── 6. Spawn NPC armies ───────────────────────────────────────────────────
     await setLoading(97, "Deploying Tangut garrison and Mongol vanguard…");
     if (typeof initializeNPCs === 'function') {
         initializeNPCs(cities, worldMap, TILE_SIZE, COLS, ROWS,
                        PADDING_X_story2, PADDING_Y_story2);
     }
 
-    // ── 6. Boot city interiors ────────────────────────────────────────────────
+    // ── 7. Boot city interiors ────────────────────────────────────────────────
     await setLoading(98, "Building oasis walls, markets, and watchtowers…");
     if (typeof initAllCities === 'function') {
         await initAllCities(FACTIONS);
     }
 
-    // ── 7. Place player near Suzhou ───────────────────────────────────────────
-    const startCity =
-        cities.find(c => c.name === "Suzhou") ||
-        cities.find(c => {
-            if (_S2_NO_CITY_FACTIONS.has(c.faction)) return false;
-            const gx = Math.floor(c.x / TILE_SIZE);
-            const gy = Math.floor(c.y / TILE_SIZE);
-            return worldMap[gx]?.[gy] && !worldMap[gx][gy].impassable;
-        });
+    // ── 8. Scenario trigger safety-net ────────────────────────────────────────
+    // applyDevScenario() above already called _maybeBootStory2Campaign() which
+    // calls MongolConquestScenario.install() and ScenarioTriggers.start().
+    // This block is a fallback only — it fires if applyDevScenario was skipped
+    // (Story_2_Data missing / ScenarioRuntime not found) or if the module
+    // loaded after applyDevScenario returned.  The __mc_installed guard ensures
+    // install() is never called twice regardless of which path fires first.
 
-    if (startCity) {
-        player.x = startCity.x + 120;
-        player.y = startCity.y + 120;
-    } else {
-        player.x = WORLD_WIDTH  * 0.34;
-        player.y = WORLD_HEIGHT * 0.45;
+    // ── Remove any erroneous Mongol-faction city from the loaded cities array ──
+    if (window.cities) {
+        var _preLen = window.cities.length;
+        window.cities = window.cities.filter(function (c) {
+            return c.faction !== 'Mongol Empire';
+        });
+        var _removed = _preLen - window.cities.length;
+        if (_removed > 0) {
+            console.log("[Story2] Removed " + _removed + " Mongol Empire city(ies) from cities[].");
+        }
     }
 
-    player.faction = "Western Xia";
-    player.enemies = ["Mongol Empire", "Bandits"];
+    if (window.MongolConquestScenario &&
+        typeof window.MongolConquestScenario.install === 'function' &&
+        !window.__mc_installed) {
+        window.__mc_installed = true;
+        if (window.__activeScenario && !window.__activeScenario.factions) {
+            window.__activeScenario.factions = FACTIONS;
+        }
+        try {
+            window.MongolConquestScenario.install();
+            console.log("[Story2] ✅ MongolConquestScenario triggers installed (fallback path).");
+        } catch (err) {
+            console.error("[Story2] MongolConquestScenario.install() failed:", err);
+        }
+    } else if (!window.MongolConquestScenario) {
+        console.warn(
+            "[Story2] MongolConquestScenario not found — " +
+            "ensure mongolconquestxia_scenario.js is loaded before story2_map_and_update.js."
+        );
+    }
 
-    // ── 8. Show game UI ───────────────────────────────────────────────────────
+    // ── 9. Show game UI — only after triggers are installed ───────────────────
     document.getElementById('ui').style.display      = 'block';
     document.getElementById('loading').style.display = 'none';
 
@@ -1591,24 +1880,6 @@ window.initGame_story2 = async function () {
         if (dipEl) dipEl.style.display = 'block';
     }
 
-    // ── 9. Install scenario triggers (campaign mode only) ─────────────────────
-    if (window.__campaignStory2Active === true) {
-        if (window.SuzhouScenario && typeof window.SuzhouScenario.install === 'function') {
-            try {
-                window.SuzhouScenario.install();
-                console.log("[Story2] ✅ SuzhouScenario triggers installed.");
-            } catch (err) {
-                console.error("[Story2] SuzhouScenario.install() failed:", err);
-            }
-        } else {
-            console.warn(
-                "[Story2] SuzhouScenario not found. " +
-                "Ensure mongolconquestxia_scenario.js is loaded before " +
-                "story2_map_and_update.js."
-            );
-        }
-    }
-
     // ── 10. Start render loop ─────────────────────────────────────────────────
     if (typeof draw === 'function') {
         draw();
@@ -1617,10 +1888,10 @@ window.initGame_story2 = async function () {
     }
 
     logGameEvent(
-        "🏜️ 1226 — The dust columns are visible from the north wall. " +
-        "Genghis Khan's host has crossed the Heishui. There is no relief. " +
-        "Hold Suzhou.",
+        "🏹 1225 — The Great Khan's column departs Heishui Commandary. " +
+        "Temür Noyan rides at the rear of the convoy. " +
+        "Follow the column south. Do not fall behind.",
         "general"
     );
-    console.log("[Story2] ✅ Suzhou 1226 initialised successfully.");
+    console.log("[Story2] ✅ Mongol Conquest of Western Xia — 1225 initialised successfully.");
 };

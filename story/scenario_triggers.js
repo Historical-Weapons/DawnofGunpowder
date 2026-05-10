@@ -235,6 +235,28 @@ const CONDITIONS = {
             return ratio * 100 < (p.pct || 0);
         }
     },
+    // Alias used by mongolconquestxia_scenario.js triggers and win/lose rules.
+    // Direct hp=0 check — stops the "Unknown condition type: player_dead" spam.
+    "player_dead": {
+        label: "Player is dead (HP = 0)",
+        desc:  "True when player.hp <= 0 or player.dead === true.",
+        params: [],
+        evaluate: () => {
+            if (!window.player) return false;
+            return window.player.hp <= 0 || window.player.dead === true;
+        }
+    },
+    // Alias used by mongolconquestxia_scenario.js win/lose rules.
+    "all_player_cities_lost": {
+        label: "All player cities lost",
+        desc:  "True when the player faction owns zero cities.",
+        params: [],
+        evaluate: () => {
+            if (!window.cities || !window.player) return false;
+            const pf = window.player.faction || "Xiaran Dominion";
+            return !window.cities.some(c => c.faction === pf);
+        }
+    },
 
     // ── FACTION / DIPLOMACY ────────────────────────────────────────────────
     "faction_alive":       {
@@ -706,6 +728,32 @@ const ACTIONS = {
              + "return a Promise to await.",
         params: [{ key: "code", label: "JS Code", type: "longtext",
                   default: "// console.log('hello!');" }]
+    },
+
+    // ── VISIT SETTLEMENT GATE ──────────────────────────────────────────────
+    // These two actions control the "Visit Settlement" button in the city
+    // panel (id="visit-settlement-btn" in index.html).  The button state is
+    // managed by updateVisitSettlementButton() in sandboxmode_update.js, which
+    // reads window.__visitSettlementEnabled.  The flag is undefined (= enabled)
+    // by default so sandbox / non-scenario games are unaffected.
+    //
+    // Use disable_visit_settlement at scenario start to lock the button, then
+    // enable_visit_settlement at the narrative moment you want to allow access
+    // (e.g. Hakata Bay re-enables it right before the Mizuki teleportation).
+    "disable_visit_settlement": {
+        label: "Disable Visit Settlement button",
+        desc:  "Locks the 'Visit Settlement' button in the city panel so the "
+             + "player cannot enter city interiors. Useful during scripted "
+             + "sequences where a cutscene or teleport is imminent. "
+             + "Pair with enable_visit_settlement to unlock later.",
+        params: []
+    },
+    "enable_visit_settlement": {
+        label: "Enable Visit Settlement button",
+        desc:  "Re-enables the 'Visit Settlement' button after it was locked "
+             + "by disable_visit_settlement. Call this at the narrative moment "
+             + "you want the player to be able to enter city interiors again.",
+        params: []
     }
 };
 
@@ -1384,6 +1432,27 @@ const ACTION_HANDLERS = {
             console.warn("[ScenarioTriggers] custom_js action error:", e);
             _logToGameLog("Custom JS error: " + (e.message || e), "war");
         }
+    },
+
+    // ── VISIT SETTLEMENT GATE ─────────────────────────────────────────────
+    // Sets window.__visitSettlementEnabled and immediately refreshes the
+    // button via updateVisitSettlementButton() (sandboxmode_update.js).
+    // If the city panel is not currently open the next call to
+    // updateVisitSettlementButton() (triggered on the next city-panel open)
+    // will pick up the flag automatically.
+    "disable_visit_settlement": (_p) => {
+        window.__visitSettlementEnabled = false;
+        if (typeof window.updateVisitSettlementButton === "function") {
+            window.updateVisitSettlementButton();
+        }
+        console.log("[ScenarioTriggers] disable_visit_settlement → Visit Settlement button LOCKED.");
+    },
+    "enable_visit_settlement": (_p) => {
+        window.__visitSettlementEnabled = true;
+        if (typeof window.updateVisitSettlementButton === "function") {
+            window.updateVisitSettlementButton();
+        }
+        console.log("[ScenarioTriggers] enable_visit_settlement → Visit Settlement button UNLOCKED.");
     }
 };
 
@@ -4475,4 +4544,508 @@ console.log("[ScenarioTriggers] scenario_triggers.js v" + window.ScenarioTrigger
         const btn = document.getElementById("se-trig-open");
         if (btn && !btn.__stPatched) _swap(btn);
     }, 800);
+})();
+
+
+
+
+
+
+
+
+// ============================================================================
+// CONVOY SYSTEM — Universal NPC Follow + City Route Patch
+// Append this block to the VERY BOTTOM of scenario_triggers.js,
+// after the _patchEditorButton IIFE.
+//
+// Registers the following via ScenarioTriggers.registerCondition/registerAction
+// so they are available to ALL stories, not just Story 2.
+//
+// ── NEW CONDITIONS ──────────────────────────────────────────────────────────
+//   player_near_npc       — player within maxDist px of a named NPC
+//   npc_near_npc          — two named NPCs within maxDist px of each other
+//   convoy_at_stop        — convoy has REACHED (and optionally LEFT) stop N
+//   convoy_route_complete — convoy has finished all route stops
+//
+// ── NEW ACTIONS ─────────────────────────────────────────────────────────────
+//   start_npc_convoy      — boot the convoy follow system
+//   stop_npc_convoy       — halt convoy movement, clear route
+//   add_convoy_stop       — push one city stop (cityName + stayMs) onto route
+//   set_convoy_speed      — change leader/follower speed at runtime
+//
+// ── CONVOY STATE (window.__ScenarioConvoy) ───────────────────────────────────
+//   A single global.  One convoy may be active at a time per scenario.
+//   Stories that need multiple simultaneous convoys should open a PR.
+//
+// ── HOW FORMATION WORKS ─────────────────────────────────────────────────────
+//   The leader (NPC index 0 in followerIds) is moved toward each city stop
+//   via direct position integration (dx/dy per ms).
+//   Every other NPC steers toward:
+//       leaderPos + formationSlot[i]
+//   at a slightly higher speed so stragglers catch up.
+//   Slots are {dx, dy} where dx is lateral (1–5 px) and dy is the distance
+//   behind the leader along the march axis.
+//
+// ── WIRING TO SCENARIO_TRIGGERS ─────────────────────────────────────────────
+//   Nothing inside the ScenarioTriggers IIFE is modified.
+//   All additions go through the public registerCondition / registerAction API.
+// ============================================================================
+
+(function _installConvoySystem() {
+
+    // ── Wait for ScenarioTriggers to expose its register API ─────────────────
+    function _waitAndInstall() {
+        if (!window.ScenarioTriggers ||
+            typeof window.ScenarioTriggers.registerCondition !== "function" ||
+            typeof window.ScenarioTriggers.registerAction    !== "function") {
+            setTimeout(_waitAndInstall, 200);
+            return;
+        }
+        _doInstall();
+    }
+
+    // =========================================================================
+    // CONVOY STATE
+    // =========================================================================
+    var _S = window.__ScenarioConvoy = {
+        active:          false,
+        leaderId:        null,      // storyId of leader NPC
+        followerIds:     [],        // storyIds of followers (not including leader)
+        route:           [],        // [{cityName, stayMs, onArriveTriggerId?}]
+        routeIndex:      0,
+        staying:         false,
+        stayHandle:      null,
+        completedStops:  [],        // indices of finished stops
+        // Speed in px/second
+        leaderSpeedPxSec:    80,
+        followerSpeedPxSec: 110,
+        arrivalRadiusPx:      8,
+        // Formation slot per follower (assigned once at start_npc_convoy)
+        // Each entry: {dx, dy}   dx = lateral offset, dy = depth behind leader
+        formationSlots:      [],
+        spacingPx:           65,    // default front-to-back gap between slots
+        // Internal tick
+        _lastMs:             null,
+        _rafId:              null,
+    };
+
+    // =========================================================================
+    // INTERNAL HELPERS
+    // =========================================================================
+
+    /** Resolve a live NPC object by its scenario storyId. */
+    function _findNpc(storyId) {
+        var arr = window.globalNPCs;
+        if (!arr) return null;
+        for (var i = 0; i < arr.length; i++) {
+            var n = arr[i];
+            if (n.storyId === storyId || n.id === storyId + "__story") return n;
+        }
+        return null;
+    }
+
+    /** Pixel position of a named city (reads window.cities_sandbox or window.cities). */
+    function _cityPos(cityName) {
+        var arr = window.cities_sandbox || window.cities || [];
+        for (var i = 0; i < arr.length; i++) {
+            if (arr[i].name === cityName) return { x: arr[i].x, y: arr[i].y };
+        }
+        console.warn("[Convoy] City not found:", cityName);
+        return null;
+    }
+
+    /** Euclidean distance between two {x,y} points. */
+    function _dist(a, b) {
+        var dx = a.x - b.x, dy = a.y - b.y;
+        return Math.sqrt(dx * dx + dy * dy);
+    }
+
+    /**
+     * Step `unit` toward (tx,ty) at `speedPxSec` over `dtMs`.
+     * Returns true when arrival radius is reached.
+     */
+    function _stepToward(unit, tx, ty, speedPxSec, dtMs) {
+        var dx = tx - unit.x, dy = ty - unit.y;
+        var d  = Math.sqrt(dx * dx + dy * dy);
+        if (d <= _S.arrivalRadiusPx) return true;
+        var step = (speedPxSec * dtMs) / 1000;
+        if (step >= d) { unit.x = tx; unit.y = ty; return true; }
+        unit.x += (dx / d) * step;
+        unit.y += (dy / d) * step;
+        // Keep engine targetX/Y in sync so existing draw code doesn't snap them back
+        unit.targetX = tx;
+        unit.targetY = ty;
+        return false;
+    }
+
+    /**
+     * Build default formation slots for N followers.
+     * Column formation: each follower is `spacingPx` further behind the leader,
+     * alternating ±1 px laterally so no two NPCs are pixel-perfect stacked.
+     * spacingPx is set from start_npc_convoy params or defaults to _S.spacingPx.
+     */
+    function _buildDefaultSlots(count, spacingPx) {
+        var slots = [];
+        for (var i = 0; i < count; i++) {
+            slots.push({
+                dx: (i % 2 === 0 ? 1 : -1),   // 1 px lateral alternation
+                dy: (i + 1) * spacingPx         // depth behind leader
+            });
+        }
+        return slots;
+    }
+
+    // =========================================================================
+    // CONVOY TICK — called via requestAnimationFrame
+    // =========================================================================
+    function _convoyTick(timestamp) {
+        if (!_S.active) return;
+
+        // Bootstrap timing
+        if (_S._lastMs === null) _S._lastMs = timestamp;
+        var dt = Math.min(timestamp - _S._lastMs, 100); // cap to 100ms anti-spike
+        _S._lastMs = timestamp;
+
+        var leader = _findNpc(_S.leaderId);
+
+        // ── If paused at a city, just hold followers in formation ─────────────
+        if (_S.staying || !leader) {
+            if (leader) _tickFollowers(leader, dt);
+            _S._rafId = requestAnimationFrame(_convoyTick);
+            return;
+        }
+
+        // ── Check if route is exhausted ───────────────────────────────────────
+        var stop = _S.route[_S.routeIndex];
+        if (!stop) {
+            // Route complete
+            _S.active = false;
+            _tickFollowers(leader, dt);
+            console.log("[Convoy] Route complete — all stops visited.");
+            return;
+        }
+
+        // ── Move leader toward current stop ───────────────────────────────────
+        var target = _cityPos(stop.cityName);
+        if (!target) {
+            // Skip missing city
+            _S.routeIndex++;
+            _S._rafId = requestAnimationFrame(_convoyTick);
+            return;
+        }
+
+        var arrived = _stepToward(leader, target.x, target.y, _S.leaderSpeedPxSec, dt);
+        _tickFollowers(leader, dt);
+
+        if (arrived) {
+            console.log("[Convoy] Reached " + stop.cityName + " — staying " + stop.stayMs + " ms");
+            _S.staying = true;
+            _S.completedStops.push(_S.routeIndex);
+
+            // Fire arrival trigger if specified
+            if (stop.onArriveTriggerId && window.ScenarioTriggers &&
+                typeof window.ScenarioTriggers.fireTrigger === "function") {
+                window.ScenarioTriggers.fireTrigger(stop.onArriveTriggerId);
+            }
+
+            _S.stayHandle = setTimeout(function () {
+                _S.staying = false;
+                _S.routeIndex++;
+                var next = _S.route[_S.routeIndex];
+                if (next) {
+                    console.log("[Convoy] Departing → " + next.cityName);
+                } else {
+                    console.log("[Convoy] Final stop complete.");
+                }
+            }, stop.stayMs);
+        }
+
+        _S._rafId = requestAnimationFrame(_convoyTick);
+    }
+
+    /**
+     * Move every follower toward its formation slot behind the leader.
+     * The "behind" direction is resolved from leader→current stop so followers
+     * line up correctly even on diagonal marches.  Falls back to straight south
+     * (dy=+1) when no active stop.
+     */
+    function _tickFollowers(leader, dt) {
+        // Compute march direction unit vector (leader → destination)
+        var mx = 0, my = 1; // default south
+        var stop = _S.route[_S.routeIndex];
+        if (stop) {
+            var tp = _cityPos(stop.cityName);
+            if (tp) {
+                var ddx = tp.x - leader.x, ddy = tp.y - leader.y;
+                var dlen = Math.sqrt(ddx * ddx + ddy * ddy);
+                if (dlen > 0.001) { mx = ddx / dlen; my = ddy / dlen; }
+            }
+        }
+
+        // Perpendicular axis (lateral spread)
+        var px = -my, py = mx;
+
+        for (var i = 0; i < _S.followerIds.length; i++) {
+            var npc = _findNpc(_S.followerIds[i]);
+            if (!npc) continue;
+
+            var slot = _S.formationSlots[i] || { dx: 0, dy: (i + 1) * _S.spacingPx };
+
+            // Target = leader + slot.dy along march dir + slot.dx along lateral
+            var tx = leader.x + my * slot.dy + px * slot.dx;
+            var ty = leader.y + (-mx) * slot.dy + py * slot.dx;
+            // Note: my * slot.dy moves "behind" along the march axis;
+            // we negate mx for the y-component because march direction is (mx,my).
+            // Simpler & correct: project slot onto world axes via march direction.
+            //   "behind" means opposite of march: (-mx, -my)
+            tx = leader.x + (-mx) * slot.dy + px * slot.dx;
+            ty = leader.y + (-my) * slot.dy + py * slot.dx;
+
+            _stepToward(npc, tx, ty, _S.followerSpeedPxSec, dt);
+        }
+    }
+
+    // =========================================================================
+    // REGISTER CONDITIONS
+    // =========================================================================
+    function _doInstall() {
+        var ST = window.ScenarioTriggers;
+
+        // ── player_near_npc ───────────────────────────────────────────────────
+        ST.registerCondition("player_near_npc", {
+            label: "Player near named NPC",
+            desc:  "True when the player is within maxDist world-pixels of the " +
+                   "named important NPC (by storyId).  Use as a proximity check " +
+                   "for escort warnings, dialogue triggers, etc.",
+            params: [
+                { key: "npcId",   label: "NPC Story ID", type: "string", default: "" },
+                { key: "maxDist", label: "Max distance (px)", type: "number", default: 100 }
+            ],
+            evaluate: function (p) {
+                if (!window.player) return false;
+                var npc = _findNpc(p.npcId);
+                if (!npc) return false;
+                return _dist(window.player, npc) <= (p.maxDist || 100);
+            }
+        });
+
+        // ── npc_near_npc ──────────────────────────────────────────────────────
+        ST.registerCondition("npc_near_npc", {
+            label: "NPC near NPC",
+            desc:  "True when two named NPCs are within maxDist world-pixels of " +
+                   "each other.  Useful for convoy-spacing checks, meeting-point " +
+                   "triggers, or unit-clustering conditions.",
+            params: [
+                { key: "id1",     label: "NPC Story ID #1", type: "string", default: "" },
+                { key: "id2",     label: "NPC Story ID #2", type: "string", default: "" },
+                { key: "maxDist", label: "Max distance (px)", type: "number", default: 100 }
+            ],
+            evaluate: function (p) {
+                var a = _findNpc(p.id1), b = _findNpc(p.id2);
+                if (!a || !b) return false;
+                return _dist(a, b) <= (p.maxDist || 100);
+            }
+        });
+
+        // ── convoy_at_stop ────────────────────────────────────────────────────
+        ST.registerCondition("convoy_at_stop", {
+            label: "Convoy has reached stop N",
+            desc:  "True once the active convoy has arrived at (and begun its " +
+                   "stay at) route stop index N (0-based).  Stays true after " +
+                   "the convoy departs — use it to fire one-shot scene triggers " +
+                   "at each city.",
+            params: [
+                { key: "stopIndex", label: "Stop index (0-based)", type: "number", default: 0 }
+            ],
+            evaluate: function (p) {
+                var idx = p.stopIndex || 0;
+                return _S.completedStops.indexOf(idx) !== -1;
+            }
+        });
+
+        // ── convoy_route_complete ─────────────────────────────────────────────
+        ST.registerCondition("convoy_route_complete", {
+            label: "Convoy route fully complete",
+            desc:  "True after the convoy has visited every stop and the last " +
+                   "stay timer has expired.  Use this to fire the final scene " +
+                   "of a march-based scenario phase.",
+            params: [],
+            evaluate: function () {
+                return !_S.active && _S.completedStops.length > 0 &&
+                       _S.completedStops.length >= _S.route.length;
+            }
+        });
+
+        // =========================================================================
+        // REGISTER ACTIONS
+        // =========================================================================
+
+        // ── start_npc_convoy ──────────────────────────────────────────────────
+        // Boots the convoy system: assigns the leader, resolves followers,
+        // builds formation slots, places all units into starting positions,
+        // and kicks off the tick loop.
+        //
+        // params:
+        //   leaderId          — storyId of the leader NPC (moves first)
+        //   followerIds       — comma-separated storyIds, in front-to-back order
+        //   spacingPx         — px of depth between adjacent formation slots (default 65)
+        //   leaderSpeedPxSec  — leader travel speed in px/sec (default 80)
+        //   followerSpeedPxSec— follower catch-up speed in px/sec (default 110)
+        //   arrivalRadiusPx   — "close enough" arrival threshold in px (default 8)
+        //   purgeOwnedCities  — faction name whose city ownership to strip on start
+        //
+        ST.registerAction(
+            "start_npc_convoy",
+            {
+                label: "Start NPC convoy (follow + route)",
+                desc:  "Activates the convoy system. The leader NPC marches " +
+                       "through city stops added with add_convoy_stop; followers " +
+                       "maintain a tight column formation behind the leader. " +
+                       "Only one convoy may run at a time.",
+                params: [
+                    { key: "leaderId",           label: "Leader NPC storyId",    type: "string", default: "" },
+                    { key: "followerIds",         label: "Follower storyIds (comma-separated, front→back)", type: "string", default: "" },
+                    { key: "spacingPx",           label: "Front-to-back slot spacing (px)", type: "number", default: 65 },
+                    { key: "leaderSpeedPxSec",    label: "Leader speed (px/sec)", type: "number", default: 80 },
+                    { key: "followerSpeedPxSec",  label: "Follower speed (px/sec)", type: "number", default: 110 },
+                    { key: "arrivalRadiusPx",     label: "Arrival radius (px)",   type: "number", default: 8 },
+                    { key: "purgeOwnedCities",    label: "Purge cities owned by faction (leave blank to skip)", type: "string", default: "" }
+                ]
+            },
+            function (p) {
+                // Stop any running convoy first
+                _S.active = false;
+                if (_S._rafId) { cancelAnimationFrame(_S._rafId); _S._rafId = null; }
+                if (_S.stayHandle) { clearTimeout(_S.stayHandle); _S.stayHandle = null; }
+
+                // Apply speed/radius config
+                _S.spacingPx            = (typeof p.spacingPx          === "number" && p.spacingPx          > 0) ? p.spacingPx          : 65;
+                _S.leaderSpeedPxSec     = (typeof p.leaderSpeedPxSec   === "number" && p.leaderSpeedPxSec   > 0) ? p.leaderSpeedPxSec   : 80;
+                _S.followerSpeedPxSec   = (typeof p.followerSpeedPxSec === "number" && p.followerSpeedPxSec > 0) ? p.followerSpeedPxSec : 110;
+                _S.arrivalRadiusPx      = (typeof p.arrivalRadiusPx    === "number" && p.arrivalRadiusPx    > 0) ? p.arrivalRadiusPx    : 8;
+
+                // Reset route state
+                _S.routeIndex    = 0;
+                _S.staying       = false;
+                _S.completedStops = [];
+                _S._lastMs       = null;
+
+                // Resolve leader
+                _S.leaderId = p.leaderId || "";
+                if (!_S.leaderId) {
+                    console.warn("[Convoy] start_npc_convoy: no leaderId specified.");
+                    return;
+                }
+
+                // Resolve followers
+                var rawIds = (typeof p.followerIds === "string") ? p.followerIds.trim() : "";
+                _S.followerIds = rawIds
+                    ? rawIds.split(",").map(function (s) { return s.trim(); }).filter(Boolean)
+                    : [];
+
+                // Build formation slots (one per follower)
+                _S.formationSlots = _buildDefaultSlots(_S.followerIds.length, _S.spacingPx);
+
+                // One-shot: purge any already-owned cities for the given faction
+                if (p.purgeOwnedCities && typeof p.purgeOwnedCities === "string" && p.purgeOwnedCities.trim()) {
+                    var faction = p.purgeOwnedCities.trim();
+                    var allCities = window.cities_sandbox || window.cities || [];
+                    var purged = 0;
+                    for (var ci = 0; ci < allCities.length; ci++) {
+                        if (allCities[ci].faction === faction) {
+                            allCities[ci].faction = null;
+                            purged++;
+                        }
+                    }
+                    if (purged > 0) {
+                        console.log("[Convoy] Purged " + purged + " city/cities owned by '" + faction + "'");
+                    }
+                }
+
+                // Start the tick loop
+                _S.active = true;
+                _S._rafId = requestAnimationFrame(_convoyTick);
+
+                console.log("[Convoy] ✅ Started — leader=" + _S.leaderId +
+                            " followers=" + _S.followerIds.length +
+                            " spacing=" + _S.spacingPx + "px");
+            }
+        );
+
+        // ── add_convoy_stop ───────────────────────────────────────────────────
+        // Pushes one stop onto the end of the route queue.
+        // Call this multiple times (in order) after start_npc_convoy to build
+        // the full city march route.
+        ST.registerAction(
+            "add_convoy_stop",
+            {
+                label: "Add convoy stop",
+                desc:  "Appends one city waypoint to the active convoy route. " +
+                       "The convoy visits stops in the order they were added. " +
+                       "Call after start_npc_convoy.",
+                params: [
+                    { key: "cityName",          label: "City name (exact)",                      type: "string", default: "" },
+                    { key: "stayMs",            label: "Stay duration (ms)",                     type: "number", default: 3000 },
+                    { key: "onArriveTriggerId", label: "Fire trigger on arrival (optional ID)",  type: "string", default: "" }
+                ]
+            },
+            function (p) {
+                if (!p.cityName) {
+                    console.warn("[Convoy] add_convoy_stop: cityName is required.");
+                    return;
+                }
+                _S.route.push({
+                    cityName:           p.cityName,
+                    stayMs:             (typeof p.stayMs === "number" && p.stayMs > 0) ? p.stayMs : 3000,
+                    onArriveTriggerId:  p.onArriveTriggerId || ""
+                });
+                console.log("[Convoy] Stop added: " + p.cityName + " (" + p.stayMs + " ms)");
+            }
+        );
+
+        // ── stop_npc_convoy ───────────────────────────────────────────────────
+        ST.registerAction(
+            "stop_npc_convoy",
+            {
+                label: "Stop NPC convoy",
+                desc:  "Immediately halts all convoy movement and clears the " +
+                       "route queue.  NPCs remain at their current positions.",
+                params: []
+            },
+            function () {
+                _S.active = false;
+                if (_S._rafId)    { cancelAnimationFrame(_S._rafId); _S._rafId = null; }
+                if (_S.stayHandle){ clearTimeout(_S.stayHandle); _S.stayHandle = null; }
+                console.log("[Convoy] Stopped.");
+            }
+        );
+
+        // ── set_convoy_speed ──────────────────────────────────────────────────
+        ST.registerAction(
+            "set_convoy_speed",
+            {
+                label: "Set convoy speed",
+                desc:  "Adjusts leader and/or follower speed on the currently " +
+                       "active convoy.  Leave a field at 0 to keep its current value.",
+                params: [
+                    { key: "leaderSpeedPxSec",   label: "Leader speed (px/sec, 0=unchanged)",   type: "number", default: 0 },
+                    { key: "followerSpeedPxSec",  label: "Follower speed (px/sec, 0=unchanged)", type: "number", default: 0 }
+                ]
+            },
+            function (p) {
+                if (p.leaderSpeedPxSec   > 0) _S.leaderSpeedPxSec   = p.leaderSpeedPxSec;
+                if (p.followerSpeedPxSec > 0) _S.followerSpeedPxSec = p.followerSpeedPxSec;
+                console.log("[Convoy] Speed updated — leader=" + _S.leaderSpeedPxSec +
+                            " follower=" + _S.followerSpeedPxSec + " px/sec");
+            }
+        );
+
+        console.log("[Convoy] ✅ Universal convoy system registered with ScenarioTriggers.");
+    }
+
+    _waitAndInstall();
+
+    // ── Public handle for debugging ───────────────────────────────────────────
+    window.__ScenarioConvoyState = _S;
+
 })();

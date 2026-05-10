@@ -266,6 +266,23 @@ function renderDiplomacyMatrix() {
     // Detect Story Mode
     const isStoryMode = !!liveFactions["Kamakura Shogunate"];
 
+    // Detect which story is active so we can hide player-faction rows/columns
+    // that would be impossible to meaningfully interact with in the diplomacy table.
+    // Story 1 (Hakata Bay): player is effectively part of Kamakura Shogunate forces.
+    // Story 2 (Mongol Conquest): player IS Mongol Empire — showing it as a separate
+    //   row/col creates a confusing self-referential entry. Bandits are also hidden
+    //   in story contexts since they are not a diplomacy participant.
+    const isStory1Active = !!(window.__campaignStory1Active);
+    const isStory2Active = !!(window.__campaignStory2Active);
+
+    // Build the set of factions to suppress from the diplomacy table in stories.
+    const storyHiddenFactions = new Set(["Bandits"]);
+    if (isStory2Active) {
+        // Player IS Mongol Empire — suppress it from the table so there is no
+        // confusing "Mongol Empire vs Mongol Empire" self-entry.
+        storyHiddenFactions.add("Mongol Empire");
+    }
+
     // 1. Re-build Header with a responsive, scrollable container
     panel.innerHTML = `
         <div id="dip-panel-header">
@@ -277,8 +294,8 @@ function renderDiplomacyMatrix() {
 
     const tableBox = document.getElementById('diplomacy-table-container');
 
-    // Filter out Bandits
-    let factions = Object.keys(liveFactions).filter(f => f !== "Bandits");
+    // Filter out Bandits and story-hidden factions (e.g. Mongol Empire in Story 2)
+    let factions = Object.keys(liveFactions).filter(f => !storyHiddenFactions.has(f));
 
     let tableHTML = `<table class="dip-table" style="width: 100%; border-collapse: collapse; margin: 0 auto;"><thead><tr><th></th>`;
 

@@ -742,7 +742,8 @@ function initializeNPCs(cities, mapData, tileSize, cols, rows, padX, padY) {
     // inside an active Scenario 1 campaign.  When Scenario 1 is active this is a
     // no-op; hakata_bay_scenario.install() re-stamps __npcSpawnBans after this call
     // anyway (it handles exactly this case in its own re-stamp comment).
-    if (!window.__campaignStory1Active) {
+    // FIX: guard both Story 1 and Story 2 campaign sessions.
+    if (!window.__campaignStory1Active && !window.__campaignStory2Active) {
         window.__npcSpawnBans        = null;
         window.__activeScenario      = null;
         window.__mongolWaveAllowed   = false;
@@ -1467,13 +1468,38 @@ function ensureAllFactionsSpawned(cities) {
     cities.forEach(c => spawnedFactions.add(c.faction));
 
 // SURGERY: Added "Player" and "Kyushu Defender" to the banned list
+//
+// STORY 2 FIX (random Mongol city bug):
+// Two extra guards added below.
+//
+//   1. Skip the player's own faction. In campaign scenarios where the player
+//      IS a non-static migrating force (Story 2's Mongol Empire is the
+//      canonical example), the player's faction has zero static cities by
+//      design — force-seeding a city onto the closest Xiaran tile produces
+//      the "random Mongol city" symptom. The player's faction never needs
+//      to be force-spawned because the player IS that faction's presence.
+//
+//   2. Skip any faction listed in window.__npcSpawnBans.factions. Scenarios
+//      that explicitly ban a faction from procedural spawning should not have
+//      that faction force-seeded here either. This makes the spawn-ban list a
+//      single authoritative gate for both NPC spawns and city seeding.
+    const _playerFaction = (typeof window !== "undefined" && window.player && window.player.faction) || null;
+    const _bannedFactions = (typeof window !== "undefined" && window.__npcSpawnBans &&
+                             Array.isArray(window.__npcSpawnBans.factions))
+        ? window.__npcSpawnBans.factions : [];
     const required = Object.keys(FACTIONS).filter(f => 
         f !== "Bandits" && 
         f !== "Player's Kingdom" && 
         f !== "Yuan Dynasty Coalition" && 
         f !== "Kyushu Defender" && 
-        f !== "Player"
+        f !== "Player" &&
+        f !== _playerFaction &&
+        !_bannedFactions.includes(f)
     );
+    if (_playerFaction || _bannedFactions.length) {
+        console.log("[NpcSystem] ensureAllFactionsSpawned: skipping playerFaction=" +
+                    _playerFaction + " bannedFactions=[" + _bannedFactions.join(",") + "]");
+    }
     required.forEach(factionName => {
         if (!spawnedFactions.has(factionName)) {
             console.log(`Force-spawning missing faction: ${factionName}`);

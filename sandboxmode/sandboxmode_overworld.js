@@ -210,12 +210,13 @@ function fbm(x, y, octaves = FBM_OCTAVES) {
         return value;
     }
 
+
 const PALETTE = {
         ocean: "#2b4a5f", coastal: "#3a5f75",
         desert: "#bfa373", dune: "#cfae7e",
         plains: "#a3a073", meadow: "#6b7a4a",
         forest: "#425232", jungle: "#244222",
-        highlands: "#626b42", mountains: "#3E2723", snow: "#7B5E3F"
+        highlands: "#626b42", mountains:"#55613A", snow: "#7B5E3F"
     };
 
     const worldMap = [];
@@ -1197,62 +1198,59 @@ if (e >= 0.36 && e < 0.65 && m > 0.45) {
                 let isDryMountains = tile.name.includes("Large Mountains");
                 let isExtremePeak  = tile.name === "Large Mountains";
 
-                // ── Hexi / Himalayan sub-pixel relief  (Large Mountains only) ──────
-                // Replaces the plain tile-colour with ridged multifractal slope
-                // shading at 4-pixel (8-px mobile) resolution — exactly the same
-                // algorithm as the story2 Qilian Corridor renderer.
-                // The drawSnowyPeak icons further below are painted on top.
-                if (isDryMountains) {
+                // ── Sub-pixel ridge shading (ALL mountains) ──────────────────
+                // Large Mountains: snow/grey palette (_sbPickMtnColor)
+                // Regular Mountains: olive-green palette (_sbPickMtnColorGreen)
+                if (true) {
                     const _SUB  = isMobile ? 8 : 4;
                     const _dNx  = _SUB * 0.55 / WORLD_WIDTH;
                     const _dNy  = _SUB * 0.55 / WORLD_HEIGHT;
+                    const _colorFn = isDryMountains ? _sbPickMtnColor : _sbPickMtnColorGreen;
 
                     for (let _cx = 0; _cx < TILE_SIZE; _cx += _SUB) {
                         for (let _cy = 0; _cy < TILE_SIZE; _cy += _SUB) {
                             const _snx = (px + _cx + _SUB * 0.5) / WORLD_WIDTH;
                             const _sny = (py + _cy + _SUB * 0.5) / WORLD_HEIGHT;
 
-                            // Sample elevation at centre + 4 cardinal neighbours
                             const _eC = _sbRidgeMtnElev(_snx,          _sny         );
                             const _eR = _sbRidgeMtnElev(_snx + _dNx,   _sny         );
                             const _eL = _sbRidgeMtnElev(_snx - _dNx,   _sny         );
                             const _eD = _sbRidgeMtnElev(_snx,           _sny + _dNy );
                             const _eU = _sbRidgeMtnElev(_snx,           _sny - _dNy );
 
-                            // NW-light hill shading from elevation gradient
                             const _gx = _eR - _eL;
                             const _gy = _eD - _eU;
                             let _shading = 0.5 - (_gx * (-0.7071) + _gy * (-0.7071)) * 18.0;
                             if (_shading < 0) _shading = 0;
                             if (_shading > 1) _shading = 1;
 
-                            // Boost lit ridge crests; darken crevices
                             if (_eC > _eL && _eC > _eR && _eC > _eU && _eC > _eD && _eC > 0.55)
                                 _shading = Math.min(1, _shading + 0.18);
                             if (_eC < _eL && _eC < _eR && _eC < _eU && _eC < _eD && _eC < 0.42)
                                 _shading = Math.max(0, _shading - 0.20);
 
-                            // Vegetation noise for forested mid-slope patches
                             const _vegN = fbm(_snx * 7 + 4.4, _sny * 7 + 9.1);
-                            const _rgb  = _sbPickMtnColor(_eC, _shading, _vegN);
+                            const _rgb  = _colorFn(_eC, _shading, _vegN);
                             bgCtx.fillStyle = _sbRgbStr(_rgb[0], _rgb[1], _rgb[2]);
                             bgCtx.fillRect(px + _cx, py + _cy, _SUB, _SUB);
                         }
                     }
 
-                    // Sparse snow speckles on the highest-elevation tiles
-                    const _nSpeck = tile.e > 0.82 ? 3 : tile.e > 0.74 ? 1 : 0;
-                    for (let _k = 0; _k < _nSpeck; _k++) {
-                        bgCtx.fillStyle = "rgba(244,248,252,"
-                            + (0.40 + hash(i * 3 + _k, j) * 0.32).toFixed(2) + ")";
-                        bgCtx.beginPath();
-                        bgCtx.arc(
-                            px + hash(i, j + _k) * TILE_SIZE,
-                            py + hash(i + _k, j) * TILE_SIZE,
-                            0.5 + hash(j, i + _k) * 0.7,
-                            0, Math.PI * 2
-                        );
-                        bgCtx.fill();
+                    // Snow speckles only on highest Large Mountain tiles
+                    if (isDryMountains) {
+                        const _nSpeck = tile.e > 0.82 ? 3 : tile.e > 0.74 ? 1 : 0;
+                        for (let _k = 0; _k < _nSpeck; _k++) {
+                            bgCtx.fillStyle = "rgba(244,248,252,"
+                                + (0.40 + hash(i * 3 + _k, j) * 0.32).toFixed(2) + ")";
+                            bgCtx.beginPath();
+                            bgCtx.arc(
+                                px + hash(i, j + _k) * TILE_SIZE,
+                                py + hash(i + _k, j) * TILE_SIZE,
+                                0.5 + hash(j, i + _k) * 0.7,
+                                0, Math.PI * 2
+                            );
+                            bgCtx.fill();
+                        }
                     }
                 }
 
@@ -1319,79 +1317,72 @@ let peakSpawnThreshold = isMobile ? 0.991 : 0.984;
                     }
                 }
 
-                // ⚡ OPT: Regular (non-snowy) mountain trees:
-                //   treeDensity  0.35 → 0.60  (probability of skipping each attempt rises)
-                //   maxTrees     3    → 2      (one fewer loop iteration per tile)
-                //   Combined effect: ~63 % fewer tree-draw attempts on regular mountains.
-                //   Snowy mountain values kept at treeDensity 0.95 / maxTrees 1 (unchanged).
-                let treeDensity = isDryMountains ? 0.95 : 0.60;
-                let maxTrees    = isDryMountains ? 1    : 2;
-
-                for (let t = 0; t < maxTrees; t++) {
-                    if (Math.random() > treeDensity) {
-                        let treeX    = px + TILE_SIZE / 2 + ((Math.random() - 0.5) * TILE_SIZE * 0.9);
-                        let treeY    = py + TILE_SIZE / 2 + ((Math.random() - 0.5) * TILE_SIZE * 0.9);
-                        const treeRand = Math.random();
-                        bgCtx.save();
-
-                        if (isDryMountains) {
-                            // Tiered highland pine (unchanged)
-                            let tiers     = 2 + Math.floor(Math.random() * 2);
-                            let treeWidth = TILE_SIZE * (0.4 + Math.random() * 0.3);
-                            bgCtx.fillStyle = `rgb(${15 + Math.random() * 10}, ${25 + Math.random() * 10}, 20)`;
-                            for (let k = 0; k < tiers; k++) {
-                                let levelY = treeY - (k * 3);
-                                let levelW = treeWidth * (1 - (k * 0.3));
-                                bgCtx.beginPath();
-                                bgCtx.moveTo(treeX,          levelY - 5);
-                                bgCtx.lineTo(treeX - levelW, levelY);
-                                bgCtx.lineTo(treeX + levelW, levelY);
-                                bgCtx.closePath();
-                                bgCtx.fill();
-                            }
-                        } else if (treeRand > 0.6) {
-                            // Southern banyan
-                            // ⚡ OPT: 4 ellipses → 2 ellipses (saves 2 ellipse+fill pairs)
-                            let canopySize = TILE_SIZE * (0.5 + Math.random() * 0.4);
-                            let leafColors = ["#1A2F18", "#0D1F1D", "#223311", "#142414"];
-                            for (let k = 0; k < 2; k++) {
-                                bgCtx.fillStyle = leafColors[k];
-                                let offX = (Math.random() - 0.5) * canopySize;
-                                let offY = (Math.random() - 0.5) * canopySize;
-                                bgCtx.beginPath();
-                                bgCtx.ellipse(
-                                    treeX + offX, treeY + offY,
-                                    canopySize * 0.6, canopySize * 0.4,
-                                    Math.random() * Math.PI, 0, Math.PI * 2
-                                );
-                                bgCtx.fill();
-                            }
-                        } else {
-                            // Bamboo thicket
-                            // ⚡ OPT: 3 stalks → 2 stalks (saves one stroke+fill pair)
-                            for (let s = 0; s < 2; s++) {
-                                let sX = treeX + (s * 2) - 1;
-                                let sH = 6 + Math.random() * 6;
-                                bgCtx.strokeStyle = "#2D3B1E";
-                                bgCtx.lineWidth   = 1.2;
-                                bgCtx.beginPath();
-                                bgCtx.moveTo(sX, treeY);
-                                bgCtx.lineTo(sX + (Math.random() - 0.5), treeY - sH);
-                                bgCtx.stroke();
-                                bgCtx.fillStyle = "#3E4D26";
-                                bgCtx.beginPath();
-                                bgCtx.arc(sX, treeY - sH, 1.5, 0, Math.PI * 2);
-                                bgCtx.fill();
-                            }
-                        }
-
-                        bgCtx.restore();
-                    }
-                }
+                // [Mountain trees removed — sub-pixel shading handles all visual detail]
             }
         }
     }
 
+
+    // =========================================================================
+    // LARGE MOUNTAIN EDGE-BLEND PASS
+    // For every Large Mountains tile that borders Sand/Dunes/Plains/Forest/
+    // Highlands, paint a soft gradient wedge from the mountain edge colour
+    // into the neighbour's base colour, creating a natural transition zone.
+    // =========================================================================
+    (function _blendLargeMountainEdges() {
+        const BLEND_BIOMES = new Set(["Dunes","Desert","Plains","Meadow","Steppes","Forest","Dense Forest","Highlands"]);
+        // Mountain edge base colour (warm rocky brown — matches _sbPickMtnColor low-elev output)
+        const MTN_EDGE_R = 110, MTN_EDGE_G = 88, MTN_EDGE_B = 62;
+
+        // Neighbour base colours for blend target
+        const BIOME_RGB = {
+            "Dunes":        [207, 174, 126],
+            "Desert":       [191, 163, 115],
+            "Plains":       [163, 160, 115],
+            "Meadow":       [107, 122,  74],
+            "Steppes":      [163, 160, 115],
+            "Forest":       [ 66,  82,  50],
+            "Dense Forest": [ 36,  66,  34],
+            "Highlands":    [184, 150, 106],   // updated to new lighter highlands
+        };
+
+        const DIRS = [[-1,0],[1,0],[0,-1],[0,1]];
+        const GRAD_STEPS = 3;   // how many tiles outward from the mountain to blend
+
+        for (let i = 0; i < COLS; i++) {
+            for (let j = 0; j < ROWS; j++) {
+                const tile = worldMap[i][j];
+                if (!tile.name.includes("Mountain")) continue;
+
+                // Check all 4 cardinal directions for a blendable neighbour
+                for (const [di, dj] of DIRS) {
+                    // Walk outward from the mountain border
+                    for (let step = 1; step <= GRAD_STEPS; step++) {
+                        const ni = i + di * step;
+                        const nj = j + dj * step;
+                        if (ni < 0 || ni >= COLS || nj < 0 || nj >= ROWS) break;
+                        const nbTile = worldMap[ni][nj];
+                        if (!BLEND_BIOMES.has(nbTile.name)) break; // hit another mountain or water — stop
+
+                        const tgt = BIOME_RGB[nbTile.name];
+                        if (!tgt) break;
+
+                        // t=0 at mountain face, t=1 at outer edge of blend zone
+                        const t = step / (GRAD_STEPS + 1);
+                        // Blend: mountain-edge colour → neighbour base colour
+                        const r = (MTN_EDGE_R + (tgt[0] - MTN_EDGE_R) * t) | 0;
+                        const g = (MTN_EDGE_G + (tgt[1] - MTN_EDGE_G) * t) | 0;
+                        const b = (MTN_EDGE_B + (tgt[2] - MTN_EDGE_B) * t) | 0;
+                        // Alpha tapers from strong at the mountain face to gentle further out
+                        const alpha = 0.55 - t * 0.42;
+
+                        bgCtx.fillStyle = `rgba(${r},${g},${b},${alpha.toFixed(2)})`;
+                        bgCtx.fillRect(ni * TILE_SIZE, nj * TILE_SIZE, TILE_SIZE, TILE_SIZE);
+                    }
+                }
+            }
+        }
+    })();
 
     await setLoading(85, "Aging parchment map");
     console.log("Applying Parchment Vignette...");
@@ -1427,7 +1418,9 @@ let peakSpawnThreshold = isMobile ? 0.991 : 0.984;
     // (it avoids touching __activeScenario mid-session to protect the trigger
     // system).  Clearing here ensures proceduralAITendency category filters and
     // spawn bans from a previous scenario session never bleed into sandbox play.
-    if (!window.__campaignStory1Active) {
+    // FIX: guard both Story 1 and Story 2 campaign sessions so initializeNPCs
+    // does not wipe __activeScenario and __npcSpawnBans mid-session.
+    if (!window.__campaignStory1Active && !window.__campaignStory2Active) {
         window.__activeScenario  = null;
         window.__npcSpawnBans    = null;
     }
@@ -1582,6 +1575,46 @@ function _sbPickMtnColor(e, shading, vegN) {
     return [r, g, b];
 }
 
+// Greener variant of _sbPickMtnColor for regular (non-snowy) Mountains.
+// Uses the same elevation/shading/vegN inputs but shifts all colour bands
+// toward warmer olive-green foothills — more vegetated, less icy.
+function _sbPickMtnColorGreen(e, shading, vegN) {
+    let r, g, b;
+    if (e > 0.75) {
+        // HIGH BARE ROCK — warm grey-olive (no snow on regular mountains)
+        const tri = _sbLerpRGB(68, 68, 52,  192, 192, 168, shading);
+        r = tri[0]; g = tri[1]; b = tri[2];
+    } else if (e > 0.58) {
+        // UPPER SLOPE — rocky with green patches
+        if (vegN > 0.52) {
+            const tri = _sbLerpRGB(58, 80, 52,  152, 186, 128, shading);
+            r = tri[0]; g = tri[1]; b = tri[2];
+        } else {
+            const tri = _sbLerpRGB(72, 68, 48,  184, 176, 132, shading);
+            r = tri[0]; g = tri[1]; b = tri[2];
+        }
+    } else if (e > 0.42) {
+        // MID SLOPE — greener scree / forested shoulder
+        if (vegN > 0.50) {
+            const tri = _sbLerpRGB(64, 90, 58,  158, 196, 136, shading);
+            r = tri[0]; g = tri[1]; b = tri[2];
+        } else {
+            const tri = _sbLerpRGB(80, 78, 52,  186, 182, 138, shading);
+            r = tri[0]; g = tri[1]; b = tri[2];
+        }
+    } else {
+        // FOOTHILL — olive-green blend base, blends toward plains/highlands
+        if (vegN > 0.50) {
+            const tri = _sbLerpRGB(92, 108, 72,  188, 208, 158, shading);
+            r = tri[0]; g = tri[1]; b = tri[2];
+        } else {
+            const tri = _sbLerpRGB(106, 98, 68,  200, 192, 148, shading);
+            r = tri[0]; g = tri[1]; b = tri[2];
+        }
+    }
+    return [r, g, b];
+}
+
 // Helper function to keep the main loop clean
 function drawHighlandTree(ctx, x, y, color, scale) {
     ctx.fillStyle = color;
@@ -1704,33 +1737,25 @@ function drawHighlandBump(ctx, px, py, size) {
 function drawMountain(ctx, x, y, width, height, tileSize) {
     const alpha = getMountainAlpha(height, tileSize);
 
-    // Brown backfill for normal mountains
-    ctx.fillStyle = `rgba(62, 52, 42, ${alpha})`;
+    // Soft semi-transparent shape — no dark brown, takes on underlying tile colour
+    ctx.fillStyle = `rgba(0, 0, 0, 0.22)`;
     ctx.beginPath();
     ctx.moveTo(x - width / 2, y + tileSize);
     ctx.quadraticCurveTo(x, y + tileSize - (height * 1.4), x + width / 2, y + tileSize);
     ctx.fill();
 
-    // Lighter brown top layer
-    ctx.fillStyle = `rgba(117, 102, 84, ${Math.min(0.98, alpha + 0.02)})`;
-
+    // Lighter highlight layer
+    ctx.fillStyle = `rgba(0, 0, 0, 0.12)`;
     for (let b = 0; b < 2; b++) {
         let shift = (b - 0.5) * (width * 0.3);
         let bWidth = width * 0.6;
         let bHeight = height * 0.7;
-
         ctx.beginPath();
         ctx.moveTo(x + shift - bWidth / 2, y + tileSize);
         ctx.quadraticCurveTo(x + shift, y + tileSize - bHeight, x + shift + bWidth / 2, y + tileSize);
         ctx.fill();
     }
-
-    ctx.strokeStyle = `rgba(0,0,0,${0.08 + Math.random() * 0.05})`;
-    ctx.lineWidth = 1.0;
-    ctx.beginPath();
-    ctx.moveTo(x - width / 2, y + tileSize);
-    ctx.quadraticCurveTo(x, y + tileSize - (height * 1.4), x + width / 2, y + tileSize);
-    ctx.stroke();
+    // No stroke — eliminates the dark contour line
 }
 
 function drawSnowyPeak(ctx, x, y, width, height, isExtremePeak, tileSize) {

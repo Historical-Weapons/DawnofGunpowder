@@ -29,8 +29,30 @@
     // All values are in LOCAL unit-space (after translate to x,y).
 
     // Infantry (infscript.js):  head at (0, -12) r=3.5,  feet at (0, +9)
-    //   Show-head clip: world rect from (y - 20) to (y - 6)  →  just the head
-    const INF_HEAD_LOCAL_TOP  = -20;   // a little above the head
+    //
+    // TWO separate top-bounds are intentional here — do not merge them:
+    //
+    //   INF_SPRITE_TOP   — Stage 0 (partial sinking): the clip must ONLY cut from
+    //                      the BOTTOM (the waterline). The top must clear the tallest
+    //                      weapons so spear tips and bow limbs are never truncated.
+    //                      Measured weapon extremes in infscript local space:
+    //                        Yumi bow top      ≈ -46  (hand@-8 + topTipY=-38)
+    //                        Standard bow top  ≈ -31
+    //                        Spear / Glaive    ≈ -36
+    //                        Rocket spear tip  ≈ -44
+    //                        Fleeing flag      ≈ -22
+    //                      -60 gives ≥14 px of headroom above the tallest Yumi.
+    //
+    //   INF_HEAD_LOCAL_TOP — Stage 1 (swimming, head-only): deliberately tight at
+    //                        -20 so only the head + a few pixels of neck show.
+    //                        Do NOT use this value for Stage 0.
+    //
+    //   INF_SPRITE_HALF_W  — Stage 0 horizontal clearance. Infantry weapons can
+    //                        extend ~44 px forward (thrusting spear) and ~8 px
+    //                        rearward. 80 px half-width is a safe margin.
+    const INF_SPRITE_TOP      = -60;   // Stage 0 only — clears tallest weapons
+    const INF_SPRITE_HALF_W   =  80;   // Stage 0 only — horizontal weapon clearance
+    const INF_HEAD_LOCAL_TOP  = -20;   // Stage 1 only — a little above the head
     const INF_HEAD_LOCAL_BOT  = -6;    // just below the chin / neck
     const INF_FEET_LOCAL      =  9;    // ankle tips
 
@@ -334,15 +356,23 @@ function _infantryWrapper(ctx, x, y, moving, frame, factionColor,
         if (!unit.isSwimming) {
             const subFrac   = Math.min(1, unit.overboardTimer / 170);
             // Progressively sink: feet disappear first, then legs, torso starts to go
-            // Show from INF_HEAD_LOCAL_TOP down to (INF_HEAD_LOCAL_BOT + remaining body)
             // At subFrac=0: fully visible; at subFrac=1: head-only visible
-            const bodyBot   = INF_FEET_LOCAL;   // +9
+            const bodyBot   = INF_FEET_LOCAL;      // +9
             const headBot   = INF_HEAD_LOCAL_BOT;  // -6
             const visBot    = bodyBot - (bodyBot - headBot) * subFrac;   // shrinks from +9 → -6
 
+            // CLIP: only mask at the BOTTOM (waterline) — never clip the top.
+            // INF_SPRITE_TOP (-60) clears the tallest weapons (Yumi bow ≈ -46,
+            // spear tip ≈ -36, rocket spear ≈ -44) so their tips are never cut.
+            // INF_HEAD_LOCAL_TOP (-20) must NOT be used here; that constant is
+            // reserved for Stage 1 (head-only swimming) where a tight top clip
+            // is the whole point.
             ctx.save();
             ctx.beginPath();
-            ctx.rect(x - 50, y + INF_HEAD_LOCAL_TOP, 100, (visBot - INF_HEAD_LOCAL_TOP));
+            ctx.rect(x - INF_SPRITE_HALF_W,
+                     y + INF_SPRITE_TOP,
+                     INF_SPRITE_HALF_W * 2,
+                     visBot - INF_SPRITE_TOP);
             ctx.clip();
             _origInfantry.apply(this, arguments);
             ctx.restore();
