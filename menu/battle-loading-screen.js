@@ -147,6 +147,12 @@ window.__playerDeployZone     = null;
 window.__enemyDeployZone      = null;
 window.__chosenEnemyFormation = null;
 
+// Stores the custom-battle player roster passed via pendingPlayerOverride so
+// _refreshLoadingScreenData can use it as the authoritative source rather than
+// falling back to battleEnvironment.units (which may carry stale/wrong unitType
+// during the brief window between the first card render and the refresh tick).
+let _lastPendingPlayer = null;
+
 // ── Terrain labels ──────────────────────────────────────────────────────────
 const TERRAIN_LABELS = {
     "Plains": "Open Plains",  "Forest": "Forested Hills",
@@ -170,7 +176,8 @@ function condenseRoster(roster, max) {
     if (!roster || !roster.length) return [];
     const counts = {};
     roster.forEach(u => {
-        const t = u.type || u.name || u.unitType || "Unknown";
+        // 🔴 FIX: Allow raw strings so it doesn't break into "Unknown" -> Militia
+        const t = typeof u === "string" ? u : (u.type || u.name || u.unitType || "Unknown");
         counts[t] = (counts[t] || 0) + 1;
     });
     return Object.entries(counts)
@@ -585,7 +592,9 @@ function _unitIcon(type) {
 }
 
 // ── Build unit card tiles (uses drawTroopCardToCanvas if available) ──────────
-function buildCardTiles(roster, container, side, factionCol) {
+// unknownCount: for enemy side only — how many units scouts didn't identify.
+// Appends foggy "?" cards after the known cards to show the intel gap.
+function buildCardTiles(roster, container, side, factionCol, unknownCount = 0) {
     container.innerHTML = "";
     if (!roster || !roster.length) {
         const none = _makeEl("div", {
@@ -596,10 +605,14 @@ function buildCardTiles(roster, container, side, factionCol) {
         return;
     }
 
+    const isEnemy   = side === "enemy";
+    // Cap unknown cards at 5 — if more remain, the last card shows ×overflow badge
+    const MAX_UNKNOWN_CARDS = 5;
+
     const items   = condenseRoster(roster, CFG.CARD_MAX);
-    const W       = Math.min(CFG.CARD_W, Math.floor((window.innerWidth * 0.88) / Math.min(items.length, 8)) - 8);
-    const H       = Math.round(W * 1.35);
-    const isEnemy = side === "enemy";
+    const totalCardSlots = items.length + Math.min(unknownCount, MAX_UNKNOWN_CARDS);
+    const W       = Math.min(CFG.CARD_W, Math.floor((window.innerWidth * 0.88) / Math.min(totalCardSlots, 8)) - 8);
+    const H         = Math.round(W * 1.35);
     const borderCol = isEnemy ? "rgba(255,80,80,0.55)"  : "rgba(80,160,255,0.55)";
     const glowCol   = isEnemy ? "rgba(255,60,60,0.25)"  : "rgba(60,140,255,0.25)";
 
@@ -696,6 +709,92 @@ function buildCardTiles(roster, container, side, factionCol) {
         card.appendChild(topAccent);
         container.appendChild(card);
     });
+
+    // ── Unknown "?" cards (enemy intel fog) ──────────────────────────────────
+    // Shows the hidden portion of the enemy force as mystery cards so the player
+    // can see there are more troops they haven't identified.
+    if (isEnemy && unknownCount > 0) {
+        const showCards = Math.min(unknownCount, MAX_UNKNOWN_CARDS);
+        const overflow  = unknownCount - showCards; // extra units on final badge
+
+        for (let i = 0; i < showCards; i++) {
+            const isLast    = i === showCards - 1;
+            const badgeNum  = isLast && overflow > 0 ? overflow + 1 : 1;
+
+            const qCard = _makeEl("div", {
+                width:          W + "px",
+                height:         H + "px",
+                border:         "1.5px dashed rgba(180,60,60,0.45)",
+                borderRadius:   "4px",
+                background:     "linear-gradient(170deg, rgba(18,8,8,0.95), rgba(6,3,3,0.98))",
+                boxShadow:      "0 0 8px rgba(120,30,30,0.20), inset 0 0 10px rgba(0,0,0,0.7)",
+                display:        "flex",
+                flexDirection:  "column",
+                alignItems:     "center",
+                justifyContent: "space-between",
+                padding:        "4px 3px 5px",
+                cursor:         "default",
+                position:       "relative",
+                overflow:       "hidden",
+                opacity:        String(0.55 + i * 0.04), // slight fade-in left→right
+                animationDelay: ((items.length + i) * 0.04) + "s"
+            });
+            qCard.className = "bls-card-anim";
+
+            // "?" emoji — dimmer and smaller than real icons
+            const qIcon = _makeEl("div", {
+                position:   "absolute",
+                top: "4px", left: "0", right: "0",
+                bottom:     Math.max(18, Math.round(H * 0.28)) + "px",
+                display:    "flex", alignItems: "center", justifyContent: "center",
+                fontSize:   Math.round(W * 0.46) + "px",
+                lineHeight: "1",
+                filter:     "drop-shadow(0 2px 6px rgba(180,0,0,0.6)) grayscale(0.4)",
+                zIndex:     "2"
+            }, "❓");
+            qCard.appendChild(qIcon);
+
+            // badge: ×N if last card with overflow, otherwise nothing (each ? = 1 hidden unit)
+            if (isLast && overflow > 0) {
+                const qBadge = _makeEl("div", {
+                    position:   "absolute",
+                    top: "3px", right: "4px",
+                    fontSize:   Math.max(8, Math.round(W * 0.13)) + "px",
+                    color:      "#cc6060",
+                    fontWeight: "bold",
+                    zIndex:     "2",
+                    textShadow: "0 1px 3px rgba(0,0,0,0.95)"
+                }, "×" + badgeNum);
+                qCard.appendChild(qBadge);
+            }
+
+            // "Unknown" label at bottom
+            const qLabel = _makeEl("div", {
+                position:      "absolute",
+                bottom: "3px", left: "2px", right: "2px",
+                textAlign:     "center",
+                fontSize:      Math.max(7, Math.round(W * 0.09)) + "px",
+                color:         "rgba(200,100,100,0.65)",
+                fontStyle:     "italic",
+                lineHeight:    "1.15",
+                zIndex:        "2",
+                textShadow:    "0 1px 3px rgba(0,0,0,0.9)"
+            }, "Unknown");
+            qCard.appendChild(qLabel);
+
+            // Subtle red top accent instead of gold
+            const qAccent = _makeEl("div", {
+                position:   "absolute",
+                top:        "0",
+                left:       "10%",
+                right:      "10%",
+                height:     "1px",
+                background: "linear-gradient(90deg, transparent, rgba(180,60,60,0.4), transparent)"
+            });
+            qCard.appendChild(qAccent);
+            container.appendChild(qCard);
+        }
+    }
 }
 
 // ── Scout intel helpers (enemy side only) ────────────────────────────────────
@@ -717,21 +816,25 @@ function _scoutRoster(roster) {
     const shuffled = roster.slice().sort(() => Math.random() - 0.5);
     return shuffled.slice(0, revealCount);
 }
-
-// ---- Show / refresh / hide loading screen ----
-function showBattleLoadingScreen(npc, tile, nearestCity) {
+function showBattleLoadingScreen(npc, tile, nearestCity, pendingPlayerOverride) {
     if (!_screen) _buildScreen();
     if (!_screen) return;
 
     const tileName = (tile && tile.name) ? tile.name : "Plains";
-    // Check for a city, but leave it null if nothing valid is found
     const cityName = nearestCity ? (nearestCity.name || nearestCity.id) : null;
 
-    const playerFac    = (window.player && window.player.faction) || "Your Forces";
+    // 🔴 FIX: Extract from the new pendingPlayerOverride if it exists
+    const playerFac    = (pendingPlayerOverride && pendingPlayerOverride.faction) || (window.player && window.player.faction) || "Your Forces";
+    const playerCol    = (pendingPlayerOverride && pendingPlayerOverride.color) || factionColor(playerFac) || "#4a90d9";
+    const playerCount  = ((pendingPlayerOverride && pendingPlayerOverride.count !== undefined) ? pendingPlayerOverride.count : ((window.player && window.player.troops) || 0)) + 1;
+    const playerRoster = (pendingPlayerOverride && pendingPlayerOverride.roster) || ((window.player && window.player.roster) || []);
+
+    // Save for _refreshLoadingScreenData so it doesn't clobber the correct roster
+    // with stale battleEnvironment.units unitType values 110ms later.
+    _lastPendingPlayer = pendingPlayerOverride || null;
+    
     const enemyFac     = npc ? (npc.faction || "Enemy Forces") : "Enemy Forces";
-    const playerCol    = factionColor(playerFac) || "#4a90d9";
     const enemyCol     = factionColor(enemyFac)  || "#c0392b";
-    const playerCount  = (window.player && window.player.troops) || 0;
     // +1 for the enemy general only when launched from custom battle.
     // Custom battle sets window.__blsFromCustom = true (via __blsPendingEnemy).
     // Sandbox/parler NPCs carry their real total in npc.count — no +1 needed.
@@ -741,8 +844,11 @@ function showBattleLoadingScreen(npc, tile, nearestCity) {
     const _addGeneral = window.__blsFromCustom || _enemyCmdrSpawned;
     const _exactCount  = ((npc && (npc.count || npc.troops)) || 0) + (_addGeneral ? 1 : 0);
     const enemyCountN  = _scoutCount(_exactCount);        // fuzzy ±10%, nearest 5
-    const playerRoster = (window.player && window.player.roster) || [];
+ 
+    const _fullEnemyRosterLen = (npc && npc.roster) ? npc.roster.length : 0;
     const enemyRoster  = _scoutRoster((npc && npc.roster) || []);  // partial scout reveal
+    // How many enemy units scouts didn't identify — shown as "?" cards
+    const unknownEnemyCount = Math.max(0, _fullEnemyRosterLen - enemyRoster.length);
 
     // If we have a city name, show "BATTLE OF [CITY]", otherwise fallback to "LOADING BATTLE"
     _titleEl.textContent = cityName ? "BATTLE OF " + String(cityName).toUpperCase() : "LOADING BATTLE";
@@ -774,7 +880,7 @@ function showBattleLoadingScreen(npc, tile, nearestCity) {
 
     // Build cards after layout tick (so canvases get proper width)
     setTimeout(() => {
-        buildCardTiles(enemyRoster,  _enemyCardsRow,  "enemy",  enemyCol);
+        buildCardTiles(enemyRoster,  _enemyCardsRow,  "enemy",  enemyCol, unknownEnemyCount);
         buildCardTiles(playerRoster, _playerCardsRow, "player", playerCol);
     }, 80);
 
@@ -802,18 +908,40 @@ function showBattleLoadingScreen(npc, tile, nearestCity) {
 function _refreshLoadingScreenData() {
     if (!_screen || _screen.style.display === "none") return;
 
-    const playerFac = (window.player && window.player.faction) || "Your Forces";
-    let playerRoster = (window.player && Array.isArray(window.player.roster)) ? window.player.roster : [];
-    if (!playerRoster.length && window.battleEnvironment && Array.isArray(window.battleEnvironment.units)) {
-        playerRoster = window.battleEnvironment.units
-            .filter(u => u.side === "player" && !u.isCommander)
-            .map(u => ({ type: u.unitType || (u.stats && u.stats.name) || "Soldier" }));
-    }
-    const playerCol = factionColor(playerFac) || "#4a90d9";
+  let playerFac = "Your Forces";
+    let playerRoster = [];
+    let playerCountN = 0;
 
+    // PRIORITY: use the custom setup roster saved from pendingPlayerOverride.
+    // This is always accurate (it's exactly what the player chose) and avoids
+    // the stale-unitType problem where battleEnvironment.units shows "Militia"
+    // for every unit during the brief spawn window.
+    if (_lastPendingPlayer && _lastPendingPlayer.roster && _lastPendingPlayer.roster.length) {
+        playerFac    = _lastPendingPlayer.faction || playerFac;
+        playerRoster = _lastPendingPlayer.roster;
+        playerCountN = _lastPendingPlayer.count || playerRoster.length;
+    } else if (window.battleEnvironment && Array.isArray(window.battleEnvironment.units)) {
+        // Fallback: read from live spawned units (used for campaign/parler battles)
+        const players = window.battleEnvironment.units.filter(u => u.side === "player" && !u.isCommander);
+        if (players.length) {
+            playerFac    = players[0].faction || players[0].nationality || playerFac;
+            playerRoster = players.map(u => ({ type: u.unitType || (u.stats && u.stats.name) || "Soldier" }));
+            playerCountN = players.length;
+        }
+    }
+    
+    // Fallback if spawn loop hasn't hit yet
+    if (!playerRoster.length) {
+        playerFac = (window.player && window.player.faction) || playerFac;
+        playerRoster = (window.player && Array.isArray(window.player.roster)) ? window.player.roster : [];
+        playerCountN = playerRoster.length || (window.player && window.player.troops) || 0;
+    }
+
+    const playerCol = factionColor(playerFac) || "#4a90d9";
     let enemyFac     = "Enemy Forces";
     let enemyRoster  = [];
     let enemyCountN  = 0;
+    let unknownEnemyCount = 0;
     if (window.battleEnvironment && Array.isArray(window.battleEnvironment.units)) {
         const enemies = window.battleEnvironment.units.filter(u => u.side === "enemy" && !u.isCommander);
         if (enemies.length) {
@@ -821,6 +949,8 @@ function _refreshLoadingScreenData() {
             // Full roster from live units, then scout-filter to partial reveal
             const _fullRoster = enemies.map(u => ({ type: u.unitType || (u.stats && u.stats.name) || "Soldier" }));
             enemyRoster = _scoutRoster(_fullRoster);
+            // Track how many units scouts didn't identify → "?" cards
+            unknownEnemyCount = Math.max(0, _fullRoster.length - enemyRoster.length);
             // +1 for commander (excluded by filter), then fuzz the total
             enemyCountN = _scoutCount(enemies.length + 1);
         }
@@ -837,7 +967,7 @@ function _refreshLoadingScreenData() {
     }
     document.getElementById("bls-player-name").textContent = playerFac.toUpperCase();
     document.getElementById("bls-player-name").style.color = playerCol;
-    document.getElementById("bls-player-count").textContent = (playerRoster.length || (window.player && window.player.troops) || 0) + " troops";
+    document.getElementById("bls-player-count").textContent = (playerRoster.length || (window.player && window.player.troops) || 0) + 1 + " troops";
 
     _subEl.textContent = terrainLabel("");
 
@@ -845,7 +975,7 @@ function _refreshLoadingScreenData() {
     // If enemies aren't spawned yet (110ms refresh fires before spawn loop finishes),
     // enemyRoster is [] and calling buildCardTiles would wipe the correct cards that
     // showBattleLoadingScreen already built from __blsPendingEnemy at t=80ms.
-    if (enemyRoster.length)  buildCardTiles(enemyRoster,  _enemyCardsRow,  "enemy",  enemyCol);
+    if (enemyRoster.length)  buildCardTiles(enemyRoster,  _enemyCardsRow,  "enemy",  enemyCol, unknownEnemyCount);
     if (playerRoster.length) buildCardTiles(playerRoster, _playerCardsRow, "player", playerCol);
 }
 
@@ -2058,26 +2188,23 @@ function _wrapLaunchFn(fnName, fallbackNpc, fallbackTile, npcArgIdx) {
             return orig.apply(this, arguments);
         }
 
-        // FIX: npcArgIdx lets callers specify which argument index holds the
-        // enemy/NPC setup object.  launchCustomSiege(playerSetup, enemySetup, map)
-        // puts the enemy at index 1, not 0 — without this, playerSetup was treated
-        // as the NPC and the loading screen showed the wrong faction/roster.
-        const _npcIdx = (typeof npcArgIdx === "number") ? npcArgIdx : 0;
-        // FIX: launchCustomBattle() takes zero arguments, so arguments[0] is undefined.
-        // custom_battle_gui.js sets window.__blsPendingEnemy before calling — consume it
-        // here so the loading screen shows the real enemy faction/roster/count.
+const _npcIdx = (typeof npcArgIdx === "number") ? npcArgIdx : 0;
+        
         const _pendingEnemy = window.__blsPendingEnemy || null;
-        window.__blsPendingEnemy = null; // consume once
-        // Track whether this launch came from custom battle (has a general to add +1 for)
-        // vs sandbox/parler (npc.count already includes the full force, no general to add).
+        const _pendingPlayer = window.__blsPendingPlayer || null; // 🔴 Catch it here
+        window.__blsPendingEnemy = null; 
+        window.__blsPendingPlayer = null; 
+
         window.__blsFromCustom = !!_pendingEnemy;
         const npc  = _pendingEnemy
             || ((arguments[_npcIdx] && typeof arguments[_npcIdx] === "object") ? arguments[_npcIdx] : fallbackNpc);
         const tile = (arguments[2] && typeof arguments[2] === "object") ? arguments[2] : fallbackTile;
         const nearCity = findNearestCity(npc);
-        try { showBattleLoadingScreen(npc, tile, nearCity); }
+        
+        // 🔴 Pass _pendingPlayer directly into the show screen function
+        try { showBattleLoadingScreen(npc, tile, nearCity, _pendingPlayer); }
         catch (e) { console.error("[BLS] showLoading (" + fnName + ")", e); }
-
+		
         window.__battleLoadingActive  = true;
         window.__battleCullingEnabled = false;
 

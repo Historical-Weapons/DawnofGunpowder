@@ -285,16 +285,55 @@ const actionBox = document.createElement("div");
         // closure directly — the local closure bypasses the loading-screen wrapper.
         // FIX: Expose enemySetup to the BLS wrapper before calling — launchCustomBattle()
         // takes no arguments so _wrapLaunchFn cannot extract the enemy from arguments[0].
-        const startBtn = createCBBtn("Start Battle", () => {
+const startBtn = createCBBtn("Start Battle", () => {
+            // 🔴 FIX: Validate BEFORE triggering the function so the loading screen
+            // wrapper doesn't trap the player if requirements aren't met.
+            const playerCount = playerSetup.roster.length;
+            const enemyCount = enemySetup.roster.length;
+            const mapType = selectedMap.toLowerCase();
+
+            // 1. Hard Minimum for any battle
+            if (playerCount === 0 || enemyCount === 0) {
+                displayBattleError("Error: Both sides NEED units!");
+                return;
+            }
+            // 2. Siege Requirement (10 units)
+            if (customBattleMode === "siege" && (playerCount < 10 || enemyCount < 10)) {
+                displayBattleError("Siege Requirement: At least 10 units needed to man equipment.");
+                return;
+            }
+            // 3. Coastal & Ocean Requirement (5 units)
+            if ((mapType.includes("coastal") || mapType.includes("ocean") || mapType.includes("sea")) && (playerCount < 5 || enemyCount < 5)) {
+                displayBattleError("Naval Requirement: 5+ units needed to fill transport ships.");
+                return;
+            }
+            // 4. Funds Check
+            if (playerSetup.cost > customFunds || enemySetup.cost > customFunds) {
+                displayBattleError("Funds exceeded! Please remove some units.");
+                return;
+            }
+
             window.__blsPendingEnemy = {
                 faction: enemySetup.faction,
                 color:   enemySetup.color,
                 roster:  enemySetup.roster.map(name => ({ type: name })),
                 count:   enemySetup.roster.length
             };
+			
+ 
+            
+            // 🔴 NEW: Expose the player's custom roster to the loading screen
+            window.__blsPendingPlayer = {
+                faction: playerSetup.faction,
+                color:   playerSetup.color,
+                roster:  playerSetup.roster.map(name => ({ type: name })),
+                count:   playerSetup.roster.length
+            };
+            
+            (window.launchCustomBattle || launchCustomBattle)();
+			
             (window.launchCustomBattle || launchCustomBattle)();
         });
-        
         actionBox.appendChild(backBtn);
         actionBox.appendChild(randomBtn);
         actionBox.appendChild(startBtn);
@@ -429,10 +468,12 @@ document.getElementById("cb-map-select").addEventListener("change", (e) => {
         <div style="display: flex; justify-content: center; gap: 20px; margin-top: 10px; align-items: center;">
 <select id="cb-faction-${side}" style="background: #3e2723; color: #fff; border: 1px solid #d4b886; padding: 5px;">
     ${Object.keys(typeof FACTIONS !== 'undefined' ? FACTIONS : {"Generic":{color:"#fff"}})
-        .filter(f => f !== "Bandits" && f !== "Player's Kingdom") // Filter out these two
-        .map(f => 
-            `<option value="${f}" ${f === setupObj.faction ? 'selected' : ''}>${f}</option>`
-        ).join('')}
+        .filter(f => f !== "Bandits") // Allow the player faction to pass through
+        .map(f => {
+            // Rename visually, but keep the underlying 'value' identical for the engine
+            const displayName = (f === "Player" || f === "Player's Kingdom") ? "Custom" : f;
+            return `<option value="${f}" ${f === setupObj.faction ? 'selected' : ''}>${displayName}</option>`;
+        }).join('')}
 </select>
             <div style="font-size: 16px; color: #f5d76e;">Funds Left: <span id="cb-funds-left-${side}">${customFunds - setupObj.cost}</span></div>
         </div>
@@ -813,16 +854,17 @@ if (countEl) {
 
         // 5. Sync UI and Launch
         updateUI();
-        // FIX: Call through window.launchCustomBattle so the battle-loading-screen.js
-        // wrapper intercepts it.  A direct call to launchCustomBattle() here hits the
-        // closure-local declaration and bypasses the window-level BLS patch entirely,
-        // causing the loading screen to never appear for random battles.
-        // FIX: Expose enemySetup to BLS wrapper (launchCustomBattle has no args).
-        window.__blsPendingEnemy = {
+window.__blsPendingEnemy = {
             faction: enemySetup.faction,
             color:   enemySetup.color,
             roster:  enemySetup.roster.map(name => ({ type: name })),
             count:   enemySetup.roster.length
+        };
+        window.__blsPendingPlayer = {
+            faction: playerSetup.faction,
+            color:   playerSetup.color,
+            roster:  playerSetup.roster.map(name => ({ type: name })),
+            count:   playerSetup.roster.length
         };
         (window.launchCustomBattle || launchCustomBattle)();
     }

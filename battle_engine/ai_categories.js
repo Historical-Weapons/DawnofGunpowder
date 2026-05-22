@@ -185,6 +185,36 @@ let inSiege = typeof inSiegeBattle !== 'undefined' && inSiegeBattle;
     if (unit.disableAICombat || ["siege_assault", "follow", "retreat", "move_to_point", "hold_position"].includes(unit.orderType)) {
         return; 
     }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // ENEMY LAND AI: seek_engage handler (mirrors processTacticalOrders)
+    // ════════════════════════════════════════════════════════════════════════
+    // EnemyLandStrategyAI issues "seek_engage" to enemy units that should
+    // free-fire / chase the nearest player unit (shooters, light cav kiting,
+    // heavy cav during CHARGING).  processTacticalOrders only handles
+    // seek_engage for player units, so for enemies we need a parallel branch
+    // here.  Without it, seek_engage enemies fall through to the default
+    // targeting code below which constantly picks "nearest player" but
+    // doesn't tag the unit with a stable target — causing the chaotic /
+    // "dumb charge" behaviour.  This block ONLY runs in non-siege battles
+    // (siege has its own dedicated defender targeting block further down).
+    if (unit.side === "enemy" && unit.orderType === "seek_engage" && !inSiege) {
+        let nearestDist = Infinity;
+        let nearestEnemy = null;
+        for (let i = 0; i < units.length; i++) {
+            const other = units[i];
+            if (other.side === "player" && other.hp > 0 && !other.isDummy) {
+                const d = Math.hypot(unit.x - other.x, unit.y - other.y);
+                if (d < nearestDist) { nearestDist = d; nearestEnemy = other; }
+            }
+        }
+        if (nearestEnemy) {
+            unit.target = nearestEnemy;
+        }
+        return; // EnemyLandStrategyAI is in charge; don't run the random scanner
+    }
+    // ════════════════════════════════════════════════════════════════════════
+
 // --- NEW GUARD: PACIFY EARLY-GAME WALL DEFENDERS (PATCHED) ---
         let southGate = (typeof battleEnvironment !== 'undefined' && battleEnvironment.cityGates) 
             ? battleEnvironment.cityGates.find(g => g.side === "south") : null;
@@ -470,9 +500,17 @@ if (unit.side === "player") {
                         if (nearestEnemy && nearestDist < unit.stats.range + 100) {
                             unit.target = nearestEnemy; // Engage if in range
                         } else {
+                            // Defenders stand on the PARAPET (inner/north face of the combined
+                            // wall+wood scaffold) before shooting.
+                            // wallThick=10 tiles, woodThick=7 tiles → combinedThick=17 tiles.
+                            // parapetY = wallPixelY - combinedThick * BATTLE_TILE_SIZE
+                            // This puts archers on top of the wooden walkway, looking south
+                            // at the attackers rather than wandering south of the wall.
+                            let _ts = (typeof BATTLE_TILE_SIZE !== 'undefined') ? BATTLE_TILE_SIZE : 8;
+                            let parapetY = wallY - (17 * _ts); // 17 = wallThick(10) + woodThick(7)
                             unit.target = {
                                 x: gateX + ((Math.random() - 0.5) * 1600), 
-                                y: wallY + 10,
+                                y: parapetY,
                                 hp: 9999, isDummy: true, priority: "ranged_line"
                             };
                         }
@@ -800,15 +838,14 @@ if (typeof unit.stats.updateStance === 'function') {
             unit.fleeTimer = 0;
 
             if (inSiege && unit.side === "enemy") {
-                // SIEGE DEFENDERS flee SOUTH (toward bottom of map / out through
-                // the south gate) instead of heading deeper north into the city.
-                // The master clamp in battlefield_logic.js holds them at the wall
-                // until the gate is breached, then they scatter south naturally.
-                let _mw = typeof BATTLE_WORLD_WIDTH  !== 'undefined' ? BATTLE_WORLD_WIDTH  : 2400;
-                let _mh = typeof BATTLE_WORLD_HEIGHT !== 'undefined' ? BATTLE_WORLD_HEIGHT : 1600;
-                let _scatterX = unit.x + (Math.random() - 0.5) * 400;
+                // SIEGE DEFENDERS flee NORTH — deeper into the city away from the
+                // attackers.  Y = -500 is well off the top of the map so the unit
+                // runs until it exits the battlefield and is marked "retreated".
+                // Scatter X so the whole defending army doesn't pile onto one pixel.
+                let _mw = typeof BATTLE_WORLD_WIDTH !== 'undefined' ? BATTLE_WORLD_WIDTH : 2400;
+                let _scatterX = unit.x + (Math.random() - 0.5) * 500;
                 _scatterX = Math.max(80, Math.min(_mw - 80, _scatterX));
-                unit.escapePoint = { x: _scatterX, y: _mh + 500 };
+                unit.escapePoint = { x: _scatterX, y: -500 };
             } else {
                 let distToLeft = unit.x;
                 let distToRight = BATTLE_WORLD_WIDTH - unit.x;
@@ -899,15 +936,14 @@ if (inSiege && unit.side === "enemy" && typeof battleEnvironment !== 'undefined'
         let _inSiege = typeof inSiegeBattle !== 'undefined' && inSiegeBattle;
 
         if (!unit.escapePoint || unit.escapeType !== "INNER") {
-            // SIEGE DEFENDER OVERRIDE: wavering defenders scatter to the nearest
-            // horizontal edge (left or right) rather than north into the city.
-            // This prevents them from drifting south toward the wall boundary.
+            // SIEGE DEFENDER OVERRIDE: wavering defenders scatter NORTH —
+            // away from the attackers at the wall.  A small random X spread
+            // keeps them from all running to the exact same pixel.
             if (_inSiege && unit.side === "enemy") {
                 let _mw = typeof BATTLE_WORLD_WIDTH !== 'undefined' ? BATTLE_WORLD_WIDTH : 2400;
-                let p = 20;
-                unit.escapePoint = unit.x < _mw / 2
-                    ? { x: p, y: unit.y }
-                    : { x: _mw - p, y: unit.y };
+                let _scatterX = unit.x + (Math.random() - 0.5) * 300;
+                _scatterX = Math.max(40, Math.min(_mw - 40, _scatterX));
+                unit.escapePoint = { x: _scatterX, y: 20 };
             } else {
                 let distToLeft = unit.x;
                 let distToRight = BATTLE_WORLD_WIDTH - unit.x;

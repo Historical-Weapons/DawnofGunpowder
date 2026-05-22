@@ -285,21 +285,20 @@ updateCasualtyMoralePressure(units, currentBattleData);
         if (!unit.isCommander) {
             const isFleeingOrWavering = AICategories.processMoraleAndFleeing(unit, pCount, eCount, currentBattleData);
             
-            // ---> SIEGE FLEEING OVERRIDE (LEFT/RIGHT ONLY) <---
+            // ---> SIEGE FLEEING OVERRIDE (NORTH ONLY) <---
             if (isFleeingOrWavering && typeof inSiegeBattle !== 'undefined' && inSiegeBattle) {
-                // Determine the boundaries of your map
-                let mapWidth = typeof BATTLE_WORLD_WIDTH !== 'undefined' ? BATTLE_WORLD_WIDTH : 2000;
-                
-                // Calculate distance to left and right borders
-                let distToLeft = unit.x;
-                let distToRight = mapWidth - unit.x;
-                
-                // Force their target to the closest horizontal edge, keeping their current Y level
-                unit.target = { 
-                    x: distToLeft < distToRight ? -200 : mapWidth + 200, 
-                    y: unit.y, 
-                    isDummy: true 
+                // Defenders always flee NORTH — away from the wall and the attacking
+                // army.  Y = -300 is well off the top of the map; the isOutsideBorder
+                // check in _handleBrokenFleeing retires the unit once it crosses there.
+                // Clear escapeType so _handleBrokenFleeing doesn't reuse a stale
+                // south/sideways escapePoint from a previous frame's assignment.
+                unit.escapeType  = null;
+                unit.escapePoint = {
+                    x: unit.x + (Math.random() - 0.5) * 200, // slight X jitter: no stacking
+                    y: -300
                 };
+                // Kill any southward momentum so the master wall-clamp doesn't fight it.
+                if (unit.vy > 0) unit.vy = 0;
             }
             // ---> END OVERRIDE <---
 

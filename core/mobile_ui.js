@@ -1150,33 +1150,12 @@ html += `
     // on-screen touch controls in a future iteration.
 
     window.MobileControls = (function () {
-        /*
-         * ┌─────────────────────────────────────────────────────────────────┐
-         * │  FUTURE MOBILE CONTROLS — PLACEHOLDER                          │
-         * │                                                                 │
-         * │  Planned additions:                                             │
-         * │   • D-pad / virtual joystick for WASD movement                 │
-         * │   • Pinch-to-zoom gesture handler for the game canvas           │
-         * │   • On-screen formation buttons (1-5 + Z/X/V/C/B/Q/R/E/F)     │
-         * │   • Long-press context menu for selecting/commanding units      │
-         * │   • Battle speed toggle button                                  │
-         * │                                                                 │
-         * │  HOW TO ADD:                                                    │
-         * │   1. Call MobileControls.init() after the game canvas is ready  │
-         * │   2. Each control fires the same keyboard events the desktop     │
-         * │      version already handles (KeyboardEvent dispatch)           │
-         * └─────────────────────────────────────────────────────────────────┘
-         */
 
-        function init() {
-            if (!isMobile()) return;
-            // ── TODO: build on-screen D-pad ──
-            // ── TODO: attach pinch-zoom to gameCanvas ──
-            // ── TODO: build formation button row ──
-            console.log("[MobileControls] Placeholder initialised — no controls added yet.");
-        }
+        // ── Key held state for joystick (continuous movement) ────────────────
+        const _heldKeys = {};
+        let   _holdInterval = null;
 
-        /** Helper: simulate a keydown/keyup pair for a given key code */
+        // ── Simulate a one-shot keydown+keyup ────────────────────────────────
         function simulateKey(key) {
             const down = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
             const up   = new KeyboardEvent("keyup",   { key, bubbles: true, cancelable: true });
@@ -1184,7 +1163,368 @@ html += `
             document.dispatchEvent(up);
         }
 
-        return { init, simulateKey };
+        // ── Hold a key (fires keydown repeatedly until released) ─────────────
+        function holdKey(key) {
+            if (_heldKeys[key]) return;
+            _heldKeys[key] = true;
+            document.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
+        }
+
+        function releaseKey(key) {
+            if (!_heldKeys[key]) return;
+            delete _heldKeys[key];
+            document.dispatchEvent(new KeyboardEvent("keyup", { key, bubbles: true, cancelable: true }));
+        }
+
+        function releaseAllKeys() {
+            Object.keys(_heldKeys).forEach(releaseKey);
+        }
+
+        // ── CSS injection for controls overlay ───────────────────────────────
+        function _injectControlCSS() {
+            if (document.getElementById("mob-controls-style")) return;
+            const s = document.createElement("style");
+            s.id = "mob-controls-style";
+            s.textContent = `
+/* ── MOBILE CONTROLS OVERLAY ── */
+#mob-controls-overlay {
+    position: fixed;
+    bottom: 0; left: 0; right: 0;
+    pointer-events: none;
+    z-index: 8500;
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    padding: 0 8px 10px 8px;
+    box-sizing: border-box;
+}
+
+/* ── JOYSTICK ── */
+#mob-joystick-zone {
+    pointer-events: all;
+    width: 120px;
+    height: 120px;
+    position: relative;
+    flex-shrink: 0;
+}
+#mob-joystick-base {
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    background: rgba(0,0,0,0.35);
+    border: 2px solid rgba(255,255,255,0.25);
+    box-shadow: 0 0 12px rgba(0,0,0,0.5);
+}
+#mob-joystick-knob {
+    position: absolute;
+    width: 44px; height: 44px;
+    border-radius: 50%;
+    background: radial-gradient(circle at 35% 35%, rgba(255,255,255,0.5), rgba(180,140,80,0.85));
+    border: 2px solid rgba(255,220,100,0.7);
+    box-shadow: 0 2px 8px rgba(0,0,0,0.6);
+    top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    touch-action: none;
+    cursor: grab;
+}
+
+/* ── RIGHT-SIDE PANEL ── */
+#mob-right-panel {
+    pointer-events: all;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 6px;
+    flex-shrink: 0;
+}
+
+/* ── FORMATION BUTTON ROW ── */
+#mob-formation-row {
+    display: flex;
+    gap: 5px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    max-width: 230px;
+}
+.mob-btn {
+    touch-action: manipulation;
+    background: linear-gradient(to bottom, #3a2a0a, #1a0e04);
+    border: 1px solid rgba(200,160,60,0.7);
+    color: #e8c97a;
+    border-radius: 6px;
+    font-size: 11px;
+    font-weight: bold;
+    padding: 7px 9px;
+    min-width: 38px;
+    text-align: center;
+    cursor: pointer;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.5);
+    user-select: none;
+    -webkit-user-select: none;
+    line-height: 1.2;
+}
+.mob-btn:active {
+    background: linear-gradient(to bottom, #5a3f10, #2a1a06);
+    border-color: #ffe680;
+}
+.mob-btn.mob-cmd {
+    background: linear-gradient(to bottom, #0a1a3a, #040e1a);
+    border-color: rgba(80,160,220,0.7);
+    color: #80c4f0;
+}
+.mob-btn.mob-cmd:active {
+    background: linear-gradient(to bottom, #1a2f5a, #0a1e3a);
+    border-color: #a0d8ff;
+}
+.mob-btn.mob-speed {
+    background: linear-gradient(to bottom, #1a3a0a, #0a1e04);
+    border-color: rgba(80,220,80,0.7);
+    color: #80f090;
+    min-width: 54px;
+}
+.mob-btn.mob-speed:active {
+    background: linear-gradient(to bottom, #2a5a10, #102a06);
+}
+/* hide controls when drawer is open */
+body.mob-drawer-open #mob-controls-overlay {
+    display: none !important;
+}
+            `;
+            document.head.appendChild(s);
+        }
+
+        // ── Build the joystick ────────────────────────────────────────────────
+        function _buildJoystick(zone) {
+            const base = document.createElement("div");
+            base.id = "mob-joystick-base";
+            const knob = document.createElement("div");
+            knob.id = "mob-joystick-knob";
+            zone.appendChild(base);
+            zone.appendChild(knob);
+
+            const DEAD  = 14;   // dead-zone radius px
+            const MAX_R = 46;   // max knob travel px
+            let   touching = false;
+            let   _repeatTimer = null;
+
+            function _dirFromAngle(angle, dist) {
+                // Returns array of key names active for this joystick position
+                const keys = [];
+                if (dist < DEAD) return keys;
+                // angle 0 = right, 90 = down (screen coords)
+                const deg = ((angle * 180 / Math.PI) + 360) % 360;
+                // Horizontal
+                if (deg > 22.5  && deg < 157.5) keys.push("ArrowDown");
+                if (deg > 202.5 && deg < 337.5) keys.push("ArrowUp");
+                // Vertical
+                if (deg > 292.5 || deg < 67.5)  keys.push("ArrowRight");
+                if (deg > 112.5 && deg < 247.5)  keys.push("ArrowLeft");
+                return keys;
+            }
+
+            function _onMove(cx, cy) {
+                const rect = zone.getBoundingClientRect();
+                const ox = cx - (rect.left + rect.width  / 2);
+                const oy = cy - (rect.top  + rect.height / 2);
+                const dist  = Math.sqrt(ox*ox + oy*oy);
+                const angle = Math.atan2(oy, ox);
+                const clamped = Math.min(dist, MAX_R);
+                const kx = Math.cos(angle) * clamped;
+                const ky = Math.sin(angle) * clamped;
+
+                knob.style.transform = `translate(calc(-50% + ${kx}px), calc(-50% + ${ky}px))`;
+
+                // Update held keys
+                const want = new Set(_dirFromAngle(angle, dist));
+                // release keys no longer needed
+                ["ArrowUp","ArrowDown","ArrowLeft","ArrowRight"].forEach(k => {
+                    if (!want.has(k)) releaseKey(k);
+                });
+                // hold new keys
+                want.forEach(k => holdKey(k));
+            }
+
+            function _onEnd() {
+                touching = false;
+                knob.style.transform = "translate(-50%, -50%)";
+                releaseAllKeys();
+            }
+
+            zone.addEventListener("touchstart", e => {
+                e.preventDefault();
+                touching = true;
+                _onMove(e.touches[0].clientX, e.touches[0].clientY);
+            }, { passive: false });
+
+            zone.addEventListener("touchmove", e => {
+                e.preventDefault();
+                if (!touching) return;
+                _onMove(e.touches[0].clientX, e.touches[0].clientY);
+            }, { passive: false });
+
+            zone.addEventListener("touchend", e => { e.preventDefault(); _onEnd(); }, { passive: false });
+            zone.addEventListener("touchcancel", _onEnd);
+        }
+
+        // ── Build formation + command buttons ────────────────────────────────
+        function _buildButtons(panel) {
+            // Formation row  (Z X V C B)
+            const formationDefs = [
+                { label: "Tight",    key: "z", title: "Tight formation" },
+                { label: "Std",      key: "x", title: "Standard formation" },
+                { label: "Line",     key: "v", title: "Line formation" },
+                { label: "Circle",   key: "c", title: "Circle formation" },
+                { label: "Square",   key: "b", title: "Square formation" },
+            ];
+
+            // Command row  (1-5 select + Q R E F)
+            const selectDefs = [
+                { label: "Inf",   key: "1", title: "Select Infantry" },
+                { label: "Rng",   key: "2", title: "Select Ranged" },
+                { label: "Cav",   key: "3", title: "Select Cavalry" },
+                { label: "Gun",   key: "4", title: "Select Gunpowder" },
+                { label: "All",   key: "5", title: "Select All" },
+            ];
+            const cmdDefs = [
+                { label: "Engage", key: "q", title: "Seek & Engage", cls: "mob-cmd" },
+                { label: "Rtreat", key: "r", title: "Retreat",       cls: "mob-cmd" },
+                { label: "Hold",   key: "e", title: "Hold Ground",   cls: "mob-cmd" },
+                { label: "Follow", key: "f", title: "Follow General",cls: "mob-cmd" },
+            ];
+
+            function makeRow(defs, extraCls) {
+                const row = document.createElement("div");
+                row.className = "mob-formation-row";
+                row.style.cssText = "display:flex;gap:5px;justify-content:flex-end;flex-wrap:wrap;";
+                defs.forEach(def => {
+                    const btn = document.createElement("button");
+                    btn.className = "mob-btn" + (def.cls ? " " + def.cls : "") + (extraCls ? " " + extraCls : "");
+                    btn.textContent = def.label;
+                    btn.title = def.title || "";
+                    btn.addEventListener("touchstart", e => { e.preventDefault(); simulateKey(def.key); btn.classList.add("active"); }, { passive: false });
+                    btn.addEventListener("touchend",   e => { e.preventDefault(); btn.classList.remove("active"); },                  { passive: false });
+                    btn.addEventListener("click",      ()  => simulateKey(def.key));
+                    row.appendChild(btn);
+                });
+                return row;
+            }
+
+            // Speed toggle button
+            const speedBtn = document.createElement("button");
+            speedBtn.id = "mob-speed-btn";
+            speedBtn.className = "mob-btn mob-speed";
+            speedBtn.textContent = "1× Speed";
+            let _speedIndex = 0;
+            const _speeds = [
+                { label: "1× Speed", val: 1  },
+                { label: "2× Speed", val: 2  },
+                { label: "3× Speed", val: 3  },
+                { label: "½ Speed",  val: 0.5 },
+            ];
+            function _applySpeed(idx) {
+                const s = _speeds[idx];
+                speedBtn.textContent = s.label;
+                // battleSpeed is the global used by the battle loop
+                if (typeof window.battleSpeed !== "undefined") window.battleSpeed = s.val;
+                // Also try gameSpeed
+                if (typeof window.gameSpeed   !== "undefined") window.gameSpeed   = s.val;
+                // Update HUD element if present
+                const txt = document.getElementById("speed-text");
+                if (txt) txt.textContent = s.val + "x";
+            }
+            speedBtn.addEventListener("click", () => {
+                _speedIndex = (_speedIndex + 1) % _speeds.length;
+                _applySpeed(_speedIndex);
+            });
+            speedBtn.addEventListener("touchstart", e => { e.preventDefault(); _speedIndex = (_speedIndex + 1) % _speeds.length; _applySpeed(_speedIndex); }, { passive: false });
+
+            panel.appendChild(speedBtn);
+            panel.appendChild(makeRow(formationDefs));
+            panel.appendChild(makeRow(selectDefs));
+            panel.appendChild(makeRow(cmdDefs));
+        }
+
+        // ── Pinch-to-zoom ─────────────────────────────────────────────────────
+        function _attachPinchZoom() {
+            const canvas = document.getElementById("gameCanvas");
+            if (!canvas) return;
+
+            let _lastDist = null;
+
+            canvas.addEventListener("touchstart", e => {
+                if (e.touches.length === 2) {
+                    const dx = e.touches[0].clientX - e.touches[1].clientX;
+                    const dy = e.touches[0].clientY - e.touches[1].clientY;
+                    _lastDist = Math.sqrt(dx*dx + dy*dy);
+                }
+            }, { passive: true });
+
+            canvas.addEventListener("touchmove", e => {
+                if (e.touches.length !== 2 || _lastDist === null) return;
+                const dx   = e.touches[0].clientX - e.touches[1].clientX;
+                const dy   = e.touches[0].clientY - e.touches[1].clientY;
+                const dist = Math.sqrt(dx*dx + dy*dy);
+                const delta = dist - _lastDist;
+                _lastDist = dist;
+
+                // Apply to window.camera if it exists
+                const cam = window.camera;
+                if (cam && typeof cam.zoom !== "undefined") {
+                    cam.zoom = Math.max(0.3, Math.min(4, cam.zoom + delta * 0.005));
+                } else if (cam && typeof cam.scale !== "undefined") {
+                    cam.scale = Math.max(0.3, Math.min(4, cam.scale + delta * 0.005));
+                }
+            }, { passive: true });
+
+            canvas.addEventListener("touchend", () => { _lastDist = null; }, { passive: true });
+        }
+
+        // ── Show / hide based on battle state ─────────────────────────────────
+        function _syncVisibility() {
+            const overlay = document.getElementById("mob-controls-overlay");
+            if (!overlay) return;
+            // Only show during active battle and not while parler/story is up
+            const inBattle  = typeof window.inBattleMode !== "undefined" && window.inBattleMode;
+            const storyBusy = window.StoryPresentation && typeof window.StoryPresentation.busy === "function" && window.StoryPresentation.busy();
+            overlay.style.display = (inBattle && !storyBusy) ? "flex" : "none";
+        }
+
+        // ── Main init ─────────────────────────────────────────────────────────
+        let _inited = false;
+        function init() {
+            if (!isMobile() || _inited) return;
+            _inited = true;
+
+            _injectControlCSS();
+
+            // Build overlay
+            const overlay = document.createElement("div");
+            overlay.id = "mob-controls-overlay";
+
+            // Left: joystick
+            const jZone = document.createElement("div");
+            jZone.id = "mob-joystick-zone";
+            _buildJoystick(jZone);
+
+            // Right: buttons
+            const rPanel = document.createElement("div");
+            rPanel.id = "mob-right-panel";
+            _buildButtons(rPanel);
+
+            overlay.appendChild(jZone);
+            overlay.appendChild(rPanel);
+            document.body.appendChild(overlay);
+
+            _attachPinchZoom();
+
+            // Poll visibility every 500ms
+            setInterval(_syncVisibility, 500);
+            _syncVisibility();
+
+            console.log("[MobileControls] Joystick + formation buttons + pinch-zoom initialised.");
+        }
+
+        return { init, simulateKey, holdKey, releaseKey, releaseAllKeys };
     })();
 
     // ─────────────────────────────────────────────────────────────────────────
