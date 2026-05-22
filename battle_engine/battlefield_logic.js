@@ -1,4 +1,3 @@
-
 function isFlanked(attacker, defender) {
     if (!attacker || !defender) return false;
     if (attacker.hp <= 0 || defender.hp <= 0) return false;
@@ -136,7 +135,7 @@ let isTrebuchet = safeName.includes("Trebuchet") || (attacker.name && attacker.n
     return Math.floor(totalDamage);
 }
 
-function updateBattleUnits() {
+window.updateBattleUnits = function updateBattleUnits() {
     if (typeof processSiegeEngines === 'function') processSiegeEngines();
     if (typeof processTacticalOrders === 'function') processTacticalOrders();
 
@@ -202,6 +201,71 @@ updateCasualtyMoralePressure(units, currentBattleData);
             handleUnitDeath(unit);
             return; 
         }
+
+        // =========================================================
+        // ★ PRE-DEPLOY GUARD (BLS v4.1) ★
+        // During the pre-deploy phase (right after the loading screen, before the
+        // player clicks COMMENCE BATTLE), we keep the engine running so player
+        // right-click move orders actually work — but with two constraints:
+        //   • ENEMY units are fully frozen (no AI, no targeting, no morale, no
+        //     movement, no collisions push). Their legs may still animate via
+        //     the draw layer's anim counter — that's fine and intentional.
+        //   • PLAYER non-commander units run normal AI/movement, then are clamped
+        //     to window.__playerDeployZone at the END of this iteration. This
+        //     way executeBoxFormationMove's orderType="move_to_point" +
+        //     orderTargetPoint flows through processAction → _handleMovement
+        //     naturally — same code path as in real battle.
+        //   • PLAYER commander uses the same handlePlayerOverride path as
+        //     normal battle (already handled below at line ~211).
+        // =========================================================
+        if (typeof window !== 'undefined' && window.__preDeploymentActive) {
+            if (unit.side === "enemy") {
+                // ABSOLUTE STILLNESS
+                unit.vx = 0;
+                unit.vy = 0;
+                unit.target = null;
+                unit.orderType = "hold_position";
+                unit.hasOrders = true;
+                unit.orderTargetPoint = null;
+                unit.state = "idle";
+                unit.reactionDelay = 0;
+                unit.formationTimer = 0;
+                unit.fleeing = false;
+                unit.isFleeing = false;
+                if (typeof unit.morale === "number") unit.morale = Math.max(unit.morale, 100);
+                if (unit.cooldown > 0) unit.cooldown--;
+                return; // skip ALL processing for enemy units pre-deploy
+            }
+            // ★ v4.2.2: SUPPRESS COMMANDER COMBAT DURING PRE-DEPLOY
+            // Even when clamped to the deploy zone (esp. small naval ship deck),
+            // the player commander used to auto-acquire enemy targets via
+            // handlePlayerOverride and shoot at them through the deploy gate.
+            // Strip target & freeze cooldown each frame so no combat happens
+            // before COMMENCE BATTLE is clicked. Movement still flows through
+            // the normal handlePlayerOverride path so legs animate.
+            if (unit.isCommander && unit.side === "player") {
+                unit.target = null;
+                // Bump cooldown so even if some other path acquires a target,
+                // the attack doesn't release until well after COMMENCE.
+                if (!unit.cooldown || unit.cooldown < 30) unit.cooldown = 30;
+            }
+            // For player non-commander units, suppress fleeing/morale during pre-deploy
+            // (a unit's "fleeing" flag shouldn't be set from a fight that hasn't started yet)
+            if (!unit.isCommander) {
+                unit.fleeing = false;
+                unit.isFleeing = false;
+                if (typeof unit.morale === "number") unit.morale = Math.max(unit.morale, 100);
+                // Strip any target the unit may have auto-acquired — they shouldn't
+                // engage anyone until COMMENCE BATTLE. Only keep dummy targets
+                // (those come from executeBoxFormationMove move orders).
+                if (unit.target && !unit.target.isDummy) {
+                    unit.target = null;
+                }
+            }
+            // Player commander + player non-commander units fall through to normal
+            // processing below — but we'll clamp them after processAction.
+        }
+        // =========================================================
 
         // ---> STUCK PREVENTION INJECTION <---
         if (typeof handleStuckPrevention === 'function') {
@@ -269,6 +333,25 @@ updateCasualtyMoralePressure(units, currentBattleData);
         AICategories.processTargeting(unit, units);
         AICategories.processAction(unit, battleEnvironment, currentBattleData, player);
 
+        // =========================================================
+        // ★ PRE-DEPLOY POSITION CLAMP (BLS v4.1) ★
+        // After AI/movement runs, force player units to stay inside the deploy zone.
+        // The commander is clamped via sandboxmode_update's player.x/y → pCmdr sync,
+        // but non-commander units arrived here via processAction → _handleMovement,
+        // so we clamp them now. The clamp also kills any velocity carrying them out.
+        // =========================================================
+        if (typeof window !== 'undefined' && window.__preDeploymentActive &&
+            window.__playerDeployZone && unit.side === "player" && !unit.isCommander) {
+            const z = window.__playerDeployZone;
+            if (z.type !== "naval") {
+                if (unit.x < z.minX) { unit.x = z.minX; unit.vx = 0; }
+                if (unit.x > z.maxX) { unit.x = z.maxX; unit.vx = 0; }
+                if (unit.y < z.minY) { unit.y = z.minY; unit.vy = 0; }
+                if (unit.y > z.maxY) { unit.y = z.maxY; unit.vy = 0; }
+            }
+        }
+        // =========================================================
+
         // Cooldowns
         if (unit.cooldown > 0) unit.cooldown--;
     });
@@ -279,26 +362,44 @@ updateCasualtyMoralePressure(units, currentBattleData);
     updateRiverPhysics();  
 
     // =========================================================
-    // ---> NEW: THE ABSOLUTE MASTER CLAMP <---
-    // Catches any unit pushed out of bounds by collision/gravity
+    // ---> THE ABSOLUTE MASTER CLAMP (SIEGE DEFENDERS) <---
+    // Catches any defender pushed south of the wall by crowd
+    // pressure, collision math, or gravity — runs every frame.
+    // Gate-breached units near the gate opening are exempted so
+    // they can fight through it; all others held north of wall.
     // =========================================================
-    if (typeof inSiegeBattle !== 'undefined' && inSiegeBattle) {
-        let southGate = battleEnvironment.cityGates ? battleEnvironment.cityGates.find(g => g.side === "south") : null;
-        let isGateBreached = window.__SIEGE_GATE_BREACHED__ || (southGate && (southGate.isOpen || southGate.gateHP <= 0));
-        
-        if (!isGateBreached) {
-            let strictWallLimit = SiegeTopography.wallPixelY - 10;
-            
-            units.forEach(u => {
-                if (u.side === "enemy" && u.hp > 0 && !u.isFalling) {
-                    if (u.y > strictWallLimit) {
-                        u.y = strictWallLimit; // Hard overwrite back to the North
-                        // If they were squeezed into the wall, kill vertical momentum
-                        if (u.vy > 0) u.vy = 0; 
-                    }
+    if (typeof inSiegeBattle !== 'undefined' && inSiegeBattle &&
+        typeof SiegeTopography !== 'undefined') {
+
+        let southGate = battleEnvironment.cityGates
+            ? battleEnvironment.cityGates.find(g => g.side === "south")
+            : null;
+        let isGateBreached = window.__SIEGE_GATE_BREACHED__ ||
+            (southGate && (southGate.isOpen || southGate.gateHP <= 0));
+        let hardWallLimit = SiegeTopography.wallPixelY - 10;
+        let gateX = SiegeTopography.gatePixelX;
+
+        units.forEach(u => {
+            // Skip: wall-mounted, climbers, corpses, falling units
+            if (u.side !== "enemy" || u.hp <= 0 || u.isFalling ||
+                u.onWall || u.isClimbing) return;
+
+            // Allow a corridor near the gate opening when gate is breached
+            let nearGateOpening = isGateBreached &&
+                Math.abs(u.x - gateX) < 120;
+            if (nearGateOpening) return;
+
+            if (u.y > hardWallLimit) {
+                u.y = hardWallLimit;
+                // Kill southward momentum
+                if (u.vy > 0) u.vy = 0;
+                // Redirect any southward escapePoint so the unit doesn't
+                // re-cross on the next frame
+                if (u.escapePoint && u.escapePoint.y > hardWallLimit) {
+                    u.escapePoint.y = hardWallLimit - 50;
                 }
-            });
-        }
+            }
+        });
     }
     // =========================================================
 
@@ -1237,6 +1338,41 @@ let drownThreshold = Math.max(150, 1500 - ((unit.stats.weightTier || 1) * 250) -
  * Assuming your game runs at roughly 60 FPS.
  */
 function handleStuckPrevention(unit, FPS = 60) {
+    // ═══════════════════════════════════════════════════════════════════════════
+    // ★ v4.2.3 FIX: SIEGE-ONLY STUCK PREVENTION
+    // ═══════════════════════════════════════════════════════════════════════════
+    // This system was designed to unstick units wedged in wall geometry or
+    // ladder tile seams during sieges.  In LAND, RIVER, and NAVAL battles there
+    // is no terrain that can wedge units, so this system has no legitimate work
+    // to do — but its ghost-mode side effect (unit.y += 1.5 every frame while
+    // ghostTimer > 0) was firing on enemy units that were intentionally holding
+    // still during the FORMING phase of EnemyTacticalAI, pushing them south
+    // without leg animation (state stays "moving"/"idle", not driven through
+    // the proper animator).  Symptom: "enemies slide south in stages with no
+    // leg animation".
+    //
+    // ALSO GATE: Never trigger on units whose orderType is "hold_position".
+    // A unit told to hold should be allowed to stand still without being
+    // labeled "stuck" — this was the root cause of the regression once BLS
+    // started placing enemy formations and locking them with orderHold.
+    //
+    // Pre-deploy is already short-circuited by the guard in updateBattleUnits,
+    // but we also short-circuit here as a defensive belt-and-suspenders.
+    if (typeof window !== 'undefined' && window.__preDeploymentActive) return;
+    if (typeof inSiegeBattle === 'undefined' || !inSiegeBattle) return;
+    if (unit.orderType === "hold_position") {
+        // Reset trackers so they don't accumulate stale "stuckness"
+        unit.stuckTimer = 0;
+        if (unit.ghostTimer > 0) {
+            unit.ghostTimer = 0;
+            unit.alpha = 1.0;
+        }
+        unit.anchorX = unit.x;
+        unit.anchorY = unit.y;
+        return;
+    }
+    // ═══════════════════════════════════════════════════════════════════════════
+
     // 1. Initialize custom state properties on the unit if they don't exist
     if (typeof unit.stuckTimer === 'undefined') unit.stuckTimer = 0;
     if (typeof unit.ghostTimer === 'undefined') unit.ghostTimer = 0;

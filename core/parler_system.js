@@ -211,9 +211,14 @@ if (player.troops < 1) {
         if (isDiplomacyProcessing) return;
         isDiplomacyProcessing = true;
         parleDialogue.innerText = "To battle!";
+
+        // NOTE: The old __parle_black_cover div hack has been removed.
+        // battle-loading-screen.js v4.4.0 now black-fills the canvas directly
+        // inside draw() whenever __battleLoadingActive is true, so the battlefield
+        // is never visible behind the loading screen regardless of timing.
         setTimeout(() => {
             executeAttackAction(npc);
-        }, 800);
+        }, 200);
     }, true); // Red attack styling
     actionBox.appendChild(leadTroopsBtn);
 }

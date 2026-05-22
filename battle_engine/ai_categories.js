@@ -1,4 +1,3 @@
-
 function canUseSiegeEngines(unit) {
 	
 	
@@ -800,11 +799,16 @@ if (typeof unit.stats.updateStance === 'function') {
             unit.escapeType = "OUTER";
             unit.fleeTimer = 0;
 
-            if (inSiege && unit.side === "enemy" && typeof battleEnvironment !== 'undefined' && battleEnvironment.cityGates) {
-                let northGate = battleEnvironment.cityGates.find(g => g.side === "north");
-                if (northGate && northGate.pixelRect) {
-                    unit.escapePoint = { x: northGate.pixelRect.x + (northGate.pixelRect.w / 2), y: -500 };
-                }
+            if (inSiege && unit.side === "enemy") {
+                // SIEGE DEFENDERS flee SOUTH (toward bottom of map / out through
+                // the south gate) instead of heading deeper north into the city.
+                // The master clamp in battlefield_logic.js holds them at the wall
+                // until the gate is breached, then they scatter south naturally.
+                let _mw = typeof BATTLE_WORLD_WIDTH  !== 'undefined' ? BATTLE_WORLD_WIDTH  : 2400;
+                let _mh = typeof BATTLE_WORLD_HEIGHT !== 'undefined' ? BATTLE_WORLD_HEIGHT : 1600;
+                let _scatterX = unit.x + (Math.random() - 0.5) * 400;
+                _scatterX = Math.max(80, Math.min(_mw - 80, _scatterX));
+                unit.escapePoint = { x: _scatterX, y: _mh + 500 };
             } else {
                 let distToLeft = unit.x;
                 let distToRight = BATTLE_WORLD_WIDTH - unit.x;
@@ -892,18 +896,31 @@ if (inSiege && unit.side === "enemy" && typeof battleEnvironment !== 'undefined'
 
     _handleWavering: function(unit) {
         unit.state = "WAVERING";
-        if (!unit.escapePoint || unit.escapeType !== "INNER") {
-            let distToLeft = unit.x;
-            let distToRight = BATTLE_WORLD_WIDTH - unit.x;
-            let distToTop = unit.y;
-            let distToBottom = BATTLE_WORLD_HEIGHT - unit.y;
-            let minDist = Math.min(distToLeft, distToRight, distToTop, distToBottom);
-            let p = 20;
+        let _inSiege = typeof inSiegeBattle !== 'undefined' && inSiegeBattle;
 
-            if (minDist === distToLeft) unit.escapePoint = { x: p, y: unit.y };
-            else if (minDist === distToRight) unit.escapePoint = { x: BATTLE_WORLD_WIDTH - p, y: unit.y };
-            else if (minDist === distToTop) unit.escapePoint = { x: unit.x, y: p };
-            else unit.escapePoint = { x: unit.x, y: BATTLE_WORLD_HEIGHT - p };
+        if (!unit.escapePoint || unit.escapeType !== "INNER") {
+            // SIEGE DEFENDER OVERRIDE: wavering defenders scatter to the nearest
+            // horizontal edge (left or right) rather than north into the city.
+            // This prevents them from drifting south toward the wall boundary.
+            if (_inSiege && unit.side === "enemy") {
+                let _mw = typeof BATTLE_WORLD_WIDTH !== 'undefined' ? BATTLE_WORLD_WIDTH : 2400;
+                let p = 20;
+                unit.escapePoint = unit.x < _mw / 2
+                    ? { x: p, y: unit.y }
+                    : { x: _mw - p, y: unit.y };
+            } else {
+                let distToLeft = unit.x;
+                let distToRight = BATTLE_WORLD_WIDTH - unit.x;
+                let distToTop = unit.y;
+                let distToBottom = BATTLE_WORLD_HEIGHT - unit.y;
+                let minDist = Math.min(distToLeft, distToRight, distToTop, distToBottom);
+                let p = 20;
+
+                if (minDist === distToLeft) unit.escapePoint = { x: p, y: unit.y };
+                else if (minDist === distToRight) unit.escapePoint = { x: BATTLE_WORLD_WIDTH - p, y: unit.y };
+                else if (minDist === distToTop) unit.escapePoint = { x: unit.x, y: p };
+                else unit.escapePoint = { x: unit.x, y: BATTLE_WORLD_HEIGHT - p };
+            }
 
             unit.escapeType = "INNER";
         }

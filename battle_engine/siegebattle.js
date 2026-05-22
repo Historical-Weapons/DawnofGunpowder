@@ -1,4 +1,3 @@
-
 function getSiegePlazaY() {
     if (!(typeof inSiegeBattle !== 'undefined' && inSiegeBattle)) return null;
 
@@ -6,9 +5,9 @@ function getSiegePlazaY() {
         ? overheadCityGates.find(g => g.side === "south")
         : null;
 
-    // Plaza center fallback if gate data is missing
+    // Plaza center fallback if gate data is missing — offset raised 300px to keep cavalry clear of wall
     return southGate
-        ? (southGate.y * BATTLE_TILE_SIZE) - 450
+        ? (southGate.y * BATTLE_TILE_SIZE) - 750
         : (BATTLE_WORLD_HEIGHT / 2);
 }
 
@@ -436,8 +435,35 @@ if (typeof overheadCityGates !== 'undefined') {
     // -----------------------------------------------------------------
  
     // 6. CAMERA & AUDIO
+    // Place the general deep in the southern camp, safely outside tower range (~450px south of wall).
+    // campPixelY = wallPixelY + 800, already well outside range.
+    // Hard floor: at least wallPixelY + 600 so smaller maps never pull the general back north.
+    // Ceiling: BATTLE_WORLD_HEIGHT - 200 (generous, avoids snapping back toward the wall).
     playerObj.x = SiegeTopography.gatePixelX;
-    playerObj.y = SiegeTopography.campPixelY + 500; 
+    playerObj.y = Math.min(
+        Math.max(SiegeTopography.wallPixelY + 600, SiegeTopography.campPixelY),
+        BATTLE_WORLD_HEIGHT - 200
+    );
+
+    // Immediately sync the commander unit to playerObj so there is no
+    // one-frame mismatch on the first updateBattleUnits tick after loading.
+    // deploySiegeAttackers shifted units to a different Y; without this sync
+    // towers could lock onto the stale position and fire from unexpected angles.
+    const _cmdrUnit = battleEnvironment.units.find(u => u.isCommander && u.side === "player");
+    if (_cmdrUnit) {
+        _cmdrUnit.x = playerObj.x;
+        _cmdrUnit.y = playerObj.y;
+        if (_cmdrUnit.target && _cmdrUnit.target.isDummy) {
+            _cmdrUnit.target.x = playerObj.x;
+            _cmdrUnit.target.y = playerObj.y;
+        }
+    }
+
+    // IMPORTANT: Do NOT snap enemy units to the player Y here.
+    // Defenders are placed inside the city by deploySiegeDefenders.
+    // The old "snap to _enemyCampY" code was teleporting all defenders
+    // to the player spawn point, causing archers to fire point-blank
+    // from every direction the moment the loading screen cleared.
 
     // ---> SURGERY: LAZY AUTO-SIEGE START <---
     // Automatically order all troops to begin the assault so the player doesn't have to manually spam Q
@@ -732,7 +758,8 @@ ballistaXPositions.forEach(baseX => {
 });
 // --- SURGERY: RANDOM MANTLET SPAWN, IGNORE LADDER GAPS ---
 // Spawns many more mantlets randomly across the siege line,
-// while preventing them from spawning too close together.
+// while preventing them from spawning too close together
+// AND preventing them from blocking any siege engine's travel path.
 
 const mantletCount = 10;     
 const minSpacing = 85;       // minimum distance between mantlets
@@ -741,14 +768,24 @@ const spreadMax = 980;       // right boundary
 const baseY = campY - 532;
 const placed = [];
 
+// Pre-compute the X positions that siege engines will travel through so mantlets
+// cannot block them.  Use the same formula the engine spawners use.
+// Ram: travels straight north along midX (±55px clearance each side).
+// Ladders: spawned at i = -3, -1, +1, +3  → midX + i*120 (±55px clearance).
+const _engineBlockedXRanges = [{ cx: midX, half: 55 }]; // ram path
+for (let _li = -3; _li <= 3; _li += 2) {
+    _engineBlockedXRanges.push({ cx: midX + _li * 120, half: 55 });
+}
+
 for (let i = 0; i < mantletCount; i++) {
     let tries = 0;
     let x = 0;
 
     while (tries < 80) {
         x = midX + (Math.random() * (spreadMax - spreadMin) + spreadMin);
-        const tooClose = placed.some(px => Math.abs(px - x) < minSpacing);
-        if (!tooClose) break;
+        const tooClose    = placed.some(px => Math.abs(px - x) < minSpacing);
+        const inEnginePath = _engineBlockedXRanges.some(r => Math.abs(x - r.cx) < r.half);
+        if (!tooClose && !inEnginePath) break;
         tries++;
     }
 
@@ -774,9 +811,9 @@ siegeEquipment.ladders.push({
         x: baseX + randomOffsetX,
         y: baseY + randomOffsetY - 350,
         crewAssigned: [], // NEW: Track the dedicated pushers
-        speed: 0.37,      // NEW: Store speed here
+        speed: 0.54,      //  ladder speed
         isDeployed: false,
-        hp: 400
+        hp: 300
     });
 }
 }

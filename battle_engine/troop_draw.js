@@ -1,5 +1,4 @@
-
-    let lastSortTime = 0;
+let lastSortTime = 0;
 	
 const IS_NATIVE_DRAW = (
     typeof window.Capacitor !== 'undefined' ||
@@ -220,44 +219,93 @@ if (isDead) {
 // dx < 0  → face LEFT   (facingDir = -1, ctx.scale(-1,1) flips it)
 // dx = 0  → hold last facing — stationary units never snap back
 // dy used only for future UP/DOWN sprite phases (placeholders below)
+//
+// SIEGE CREW FAST-PATH
+// ─────────────────────────────────────────────────────────────
+// ram_pusher / ladder_carrier / ladder_fanatic follow targets
+// whose X position has intentional ±scatter to prevent pile-ups.
+// That scatter (±7.5px) makes _dx oscillate every frame, flipping
+// facingDir left-right at 60fps.  Fix: use a much larger threshold
+// (SIEGE_THRESH) so only real lateral repositioning flips their
+// sprite — the ±1-2px-per-frame jitter never reaches it.
+//
+// HYSTERESIS FOR ALL OTHER UNITS
+// ─────────────────────────────────────────────────────────────
+// A unit can reverse X velocity for 1-2 frames during collision
+// resolution or path recalculation without actually changing
+// travel direction.  The old 0.4px threshold committed immediately,
+// causing visible flickering on units in dense melee.
+// Fix: _flipTick accumulates consecutive frames of movement in a
+// candidate direction. The facing only commits after FLIP_FRAMES
+// consistent frames.  Sub-threshold or reversed frames reset the
+// counter so snap-back can't happen unless the unit genuinely
+// changes course.
 // =============================================================
 {
-    // Compute how far this unit actually moved in X and Y since last frame.
-    // _prevX/_prevY are stamped onto the unit object at the bottom of this block.
     const _dx = (unit._prevX !== undefined) ? (unit.x - unit._prevX) : 0;
     const _dy = (unit._prevY !== undefined) ? (unit.y - unit._prevY) : 0;
 
-    // Threshold filters out sub-pixel jitter while units are standing still
-    // or only nudging during collision resolution.
-    const MOVE_THRESH = 0.4;
+    // ── SIEGE CREW: direction locked against jitter ───────────────
+    // ram_pusher / ladder_carrier / ladder_fanatic travel mostly
+    // vertically (Y-axis).  Their target X has deliberate scatter
+    // (±7.5px) to stop pile-ups — that must NOT trigger facing flips.
+    // We only flip if they move laterally by more than SIEGE_THRESH
+    // in a single frame, which only happens during a real role change
+    // (e.g. being knocked sideways or reassigned).
+    const isSiegeCrew = (unit.siegeRole === 'ram_pusher'    ||
+                         unit.siegeRole === 'ladder_carrier' ||
+                         unit.siegeRole === 'ladder_fanatic');
 
-    if (_dx > MOVE_THRESH) {
-        // ── MOVING RIGHT ──────────────────────────────────────────
-        unit.facingDir = 1; // natural sprite orientation
+    if (isSiegeCrew) {
+        const SIEGE_THRESH = 4; // px/frame — well above jitter, catches real lateral moves
+        if      (_dx >  SIEGE_THRESH) { unit.facingDir = 1;  unit._flipTick = 0; }
+        else if (_dx < -SIEGE_THRESH) { unit.facingDir = -1; unit._flipTick = 0; }
+        // else: hold current direction — jitter / vertical movement ignored
 
-    } else if (_dx < -MOVE_THRESH) {
-        // ── MOVING LEFT ───────────────────────────────────────────
-        unit.facingDir = -1; // ctx.scale(-1,1) mirrors the full sprite
+    } else {
+        // ── STANDARD UNITS: hysteresis flip ──────────────────────
+        // Commit direction change only after FLIP_FRAMES consecutive
+        // frames of movement in the new direction.
+        const MOVE_THRESH = 0.4;
+        const FLIP_FRAMES = 3;
 
-    } else if (_dy < -MOVE_THRESH) {
-        // ── MOVING UP ─────────────────────────────────────────────
-        // Horizontal facing is intentionally unchanged here.
-        // Units keep their last left/right orientation when moving vertically.
-        // // UP placeholder: future phase — insert back-view sprite swap here
-        // // UP placeholder: e.g. visType = "up_facing"; (new sprite set)
+        if (_dx > MOVE_THRESH) {
+            if (unit.facingDir !== 1) {
+                // Candidate flip to RIGHT — accumulate counter
+                unit._flipTick = (unit._flipTick > 0) ? unit._flipTick + 1 : 1;
+                if (unit._flipTick >= FLIP_FRAMES) { unit.facingDir = 1; unit._flipTick = 0; }
+            } else {
+                unit._flipTick = 0; // already facing right — reset, no work needed
+            }
 
-    } else if (_dy > MOVE_THRESH) {
-        // ── MOVING DOWN ───────────────────────────────────────────
-        // Horizontal facing is intentionally unchanged here.
-        // // DOWN placeholder: future phase — insert front-view sprite swap here
-        // // DOWN placeholder: e.g. visType = "down_facing"; (new sprite set)
+        } else if (_dx < -MOVE_THRESH) {
+            if (unit.facingDir !== -1) {
+                // Candidate flip to LEFT — accumulate counter (negative direction)
+                unit._flipTick = (unit._flipTick < 0) ? unit._flipTick - 1 : -1;
+                if (unit._flipTick <= -FLIP_FRAMES) { unit.facingDir = -1; unit._flipTick = 0; }
+            } else {
+                unit._flipTick = 0; // already facing left — reset
+            }
 
+        } else if (_dy < -MOVE_THRESH) {
+            // ── MOVING UP ─────────────────────────────────────────
+            // Horizontal facing intentionally unchanged.
+            // UP placeholder: future phase — insert back-view sprite swap here
+            unit._flipTick = 0;
+
+        } else if (_dy > MOVE_THRESH) {
+            // ── MOVING DOWN ───────────────────────────────────────
+            // Horizontal facing intentionally unchanged.
+            // DOWN placeholder: future phase — insert front-view sprite swap here
+            unit._flipTick = 0;
+
+        } else {
+            // Sub-threshold / truly stationary: reset counter, hold direction.
+            unit._flipTick = 0;
+        }
     }
-    // _dx === 0 (truly stationary): don't touch facingDir at all.
-    // The unit holds whatever direction it was last moving — no snap-back.
 
     // First-ever frame safety net (unit just spawned, _prevX not yet written):
-    // Default to RIGHT so all units begin facing the same neutral direction.
     if (unit.facingDir === undefined) {
         unit.facingDir = 1;
     }
@@ -751,6 +799,3 @@ if (window.inNavalBattle && typeof drawNavalSailsMasterLayer === 'function') {
 	
 	
 }
-
-
-  

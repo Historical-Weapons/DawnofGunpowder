@@ -507,7 +507,7 @@ if (enemyRef) {
     
     // --- DEEP ANALYSIS FIX: VICTORY CONDITION ---
     let isPlayerDead = (currentBattleData && currentBattleData.playerDefeatedText) || (cachedCommander && cachedCommander.hp <= 0); //[cite: 2]
-    let isEnemyRouted = (eSurvivors.length < 5 || (eSurvivors.length / Math.max(1, eInitial)) < 0.15); //[cite: 2]
+    let isEnemyRouted = (eSurvivors.length < 5 || (eSurvivors.length / Math.max(1, eInitial)) < 0.15 || (typeof inSiegeBattle !== 'undefined' && inSiegeBattle && eSurvivors.length < 3)); //[cite: 2]
     
     // <-- SURGERY: Remove 'let' so it assigns to the outer variable
     didPlayerWin = !isPlayerDead && (eSurvivors.length === 0 || isEnemyRouted); //[cite: 2]
@@ -891,4 +891,3 @@ function drawSpokedWheel(ctx, x, y, radius) {
 
     ctx.restore();
 }
-

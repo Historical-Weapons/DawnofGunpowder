@@ -1,4 +1,3 @@
-
 let siegeAITick = 0;
 
 function processSiegeEngines() {
@@ -82,6 +81,23 @@ function processSiegeEngines() {
             return; // Abort this loop iteration. No movement, no damage.
         }
         // ---------------------------------------------
+
+        // --- RAM PUSHER Y-CLAMP ---
+        // The north tip of the battering log head sits at ram.y - 45 (draw geometry).
+        // Pushers may not exceed 10px south of that tip (i.e. y < ram.y - 35) UNTIL the
+        // ram begins its attack swing. This prevents crew from running in front of the ram.
+        if (!ram.isBreaking) {
+            const ramNorthTip = ram.y - 45;
+            const pusherFloorY  = ramNorthTip + 10; // 10 south of the tip
+            physicallyPresentCrew.forEach(u => {
+                if (u.y < pusherFloorY) {
+                    u.y = pusherFloorY;
+                    // Also kill any northward momentum so they don't jitter
+                    if (u.vy < 0) u.vy = 0;
+                }
+            });
+        }
+        // --- END RAM PUSHER Y-CLAMP ---
 
         const exactGateY = SiegeTopography.gatePixelY;
         const safeRetreatY = exactGateY + 150; 
@@ -222,23 +238,30 @@ BattleAudio.playRamHit(ram.x, ram.y);
         // B. Filter out dead crew
         ladder.crewAssigned = ladder.crewAssigned.filter(u => u.hp > 0);
 
-// C. ANY player unit within 55px counts as a pusher — not just crewAssigned
+// C. Only units that CAN legally operate siege equipment AND are within 28px
+        //    (tight body-contact radius matching the ladder's visual width ~25px).
+        //    canUseSiegeEngines() hard-blocks archers/ranged without a siege role,
+        //    preventing them from being dragged along when standing nearby.
         let activePushers = playerUnits.filter(u => 
             !u.isCommander &&
             !u.onWall &&
-            Math.hypot(u.x - ladder.x, u.y - ladder.y) < 55
+            canUseSiegeEngines(u) &&
+            Math.hypot(u.x - ladder.x, u.y - ladder.y) < 28
         );
 
         let targetPixelY = SiegeTopography.wallPixelY - 5;
         
         // D. Move if ANYONE is touching it
-        if (activePushers.length > 0 && ladder.y > targetPixelY) {
+        if ((activePushers.length > 0 || true) && ladder.y > targetPixelY) {//autopush
             ladder.y -= ladder.speed;
             ladder.lastY = ladder.y;
            BattleAudio.playSiegeMovement(ladder.x, ladder.y, true); 
-            // Pull touching pushers along with the ladder
+            // Pull touching pushers along with the ladder.
+            // While pushing (pre-deploy), unit targets the ladder centroid so they
+            // converge toward it rather than drifting off to the side.
+            // After deployment the normal AI resumes (this block no longer runs).
             activePushers.forEach(u => {
-                u.target = { x: ladder.x, y: ladder.y + 10, isDummy: true };
+                u.target = { x: ladder.x, y: ladder.y, isDummy: true }; // centroid
                 u.y -= ladder.speed;
             });
         }
@@ -915,5 +938,3 @@ function deployAssaultLadder(ladder) {
     let wallTileY = Math.floor(SiegeTopography.wallPixelY / BATTLE_TILE_SIZE); 
     prepareLadderLanding(ladder, wallTileY);
 }
-
- 

@@ -2539,6 +2539,12 @@ function _updateCampButtonVisibility() {
     // Prevents camping if the mobile details drawer is open
     const isMobileDrawer = (typeof window.isMobileDrawerOpen !== "undefined" && window.isMobileDrawerOpen);
 
+    // 5. Campaign Mode — Encamp is sandbox-only; hide during all story campaigns
+    const isInCampaign = !!window.__campaignStory1Active ||
+                         !!window.__campaignStory2Active ||
+                         !!window.__campaignStory3Active ||
+                         !!window.__campaignStory4Active;
+
     // --- THE MASTER LOCK ---
     // The button ONLY shows if EVERY single one of these interfering states is false.
     const shouldShow = !isBattling && 
@@ -2549,7 +2555,8 @@ function _updateCampButtonVisibility() {
                        !isCustomBattleMenu && 
                        !isLiveCustomBattle && 
                        !isTalking && 
-                       !isMobileDrawer;
+                       !isMobileDrawer &&
+                       !isInCampaign;
 
     btn.style.display = shouldShow ? "flex" : "none";
     

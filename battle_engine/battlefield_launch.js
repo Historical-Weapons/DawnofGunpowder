@@ -936,10 +936,10 @@ function deployArmy(faction, totalTroops, side, uniqueType) {
     if (typeof inSiegeBattle !== 'undefined' && inSiegeBattle && side === "enemy") {
         let southGate = typeof overheadCityGates !== 'undefined' ? overheadCityGates.find(g => g.side === "south") : null;
         if (southGate) {
-            // Push them 500 pixels North (deep inside the walls/plaza)
-            spawnY = (southGate.y * BATTLE_TILE_SIZE) - 800; 
+            // Push them 800 pixels North (deep inside the walls/plaza) — extra 300px keeps large armies clear of wall
+            spawnY = (southGate.y * BATTLE_TILE_SIZE) - 1100; 
         } else {
-            spawnY = BATTLE_WORLD_HEIGHT - 1300; // Safe fallback deep inside walls
+            spawnY = BATTLE_WORLD_HEIGHT - 1600; // Safe fallback deep inside walls
         }
     }
     let composition = [];
@@ -1093,18 +1093,6 @@ for (let i = 0; i < count; i++) {
     }
 
         let finalX, finalY;
-		
-		// ---> SURGERY: Move human units South in Sieges, keep Engines at the front line <---
-        if (typeof inSiegeBattle !== 'undefined' && inSiegeBattle && side === 'player') {
-            const unitName = String(comp.type).toLowerCase();
-            // Identify engines to exclude them from the shift
-            const isEngine = unitName.match(/(ladder|ram|tower|trebuchet|catapult|cannon|hwacha|fire)/);
-            
-            if (!isEngine) {
-                finalY += 600; // Push regular troops 
-            }
-        }
-         
 
 // =========================================================
         // --- SURGERY: NAVAL SPAWN TIER OVERRIDE ---
@@ -1122,7 +1110,7 @@ for (let i = 0; i < count; i++) {
 //SIEGE 
         else if (typeof inSiegeBattle !== 'undefined' && inSiegeBattle && side === "enemy") {
             let southGate = typeof overheadCityGates !== 'undefined' ? overheadCityGates.find(g => g.side === "south") : null;
-            let plazaY = southGate ? (southGate.y * BATTLE_TILE_SIZE) - 900 : (BATTLE_WORLD_HEIGHT / 2);
+            let plazaY = southGate ? (southGate.y * BATTLE_TILE_SIZE) - 1200 : (BATTLE_WORLD_HEIGHT / 2 - 300); // +300px north to keep large armies off the wall
 
             // 1. TIGHTEN SPACING: Lower personalSpace from 12 to 6 to pack units closer together
             const personalSpace = 6; 
@@ -1152,6 +1140,18 @@ for (let i = 0; i < count; i++) {
             finalY = spawnY + tacticalY + gridY;
             finalX += (Math.random() - 0.5) * 9;
             finalY += (Math.random() - 0.5) * 9;
+        }
+
+        // ---> SURGERY: Move human units South in Sieges, keep Engines at the front line <---
+        // NOTE: Must run AFTER the else block so finalY is a real number (not undefined).
+        //       The old position (before the naval/siege/else block) fired += on undefined → NaN,
+        //       which the else block silently overwrote, losing the 600px shift entirely.
+        if (typeof inSiegeBattle !== 'undefined' && inSiegeBattle && side === 'player') {
+            const unitName = String(comp.type).toLowerCase();
+            const isEngine = unitName.match(/(ladder|ram|tower|trebuchet|catapult|cannon|hwacha|fire)/);
+            if (!isEngine) {
+                finalY += 600; // Push regular troops south toward camp
+            }
         }
 
 // ---> SURGERY: LAND BATTLE OUT-OF-BOUNDS SAFEGUARD <---

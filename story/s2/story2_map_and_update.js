@@ -1722,6 +1722,26 @@ window.initGame_story2 = async function () {
     //       (Previously was set AFTER applyDevScenario — Bug 1 from prior fix.)
     window.__campaignStory2Active = true;
 
+    // ── 4a. Lock Visit Settlement for the entirety of Story 2 ─────────────────
+    // Story 2 (Hexi Corridor / Mongol Conquest) is a fully scripted campaign.
+    // The player rides with the convoy and the narrative never calls
+    // enable_visit_settlement, so the button must be locked from the first frame.
+    //
+    // Setting the flag here (BEFORE applyDevScenario / ScenarioTriggers.start)
+    // ensures updateVisitSettlementButton() — called on every city-panel open in
+    // sandboxmode_update.js — always reads the correct state, even if the city
+    // panel is opened before the first trigger fires.
+    //
+    // How the gate works (see sandboxmode_update.js ~L1811, scenario_triggers.js ~L1443):
+    //   window.__visitSettlementEnabled === false  → button disabled + 🚫 label
+    //   window.__visitSettlementEnabled === true   → button enabled  (normal)
+    //   window.__visitSettlementEnabled === undefined → treated as enabled (sandbox default)
+    //
+    // We use false (not undefined) so the check `!== false` in
+    // updateVisitSettlementButton() reliably returns disabled.
+    window.__visitSettlementEnabled = false;
+    console.log("[Story2] ✅ Visit Settlement button LOCKED for Story 2 campaign.");
+
     // ── 4b. PRE-PATCH Story_2_Data before applyDevScenario consumes it ─────────
     // Story_2_Data is an exported map snapshot from the scenario editor. It carries
     // three values that are correct for the editor but wrong for campaign runtime:

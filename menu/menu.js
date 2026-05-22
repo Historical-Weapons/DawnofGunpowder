@@ -46,7 +46,7 @@ window.addEventListener('keydown', startStandaloneMusic);
         menu.style.left = "0";
         menu.style.width = "100%";
         menu.style.height = "100%";
-        menu.style.background = "#3e2723";
+        menu.style.background = "#080614";
         menu.style.display = "flex";
         menu.style.flexDirection = "column";
         menu.style.alignItems = "center";
@@ -310,17 +310,21 @@ function showCampaignScreen(menuEl, onBack, onLaunch) {
             desc:     "Lead the brutal 1225 invasion to crush the Xia dynasty, besiege Yinchuan, and secure the Mongol Empire's dominance.",
             tag:      "TANGUT SIEGE",
             tagColor: "#b5451b",
-            available: true
+            available: true,
+            underConstruction: true
         },
         {
             id:       3,
-            title:    "The Southern Dynasties",
-            subtitle: "Vietnam & Southern China — coming soon",
-            desc:     "Navigate the jungle warfare and river deltas of South-East Asia " +
-                      "as the Tran Dynasty repels invasion from the north.",
-            tag:      "UNDER CONSTRUCTION",
-            tagColor: "#555",
-            available: false
+            title:    "Life on the Wall",
+            subtitle: "Datong Frontier — c. 1450",
+            desc:     "You are a wall officer of the Ming garrison, posted to the northern " +
+                      "frontier in the shadow of the Tumu Crisis. Patrol the fortifications, " +
+                      "drill the levies, and watch the steppe horizon for Yuan riders. " +
+                      "Most days are mundane. Some are not.",
+            tag:      "WALL GARRISON",
+            tagColor: "#5d4037",
+            available: true,
+            underConstruction: true
         },
         {
             id:       4,
@@ -392,6 +396,20 @@ function showCampaignScreen(menuEl, onBack, onLaunch) {
             font-size: 0.88rem; line-height: 1.55;
         `;
         card.appendChild(cardDesc);
+
+        if (story.underConstruction) {
+            const wip = document.createElement("div");
+            wip.innerText = "🚧 Under Construction — content is incomplete";
+            wip.style.cssText = `
+                margin-top: 10px;
+                color: #e6a817;
+                font-size: 0.78rem;
+                letter-spacing: 1px;
+                font-style: italic;
+                opacity: 0.85;
+            `;
+            card.appendChild(wip);
+        }
 
         if (story.available) {
             const playArrow = document.createElement("div");
@@ -563,27 +581,34 @@ card.onclick = async () => {
     //
     // To add Story 3: copy this block, replace every "2" with "3", point it at
     // window.initGame_story3 and set window.__campaignStory3Active = true.
-    if (story.id === 2) {
+    // ── Story 3: Life on the Wall ────────────────────────────────────────────
+    // Uses initGame_story3() from story3_map_and_update.js — generates the
+    // Song-Jin frontier wall map procedurally (no .json file needed for now;
+    // an editor-exported map can be wired in later just like Story 2 does
+    // with window.Story_2_Data).
+    // SongJinScenario.install() will be called inside initGame_story3 once
+    // the flag __campaignStory3Active is set here.
+    if (story.id === 3) {
         try {
-            window.__campaignStory2Active = true;
-            window.__campaignStoryId      = 2;
-            console.log("[Campaign] Campaign-mode flag set → Story 2.");
+            window.__campaignStory3Active = true;
+            window.__campaignStoryId      = 3;
+            console.log("[Campaign] Campaign-mode flag set → Story 3.");
 
-            if (typeof window.initGame_story2 !== 'function') {
+            if (typeof window.initGame_story3 !== 'function') {
                 throw new Error(
-                    "window.initGame_story2() not found.\n" +
-                    "Ensure story2_map_and_update.js is loaded in index.html " +
-                    "AFTER sandboxmode_overworld.js and AFTER mongolconquestxia_scenario.js."
+                    "window.initGame_story3() not found.\n" +
+                    "Ensure story3_map_and_update.js is loaded in index.html " +
+                    "AFTER sandboxmode_overworld.js and AFTER songJinWar_scenario.js."
                 );
             }
 
             setTimeout(function () {
-                window.initGame_story2();
+                window.initGame_story3();
             }, 120);
 
         } catch (err) {
-            console.error("[Campaign] Story 2 load failed:", err);
-            alert("Failed to load Story 2 campaign.\n\nReason: " +
+            console.error("[Campaign] Story 3 load failed:", err);
+            alert("Failed to load Story 3 campaign.\n\nReason: " +
                   (err && err.message ? err.message : String(err)));
         }
     }
@@ -661,10 +686,6 @@ const optionsBtn = createBtn("Options", () => {
 optionsBtn.style.display = "block";
 
 
-const quitBtn = createBtn("Quit Game", () => {
-    quitGame();
-});
-quitBtn.style.marginTop = "clamp(20px, 5vh, 40px)";
  
 
 // Start hidden to match your "Manual First" flow
@@ -783,7 +804,7 @@ manualContent.style.flexGrow = "1";
 // SURGERY: Replaced hard px/rem font sizes with fluid clamp() and vh/vw units
 manualContent.innerHTML = `
     <h2 style="text-align: center; border-bottom: 2px solid #d4b886; padding-bottom: clamp(5px, 1.5vh, 15px); margin: 0; letter-spacing: 2px; font-size: clamp(1.2rem, 3.5vh, 2.5rem);">
-        DAWN OF GUNPOWDER:<br><span style="font-size: 0.7em; color: #d4b886;">EMPIRE OF THE 13TH CENTURY</span>
+        DAWN OF GUNPOWDER:<br><span style="font-size: 0.7em; color: #d4b886;">RTS OF THE 13TH CENTURY</span>
     </h2>
 
     <div style="line-height: 1.6; font-size: clamp(0.8rem, 2.2vh, 1.1rem); margin-top: clamp(10px, 2.5vh, 25px); color: #d4b886;">
@@ -823,7 +844,7 @@ manualModal.appendChild(closeBtn);
 
         // --- CREDITS TEXT ---
         const credits = document.createElement("div");
-        credits.innerText = "by Historical Weapons YouTube Channel";
+        credits.innerText = "by Historical Weapons YouTube Channel. V0.5";
         // RESPONSIVE FIX: position changed so it doesn't overlap on extremely short screens
         credits.style.position = "relative";
         credits.style.marginTop = "clamp(20px, 4vh, 40px)";
@@ -841,7 +862,6 @@ uiContainer.appendChild(campaignBtn);
 uiContainer.appendChild(customBattleBtn);
 uiContainer.appendChild(loadGameBtn); // Surgery 7: Appended here
 uiContainer.appendChild(optionsBtn);
-uiContainer.appendChild(quitBtn); // <--- ADD THIS LINE
         menu.appendChild(uiContainer);
 
         menu.appendChild(manualModal); // Append Modal to menu
@@ -859,335 +879,560 @@ uiContainer.appendChild(quitBtn); // <--- ADD THIS LINE
         // ==========================================
         // EPIC BACKGROUND ANIMATION LOGIC
         // ==========================================
-        
-        const unitTypes = [
-            { type: "gun", name: "Handgunner", isCavalry: false },
-            { type: "crossbow", name: "Repeater Crossbowman", isCavalry: false },
-            { type: "crossbow", name: "Poison Crossbowman", isCavalry: false },
-            { type: "spearman", name: "Firelance", isCavalry: false },
-            { type: "peasant", name: "Bomb", isCavalry: false },
-            { type: "archer", name: "Rocket", isCavalry: false }
-   
+
+        // Diverse cultural unit pool — a handful of each archetype.
+        // factionColor drives helmet / armor style in infscript & cavscript:
+        //   #1976d2 = Mongol/Steppe   #c2185b = Yamato/Japan   #455a64 = Jin/Jurchen
+        //   #00838f = Dali Kingdom     #7b1fa2 = Goryun/Korea   #7b1a1a = Song/Ming
+        //   #fbc02d = Xiaran/Arabian   #d32f2f = Hong Dynasty
+        const MENU_UNIT_POOL = [
+            // ── INFANTRY ────────────────────────────────────────────────────────
+            { type: "archer",       unitName: "Archer",               factionColor: "#c2185b", armor: 12, side: "player", isCavalry: false }, // Japanese ashigaru
+            { type: "archer",       unitName: "Archer",               factionColor: "#7b1fa2", armor:  8, side: "enemy",  isCavalry: false }, // Goryun bowman
+            { type: "archer",       unitName: "Archer",               factionColor: "#1976d2", armor:  5, side: "enemy",  isCavalry: false }, // Mongol foot archer
+            { type: "spearman",     unitName: "Glaiveman",            factionColor: "#00838f", armor: 10, side: "enemy",  isCavalry: false }, // Dali glaive
+            { type: "spearman",     unitName: "Spearman",             factionColor: "#455a64", armor:  6, side: "enemy",  isCavalry: false }, // Jin footman
+            { type: "sword_shield", unitName: "Swordsman",            factionColor: "#d32f2f", armor: 18, side: "player", isCavalry: false }, // Hong shieldman
+            { type: "two_handed",   unitName: "Heavy Swordsman",      factionColor: "#455a64", armor: 28, side: "enemy",  isCavalry: false }, // Jin heavy
+            { type: "gun",          unitName: "Handgunner",           factionColor: "#7b1a1a", armor:  5, side: "player", isCavalry: false }, // Ming hand cannon
+            { type: "crossbow",     unitName: "Repeater Crossbowman", factionColor: "#7b1a1a", armor:  8, side: "player", isCavalry: false }, // Song repeater
+            // ── CAVALRY ─────────────────────────────────────────────────────────
+            { type: "horse_archer", unitName: "Horse Archer",         factionColor: "#1976d2", armor:  5, side: "enemy",  isCavalry: true  }, // Mongol mounted archer
+            { type: "horse_archer", unitName: "Horse Archer",         factionColor: "#455a64", armor: 20, side: "enemy",  isCavalry: true  }, // Jin mounted archer
+            { type: "lancer",       unitName: "Lancer",               factionColor: "#c2185b", armor: 28, side: "player", isCavalry: true  }, // Japanese cavalry
+            { type: "cataphract",   unitName: "Cataphract",           factionColor: "#fbc02d", armor: 40, side: "enemy",  isCavalry: true  }, // Xiaran heavy horse
         ];
 
-        const headwears = ["none", "rice_hat", "mongol_helmet"];
+        // Fewer units on mobile — saves GPU and battery on 2026 phones.
+        const _menuIsMobile = window.innerWidth < 768;
+        // Half the original counts (mobile: 5, desktop: 8) ± a few random units
+        const UNIT_COUNT   = _menuIsMobile
+            ? 5  + Math.floor(Math.random() * 5) - 2   // range 3–7
+            : 8  + Math.floor(Math.random() * 7) - 3;  // range 5–11
+        // Render scale: sprites look best at 2–2.5× the native draw size.
+        const RENDER_SCALE = _menuIsMobile ? 2.0 : 2.5;
 
-// REDUCED UNIT COUNT TO 20 (Slightly less crowded)
-        for(let i = 0; i < 20; i++) { 
-            let uType = unitTypes[Math.floor(Math.random() * unitTypes.length)];
-            let fColor = Math.random() > 0.5 ? "#7b1a1a" : "#4a4a4a";
-            // Assign Mongol helmets mostly to horse archers/grey faction, Rice hats to red faction
-            let hat = "none";
-            if (uType.isCavalry) hat = "mongol_helmet";
-            else if (fColor === "#7b1a1a" && Math.random() > 0.5) hat = "rice_hat";
-            else if (fColor === "#4a4a4a" && Math.random() > 0.5) hat = "mongol_helmet";
+        // ── UNIT FACTORY ──────────────────────────────────────────────────────
+        // Spawns a unit just outside one of the left/right screen edges,
+        // then gives it an initial velocity pointing inward.
+        // A short immunity timer prevents the magnetic-delete zone from
+        // immediately destroying the unit before it fully enters the screen.
+        function spawnUnit(poolIndex) {
+            const tpl = MENU_UNIT_POOL[poolIndex % MENU_UNIT_POOL.length];
+            const groundMin = canvas.height * 0.64;
+            const groundMax = canvas.height * 0.92;
 
-backgroundUnits.push({
-                x: Math.random() * canvas.width,  // USE CANVAS WIDTH
-                y: Math.random() * canvas.height, // USE CANVAS HEIGHT
-                vx: 0,
-                vy: 0,
-                type: uType.type,
-                unitName: uType.name,
-                isCavalry: uType.isCavalry,
-                headwear: hat,
-                frame: Math.random() * 100,
-                dir: Math.random() > 0.5 ? 1 : -1,
-                factionColor: fColor,
-                isAttacking: false,
-                state: "idle",   // New State Machine
-                stateTimer: 0
+            // Pick left or right edge
+            const fromLeft = Math.random() < 0.5;
+            const spawnX   = fromLeft ? -60 : canvas.width + 60;
+            const spawnY   = groundMin + Math.random() * (groundMax - groundMin);
+
+            // Initial walk-in velocity
+            const spd    = tpl.isCavalry ? 2.2 : 1.0;
+            const spawnVx = fromLeft ? spd * (0.8 + Math.random() * 0.5)
+                                     : -spd * (0.8 + Math.random() * 0.5);
+
+            const mockUnit = {
+                stats:        { armor: tpl.armor },
+                facingDir:    fromLeft ? 1 : -1,
+                side:         tpl.side,
+                state:        "idle",
+                cooldown:     0,
+                ammo:         10,
+                unitType:     tpl.type,
+                _visType:     0,
+                isCommander:  false,
+                id:           Math.floor(Math.random() * 9999) + 1,
+                _weaponSeed:  Math.floor(Math.random() * 10),
+            };
+
+            backgroundUnits.push({
+                x:            spawnX,
+                y:            spawnY,
+                vx:           spawnVx,
+                vy:           0,
+                vy_gravity:   0,          // accumulated gravity / jump velocity
+                type:         tpl.type,
+                unitName:     tpl.unitName,
+                factionColor: tpl.factionColor,
+                isCavalry:    tpl.isCavalry,
+                armor:        tpl.armor,
+                side:         tpl.side,
+                frame:        Math.random() * 200,
+                isAttacking:  false,
+                state:        "walk",     // start walking in
+                stateTimer:   60 + Math.random() * 60,
+                mockUnit:     mockUnit,
+                // Immunity frames: during this window the magnetic force is off
+                // so the unit can enter from outside without being deleted.
+                immunityTimer: 120,       // ~2 s at 60 fps
+                // Jump state
+                isOnGround:   true,
+                jumpCooldown: Math.floor(Math.random() * 400), // stagger first jump
             });
         }
 
-        function drawEpicUnit(ctx, unit) {
-            ctx.save();
-            ctx.translate(unit.x, unit.y);
-            
-            let dir = unit.dir;
-            ctx.scale(dir, 1);
-            let userDir = 1; 
-
-            let isMoving = (unit.state === "walk");
-            let bob = isMoving ? Math.sin(unit.frame * 0.4) * 2 : 0;
-            let weaponBob = unit.isAttacking ? Math.sin(unit.frame * 0.8) * 4 : (isMoving ? bob : 0);
-            
-            let type = unit.type;
-            let unitName = unit.unitName;
-            let frame = unit.frame;
-            let isAttacking = unit.isAttacking;
-
-            // --- CAVALRY RENDERING ---
-            if (unit.isCavalry) {
-               // --- START OF YOUR HORSE CODE ---
-        let legSwing = isMoving ? Math.sin(frame * 0.4) * 8 : 0;
-        let bob = isMoving ? Math.sin(frame * 0.4) * 2 : 0;
-        let riderBob = isMoving ? Math.sin(frame * 0.4 + 0.5) * 1.5 : 0;
-
-        ctx.lineCap = "round"; ctx.lineJoin = "round";
-
-        let mountColor = "#795548"; // Default Horse Brown
-
-        // 1. BACK LEGS
-        ctx.strokeStyle = "#3e2723"; 
-        ctx.lineWidth = 1.8; 
-        ctx.beginPath(); ctx.moveTo(-4, 2); ctx.lineTo(-6 - legSwing, 10);
-        ctx.moveTo(3, 2); ctx.lineTo(1 - legSwing, 10); ctx.stroke();
-
-        // 2. MOUNT BODY
-        ctx.fillStyle = mountColor; ctx.strokeStyle = "#3e2723";
-        ctx.beginPath(); 
-        ctx.ellipse(0, bob, 11, 7, 0, 0, Math.PI * 2); 
-        ctx.fill(); ctx.stroke();
-
-        // 3. RIDER 
-        ctx.save();
-        ctx.translate(-1, -4 + bob + riderBob);
-        
-        ctx.fillStyle = unit.factionColor; ctx.strokeStyle = "#1a1a1a";
-        ctx.beginPath(); ctx.moveTo(-4, 0); ctx.lineTo(4, 0); ctx.lineTo(2, -9); ctx.lineTo(-2, -9);
-        ctx.closePath(); ctx.fill(); ctx.stroke();
-        
-        // Head
-        ctx.fillStyle = "#ffccbc";
-        ctx.beginPath(); ctx.arc(0, -11, 3, 0, Math.PI * 2); ctx.fill();
-
-        // --- ADDING THE HEADWEAR TO THE RIDER ---
-        if (unit.headwear === "mongol_helmet") {
-            ctx.fillStyle = "#9e9e9e"; ctx.strokeStyle = "#424242"; ctx.lineWidth = 1;
-            ctx.beginPath(); ctx.arc(0, -11, 4, Math.PI, 0); ctx.fill(); ctx.stroke();
-            ctx.fillStyle = "#616161"; ctx.fillRect(-0.5, -16, 1, 3); // Spike
+        for (let i = 0; i < UNIT_COUNT; i++) {
+            // Stagger spawns over the first few seconds so they don't all
+            // march in simultaneously.  We plant a lightweight stub now and
+            // schedule the real spawn.
+            const delay = i * (60 + Math.floor(Math.random() * 60)); // frames
+            // We use frame-counted deferred spawns tracked in a queue.
+            if (!window._menuSpawnQueue) window._menuSpawnQueue = [];
+            window._menuSpawnQueue.push({ at: delay, index: i });
         }
 
-        let weaponBob = isAttacking ? Math.sin(frame * 0.8) * 4 : 0;
-        
-        // --- WEAPON (Khatra Bow logic) ---
-        if (unit.type === "horse_archer") {
-            let pull = isAttacking ? (Math.sin(frame * 0.5) * 0.5 + 0.5) : 0;
-            ctx.strokeStyle = "#3e2723"; ctx.lineWidth = 1.5;
+        // ── PROCEDURAL DAWN LANDSCAPE ───────────────────────────────────────────
+        // Generated ONCE per menu session — static geometry reused every frame.
+        // Only clouds drift; everything else is stable for performance.
+        // ────────────────────────────────────────────────────────────────────────
+        let _lseed = (Date.now() ^ 0x9e3779b9) >>> 0;
+        const _lr = () => {
+            _lseed = Math.imul(_lseed, 1664525) + 1013904223 | 0;
+            return (_lseed >>> 0) / 0x100000000;
+        };
+
+        const DAWN = (() => {
+            // Sun horizontal position: biased toward center, never at edges
+            const sunFX = 0.28 + _lr() * 0.44;
+
+            // Pick a colour theme (orange / rose / gold)
+            const themes = [
+                { top:'#060414', mid:'#2a0e3c', hor:'#d44a08', grd:'#f5960a', sun:'#ffe898' },
+                { top:'#04060e', mid:'#180e34', hor:'#b82040', grd:'#e86018', sun:'#ffd878' },
+                { top:'#060410', mid:'#1c0c30', hor:'#c03808', grd:'#e87a10', sun:'#ffeaa0' },
+            ];
+            const theme = themes[Math.floor(_lr() * themes.length)];
+
+            // Build a ridge as an array of normalised {x,y} waypoints.
+            // Clamps to [yMin, yMax] with Gaussian-ish random walk.
+            const ridge = (n, yMin, yMax, roughness) => {
+                const pts = [];
+                let y = yMin + _lr() * (yMax - yMin);
+                for (let i = 0; i <= n; i++) {
+                    pts.push({ x: i / n, y });
+                    y = Math.max(yMin, Math.min(yMax, y + (_lr() - 0.5) * roughness));
+                }
+                return pts;
+            };
+
+            return {
+                sunFX, theme,
+                // Mountain layers: far (tallest, farthest) → near (lowest)
+                far:  ridge(16, 0.16, 0.42, 0.26),
+                mid:  ridge(12, 0.34, 0.54, 0.20),
+                near: ridge(9,  0.48, 0.64, 0.16),
+                // Foreground dark earth bumps
+                fore: ridge(7,  0.62, 0.70, 0.09),
+                // Drifting clouds: x/y/w/h in [0,1] fractions, spd normalised
+                clouds: Array.from({ length: 8 }, () => ({
+                    x:   _lr() * 1.2 - 0.1,
+                    y:   0.05 + _lr() * 0.24,
+                    w:   0.09 + _lr() * 0.17,
+                    h:   0.022 + _lr() * 0.032,
+                    spd: 0.00012 + _lr() * 0.00010,
+                    a:   0.40 + _lr() * 0.38,
+                    blobs: 3 + Math.floor(_lr() * 3),   // 3–5 overlapping ellipses
+                })),
+                // Stars — visible near the top where the sky is still dark
+                stars: Array.from({ length: 32 }, () => ({
+                    x: _lr(), y: _lr() * 0.32,
+                    r: 0.4 + _lr() * 1.1,
+                    phase: _lr() * Math.PI * 2,
+                })),
+                // Pine-tree silhouettes planted along the near ridge
+                pines: Array.from({ length: 26 }, () => ({
+                    fx: _lr(),
+                    h:  0.050 + _lr() * 0.065,
+                    w:  0.007 + _lr() * 0.006,
+                })),
+            };
+        })();
+
+        // ── DRAW FUNCTION (called every frame with current time t) ────────────
+        function drawDawnBackground(ctx, W, H, t) {
+            const D        = DAWN;
+            const horizY   = H * 0.595;          // horizon line
+            const sunX     = D.sunFX * W;
+            const sunY     = horizY - H * 0.048; // just above horizon
+
+            // Interpolate a ridge point's canvas Y at a given x-fraction
+            const ridgeYAt = (pts, fx) => {
+                let i = 0;
+                while (i < pts.length - 2 && pts[i + 1].x < fx) i++;
+                const A = pts[i], B = pts[Math.min(i + 1, pts.length - 1)];
+                const frac = B.x > A.x ? (fx - A.x) / (B.x - A.x) : 0;
+                return (A.y + frac * (B.y - A.y)) * H;
+            };
+
+            // ── SKY GRADIENT ──────────────────────────────────────────────
+            const sky = ctx.createLinearGradient(0, 0, 0, horizY);
+            sky.addColorStop(0.00, D.theme.top);
+            sky.addColorStop(0.48, D.theme.mid);
+            sky.addColorStop(0.82, D.theme.hor);
+            sky.addColorStop(1.00, D.theme.grd);
+            ctx.fillStyle = sky;
+            ctx.fillRect(0, 0, W, horizY);
+
+            // Brightness lift — semi-transparent warm wash over the whole sky
+            const lift = ctx.createLinearGradient(0, 0, 0, horizY);
+            lift.addColorStop(0.0, 'rgba(60,30,10,0.18)');
+            lift.addColorStop(1.0, 'rgba(255,180,60,0.22)');
+            ctx.fillStyle = lift;
+            ctx.fillRect(0, 0, W, horizY);
+
+            // ── SUN GLOW (broad radial bloom) ────────────────────────────
+            const glowR  = H * 0.52;
+            const glow   = ctx.createRadialGradient(sunX, sunY, 0, sunX, sunY, glowR);
+            glow.addColorStop(0.00, 'rgba(255,252,210,0.98)');
+            glow.addColorStop(0.07, 'rgba(255,200,70,0.75)');
+            glow.addColorStop(0.22, 'rgba(225,90,25,0.38)');
+            glow.addColorStop(0.50, 'rgba(180,30,60,0.16)');
+            glow.addColorStop(1.00, 'rgba(0,0,0,0)');
+            ctx.fillStyle = glow;
+            ctx.fillRect(0, 0, W, horizY);
+
+            // Sun disc
+            const sunR    = Math.max(5, H * 0.021);
+            const sunDisc = ctx.createRadialGradient(sunX, sunY, 0, sunX, sunY, sunR);
+            sunDisc.addColorStop(0,   D.theme.sun);
+            sunDisc.addColorStop(0.6, D.theme.grd);
+            sunDisc.addColorStop(1,   D.theme.hor);
+            ctx.fillStyle = sunDisc;
             ctx.beginPath();
-            ctx.moveTo(2, -14); ctx.quadraticCurveTo(10, -10, 6, -6 + weaponBob);
-            ctx.quadraticCurveTo(10, -2, 2, 2); ctx.stroke();
-        }
-        ctx.restore();
-        // --- END OF YOUR HORSE CODE ---
-            } 
-            // --- INFANTRY RENDERING ---
-            else {
-                ctx.fillStyle = unit.factionColor;
-                ctx.fillRect(-4, -10 + bob, 8, 10); // Torso
-                ctx.fillStyle = "#ffccbc"; // Skin
-                ctx.beginPath(); ctx.arc(0, -14 + bob, 4, 0, Math.PI*2); ctx.fill(); // Head
-            }
+            ctx.arc(sunX, sunY, sunR, 0, Math.PI * 2);
+            ctx.fill();
 
-            // --- HEADWEAR ---
-            let headYOffset = unit.isCavalry ? 3 : 0; // Adjust hat height if on horseback
-            if (unit.headwear === "rice_hat") {
-                ctx.fillStyle = "#d4b886"; ctx.strokeStyle = "#8d6e63"; ctx.lineWidth = 1;
+            // Horizon light spill (warm band just above & below horizon)
+            const spill = ctx.createLinearGradient(0, horizY - H * 0.09, 0, horizY);
+            spill.addColorStop(0, 'rgba(255,200,70,0)');
+            spill.addColorStop(1, 'rgba(255,200,70,0.42)');
+            ctx.fillStyle = spill;
+            ctx.fillRect(0, horizY - H * 0.09, W, H * 0.09);
+
+            // ── STARS ─────────────────────────────────────────────────────
+            ctx.fillStyle = '#ffffff';
+            D.stars.forEach(s => {
+                const twinkle = 0.55 + 0.45 * Math.sin(t * 0.0014 + s.phase);
+                ctx.globalAlpha = (s.y < 0.18 ? 0.6 : 0.25) * twinkle;
                 ctx.beginPath();
-                ctx.moveTo(-7, -15 + bob + headYOffset);
-                ctx.lineTo(7, -15 + bob + headYOffset);
-                ctx.lineTo(0, -21 + bob + headYOffset);
-                ctx.closePath(); ctx.fill(); ctx.stroke();
-            } else if (unit.headwear === "mongol_helmet") {
-                ctx.fillStyle = "#9e9e9e"; ctx.strokeStyle = "#424242"; ctx.lineWidth = 1;
-                ctx.beginPath(); ctx.arc(0, -14 + bob + headYOffset, 4.5, Math.PI, 0); ctx.fill(); ctx.stroke(); // Dome
-                ctx.fillStyle = "#616161";
-                ctx.beginPath(); ctx.moveTo(-1.5, -18.5 + bob + headYOffset); ctx.lineTo(1.5, -18.5 + bob + headYOffset); ctx.lineTo(0, -23 + bob + headYOffset); ctx.fill(); // Spike
-                // Flaps
-                ctx.fillStyle = "#4e342e";
-                ctx.fillRect(-5, -14 + bob + headYOffset, 3, 5);
-                ctx.fillRect(2, -14 + bob + headYOffset, 3, 5);
-            }
+                ctx.arc(s.x * W, s.y * H, s.r, 0, Math.PI * 2);
+                ctx.fill();
+            });
+            ctx.globalAlpha = 1;
 
-            // --- WEAPONS ---
-            if (type === "peasant") {
-                let tipX = (12 + weaponBob) * userDir;
-                let tipY = -12 + weaponBob;
-                ctx.strokeStyle = "#5d4037"; ctx.lineWidth = 1.5;
-                ctx.beginPath(); ctx.moveTo(-2 * userDir, -4); ctx.lineTo(tipX, tipY); ctx.stroke();
-            } 
-            else if (type === "spearman" || unitName.includes("Firelance")) {
-                if (unitName.includes("Firelance")) {
-                    ctx.strokeStyle = "#5d4037"; ctx.lineWidth = 1.5;
-                    ctx.beginPath(); ctx.moveTo(0, -8); ctx.lineTo(21 + weaponBob, -8); ctx.stroke();
-                    ctx.fillStyle = "#212121"; ctx.fillRect(14 + weaponBob, -10, 7, 4);
-                    ctx.fillStyle = "#9e9e9e"; ctx.beginPath();
-                    ctx.moveTo(21 + weaponBob, -8); ctx.lineTo(24 + weaponBob, -10);
-                    ctx.lineTo(29 + weaponBob, -8); ctx.lineTo(24 + weaponBob, -6);
-                    ctx.closePath(); ctx.fill();
-                    if (isAttacking) {
-                        ctx.fillStyle = "#ff5722"; ctx.beginPath(); ctx.arc(22 + weaponBob, -8, 1.5 + Math.random() * 1.5, 0, Math.PI * 2); ctx.fill();
-                        ctx.fillStyle = "rgba(200, 200, 200, 0.4)";
-                        ctx.beginPath(); ctx.arc(24 + weaponBob, -10, 4 + Math.random()*6, 0, Math.PI * 2); ctx.fill();
-                    }
-                } else {
-                    ctx.strokeStyle = "#4e342e"; ctx.lineWidth = 2.5;
-                    ctx.beginPath(); ctx.moveTo(-6 * userDir, 4); ctx.lineTo((28 + weaponBob) * userDir, -24 + weaponBob); ctx.stroke();
+            // ── CLOUDS ────────────────────────────────────────────────────
+            D.clouds.forEach(c => {
+                c.x = ((c.x + c.spd + 0.1) % 1.2) - 0.1; // slow rightward drift, wrap
+                const cx = c.x * W, cy = c.y * H;
+                const cw = c.w * W, ch = c.h * H;
+                // Bottom edge catches the most dawn light
+                const cg = ctx.createLinearGradient(cx, cy - ch, cx, cy + ch);
+                cg.addColorStop(0.0, `rgba(50,28,55,${c.a * 0.45})`);
+                cg.addColorStop(0.5, `rgba(150,72,35,${c.a * 0.55})`);
+                cg.addColorStop(1.0, `rgba(230,148,50,${c.a})`);
+                ctx.fillStyle = cg;
+                for (let b = 0; b < c.blobs; b++) {
+                    const bx = cx + (b - (c.blobs - 1) * 0.5) * cw * 0.4;
+                    const by = cy - Math.sin(b * 1.3) * ch * 0.4;
+                    const bw = cw * (0.45 + Math.abs(Math.sin(b * 0.85)) * 0.22) * 0.5;
+                    const bh = ch * (0.65 + Math.cos(b * 1.5) * 0.18) * 0.5;
+                    ctx.beginPath();
+                    ctx.ellipse(bx, by, Math.max(1, bw), Math.max(1, bh), 0, 0, Math.PI * 2);
+                    ctx.fill();
                 }
-            }
-            else if (type === "gun") {
-                ctx.strokeStyle = "#424242"; ctx.lineWidth = 3.5;
-                ctx.beginPath(); ctx.moveTo(0, -5); ctx.lineTo(14 + weaponBob, -8); ctx.stroke();
-                if (isAttacking) { 
-                    ctx.fillStyle = "#ff5722"; ctx.beginPath(); ctx.arc(16 + weaponBob, -9, 2 + Math.random()*2, 0, Math.PI * 2); ctx.fill();
-                    ctx.fillStyle = "rgba(180, 180, 180, 0.5)"; 
-                    ctx.beginPath(); ctx.arc(20 + weaponBob, -11, 6 + Math.random()*6, 0, Math.PI * 2); ctx.fill();
-                }
-            }
-            else if (type === "crossbow") { 
-                if (unitName === "Repeater Crossbowman") {
-                    ctx.save();
-                    let shakeX = isAttacking ? Math.sin(Date.now() / 30) * 1.5 : 0;
-                    let shakeY = isAttacking ? Math.cos(Date.now() / 30) * 1.2 : 0;
-                    ctx.translate(shakeX, shakeY);
-                    ctx.fillStyle = "#3e2723"; ctx.fillRect(-3, -12 + bob, 6, 6); 
-                    ctx.fillStyle = "#4e342e"; ctx.fillRect(3, -11 + bob, 18, 3); 
-                    ctx.save();
-                    ctx.translate(5, -17 + bob); 
-                    ctx.fillStyle = "#5d4037"; ctx.fillRect(0, 0, 14, 6); 
-                    ctx.strokeStyle = "#2b1b17"; ctx.lineWidth = 0.8; ctx.strokeRect(0, 0, 14, 6);
-                    ctx.restore();
-                    ctx.fillStyle = "#212121"; ctx.fillRect(21, -11 + bob, 2, 3); 
-                    ctx.restore();
-                }
-                else if (unitName === "Poison Crossbowman") {
-                    ctx.fillStyle = "#5d4037"; ctx.fillRect(0, -10, 12, 3); 
-                    ctx.strokeStyle = "#2e7d32"; ctx.lineWidth = 2;
-                    ctx.beginPath(); ctx.arc(10, -8.5, 6.5, -Math.PI/2, Math.PI/2); ctx.stroke();
-                    ctx.strokeStyle = "rgba(200, 255, 200, 0.4)"; ctx.lineWidth = 0.5;
-                    ctx.beginPath(); ctx.moveTo(10, -15); ctx.lineTo(10, -2); ctx.stroke();
-                }
-            }
-            else if (type === "horse_archer") {
-                let time = isAttacking ? Date.now() / 150 : 0; 
-                let pull = isAttacking ? (Math.sin(time) * 0.5 + 0.5) : 0; 
-                let khatra = isAttacking ? ((1 - pull) * 0.4) : 0; 
-                let handX = 6 + weaponBob;
-                let handY = -6; 
+            });
 
-                ctx.save();
-                ctx.translate(handX, handY);
-                ctx.rotate(khatra); 
-                ctx.translate(-handX, -handY);
+            // ── FAR MOUNTAINS ─────────────────────────────────────────────
+            ctx.beginPath();
+            ctx.moveTo(0, H);
+            D.far.forEach(p => ctx.lineTo(p.x * W, p.y * H));
+            ctx.lineTo(W, H);
+            ctx.closePath();
+            // Silhouette tinted slightly by the dawn glow
+            const farG = ctx.createLinearGradient(0, D.far.reduce((m,p)=>Math.min(m,p.y),1)*H, 0, horizY);
+            farG.addColorStop(0, 'rgba(22,10,38,0.97)');
+            farG.addColorStop(1, 'rgba(45,20,48,0.80)');
+            ctx.fillStyle = farG;
+            ctx.fill();
 
-                ctx.strokeStyle = "#3e2723"; ctx.lineWidth = 1.5;
+            // ── MID MOUNTAINS ─────────────────────────────────────────────
+            ctx.beginPath();
+            ctx.moveTo(0, H);
+            D.mid.forEach(p => ctx.lineTo(p.x * W, p.y * H));
+            ctx.lineTo(W, H);
+            ctx.closePath();
+            ctx.fillStyle = 'rgba(14,8,24,0.95)';
+            ctx.fill();
+
+            // ── NEAR HILLS ────────────────────────────────────────────────
+            ctx.beginPath();
+            ctx.moveTo(0, H);
+            D.near.forEach(p => ctx.lineTo(p.x * W, p.y * H));
+            ctx.lineTo(W, H);
+            ctx.closePath();
+            ctx.fillStyle = '#0a0616';
+            ctx.fill();
+
+            // ── PINE SILHOUETTES (planted on near ridge) ──────────────────
+            ctx.fillStyle = '#050310';
+            D.pines.forEach(pine => {
+                const px  = pine.fx * W;
+                const gy  = ridgeYAt(D.near, pine.fx);  // ground y at this pine's x
+                const ph  = pine.h * H;
+                const pw  = pine.w * W;
+                // Two stacked triangles give a classic pine profile
                 ctx.beginPath();
-                ctx.moveTo(handX - 4, -14); 
-                ctx.quadraticCurveTo(handX + 6, -10, handX, handY); 
-                ctx.quadraticCurveTo(handX + 6, -2, handX - 4, 2); 
-                ctx.stroke();
+                ctx.moveTo(px,       gy - ph);
+                ctx.lineTo(px - pw,  gy - ph * 0.40);
+                ctx.lineTo(px + pw,  gy - ph * 0.40);
+                ctx.closePath();
+                ctx.fill();
+                ctx.beginPath();
+                ctx.moveTo(px,            gy - ph * 0.52);
+                ctx.lineTo(px - pw * 1.4, gy);
+                ctx.lineTo(px + pw * 1.4, gy);
+                ctx.closePath();
+                ctx.fill();
+            });
 
-                ctx.strokeStyle = "rgba(255, 255, 255, 0.6)"; ctx.lineWidth = 0.5;
-                ctx.beginPath(); ctx.moveTo(handX - 4, -14); 
-                let stringX = (handX - 4) - (pull * 8); 
-                ctx.lineTo(stringX, handY); 
-                ctx.lineTo(handX - 4, 2); 
-                ctx.stroke();
-                ctx.restore();
-            }
-            else if (unitName === "Bomb" || type === "Bomb") {
-                ctx.save();
-                if (isAttacking) ctx.rotate(Math.PI / 4); 
-                else ctx.rotate(-Math.PI / 10); 
-                ctx.strokeStyle = "#5d4037"; ctx.lineWidth = 1.5;
-                ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(0, -22); ctx.stroke();
-                ctx.fillStyle = "#424242"; ctx.beginPath(); ctx.arc(3, -14, 4, 0, Math.PI * 2); ctx.fill();
-                if(isAttacking) { ctx.fillStyle = "#ff9800"; ctx.beginPath(); ctx.arc(3, -16, 2, 0, Math.PI * 2); ctx.fill(); }
-                ctx.restore();
-            }
-            else if (unitName === "Rocket" || type === "Rocket") {
-                ctx.save();
-                ctx.translate(4 * userDir, -6);
-                ctx.strokeStyle = "#5d4037"; ctx.lineWidth = 2;
-                for(let i=-1; i<=1; i++) { 
-                    ctx.beginPath(); ctx.moveTo(-8 * userDir, i*2); ctx.lineTo(10 * userDir + weaponBob, -4 + i*2); ctx.stroke();
-                }
-                ctx.fillStyle = "#424242"; ctx.fillRect(-10 * userDir, -3, 4 * userDir, 6); 
-                if (isAttacking) {
-                    ctx.fillStyle = "rgba(180, 180, 180, 0.6)";
-                    for(let j=0; j<4; j++) {
-                        ctx.beginPath(); ctx.arc(-14 * userDir - (j*6), 2 + (Math.random()*6-3), 4+j, 0, Math.PI*2); ctx.fill();
-                    }
-                }
-                ctx.strokeStyle = "#ff9800"; ctx.lineWidth = 1; 
-                ctx.beginPath(); ctx.moveTo(-10 * userDir, 0); ctx.lineTo(-14 * userDir, 4); ctx.stroke();
-                ctx.restore();
-            }
+            // ── FOREGROUND EARTH ──────────────────────────────────────────
+            ctx.beginPath();
+            ctx.moveTo(0, H);
+            D.fore.forEach(p => ctx.lineTo(p.x * W, p.y * H));
+            ctx.lineTo(W, H);
+            ctx.closePath();
+            ctx.fillStyle = '#030208';
+            ctx.fill();
 
-            ctx.restore();
+            // ── HORIZON ATMOSPHERIC HAZE ──────────────────────────────────
+            const haze = ctx.createLinearGradient(0, horizY - H * 0.04, 0, horizY + H * 0.07);
+            haze.addColorStop(0,   'rgba(0,0,0,0)');
+            haze.addColorStop(0.4, `rgba(200,100,30,0.14)`);
+            haze.addColorStop(1,   'rgba(0,0,0,0)');
+            ctx.fillStyle = haze;
+            ctx.fillRect(0, horizY - H * 0.04, W, H * 0.11);
         }
+        // ── END DAWN LANDSCAPE ───────────────────────────────────────────────
+
+        // Deferred-spawn frame counter
+        let _menuFrame = 0;
 
         function animateMenu() {
+            const _t = Date.now();
             ctx.clearRect(0, 0, canvas.width, canvas.height);
-            
-            if (Math.random() < 0.2) {
-                particles.push({
-                    x: Math.random() * canvas.width,
-                    y: canvas.height + 10,
-                    s: Math.random() * 3 + 1,
-                    a: Math.random() * 0.5 + 0.1
+            drawDawnBackground(ctx, canvas.width, canvas.height, _t);
+
+            // ── DEFERRED SPAWN QUEUE ──────────────────────────────────────────
+            if (window._menuSpawnQueue && window._menuSpawnQueue.length > 0) {
+                window._menuSpawnQueue = window._menuSpawnQueue.filter(entry => {
+                    if (_menuFrame >= entry.at) {
+                        spawnUnit(entry.index);
+                        return false; // remove from queue
+                    }
+                    return true;
                 });
             }
-            
-            ctx.fillStyle = "#ff5722";
-            for(let i = particles.length - 1; i >= 0; i--) {
-                let p = particles[i];
-                p.y -= p.s;
-                p.x += Math.sin(p.y / 20) * 2;
-                ctx.globalAlpha = p.a;
-                ctx.beginPath(); ctx.arc(p.x, p.y, p.s, 0, Math.PI*2); ctx.fill();
-                if (p.y < -10) particles.splice(i, 1);
-            }
-            ctx.globalAlpha = 1.0;
+            _menuFrame++;
 
+            // Y-sort for painter's-algorithm depth
             backgroundUnits.sort((a, b) => a.y - b.y);
 
-            backgroundUnits.forEach(unit => {
-                unit.frame += 1;
+            // ── GROUND BAND (pixels) ──────────────────────────────────────────
+            const _groundMin = canvas.height * 0.64;   // sky ceiling / horizon
+            const _groundMax = canvas.height * 0.92;   // visible ground floor
 
-                // --- STATE MACHINE "AI" FOR MORE ACTIVITY ---
+            // Magnetic-pull parameters
+            const EDGE_MARGIN   = 80;   // px from screen edge that activates pull
+            const PULL_STRENGTH = 0.18; // acceleration per frame toward the edge
+            const FALL_MARGIN   = 60;   // px below groundMax before fall-delete pull
+            const GRAVITY       = 0.25; // px/frame² downward
+            const JUMP_VY       = -5.5; // px/frame upward impulse
+            const JUMP_CHANCE   = 0.003;// probability per frame of jumping (when on ground)
+
+            const toDelete = [];
+
+            backgroundUnits.forEach((unit, idx) => {
+                unit.frame += 1;
+                if (unit.immunityTimer > 0) unit.immunityTimer--;
+
+                // ── STATE-MACHINE AI ──────────────────────────────────────────
                 if (unit.stateTimer <= 0) {
-                    let roll = Math.random();
-                    if (roll < 0.3) {
+                    const roll = Math.random();
+                    if (roll < 0.28) {
                         unit.state = "idle";
-                        unit.vx = 0; unit.vy = 0;
+                        unit.vx = 0;
                         unit.isAttacking = false;
-                        unit.stateTimer = 40 + Math.random() * 60;
-                    } else if (roll < 0.6) {
+                        unit.stateTimer = 50 + Math.random() * 70;
+                    } else if (roll < 0.55) {
                         unit.state = "attack";
-                        unit.vx = 0; unit.vy = 0;
+                        unit.vx = 0;
                         unit.isAttacking = true;
-                        unit.dir = Math.random() > 0.5 ? 1 : -1; // Snap to face an "enemy"
-                        unit.stateTimer = 60 + Math.random() * 60;
+                        unit.mockUnit.facingDir = Math.random() > 0.5 ? 1 : -1;
+                        unit.stateTimer = 80 + Math.random() * 100;
                     } else {
                         unit.state = "walk";
-                        // Cavalry move faster
-                        let speedMult = unit.isCavalry ? 3 : 1.5; 
-                        unit.vx = (Math.random() - 0.5) * speedMult;
-                        unit.vy = (Math.random() - 0.5) * (speedMult / 2);
-                        unit.dir = unit.vx > 0 ? 1 : -1;
+                        const spd = unit.isCavalry ? 2.4 : 1.1;
+                        unit.vx = (Math.random() - 0.5) * spd * 2;
                         unit.isAttacking = false;
-                        unit.stateTimer = 100 + Math.random() * 100;
+                        unit.stateTimer = 90 + Math.random() * 120;
                     }
                 }
                 unit.stateTimer--;
 
+                // Sync facing direction with horizontal movement
+                if (Math.abs(unit.vx) > 0.05) {
+                    unit.mockUnit.facingDir = unit.vx > 0 ? 1 : -1;
+                }
+
+                // ── JUMP / GRAVITY ────────────────────────────────────────────
+                // Ground level for this unit = _groundMax (flat gameplay band)
+                const unitGroundY = _groundMax;
+
+                // Spontaneous jump when on the ground
+                if (unit.isOnGround && unit.jumpCooldown <= 0) {
+                    if (Math.random() < JUMP_CHANCE) {
+                        unit.vy_gravity = JUMP_VY;
+                        unit.isOnGround = false;
+                        unit.jumpCooldown = 180 + Math.floor(Math.random() * 300);
+                    }
+                }
+                if (unit.jumpCooldown > 0) unit.jumpCooldown--;
+
+                // Apply gravity
+                if (!unit.isOnGround) {
+                    unit.vy_gravity += GRAVITY;
+                }
+
+                // Integrate vertical position (gravity channel only)
+                unit.y += unit.vy_gravity;
+
+                // Sky ceiling — hard stop
+                if (unit.y < _groundMin) {
+                    unit.y = _groundMin;
+                    unit.vy_gravity = Math.abs(unit.vy_gravity) * 0.3; // small bounce
+                }
+
+                // Ground landing
+                if (unit.y >= unitGroundY) {
+                    unit.y = unitGroundY;
+                    unit.vy_gravity = 0;
+                    unit.isOnGround = true;
+                }
+
+                // ── HORIZONTAL MOVEMENT ───────────────────────────────────────
                 unit.x += unit.vx;
-                unit.y += unit.vy;
 
-                // Screen wrapping
-                if (unit.x > canvas.width + 20) unit.x = -20;
-                if (unit.x < -20) unit.x = canvas.width + 20;
-                if (unit.y > canvas.height + 20) unit.y = -20;
-                if (unit.y < -20) unit.y = canvas.height + 20;
+                // ── MAGNETIC EDGE FORCES & DELETION ──────────────────────────
+                // Only active once immunity has expired (unit fully on-screen)
+                if (unit.immunityTimer <= 0) {
+                    let pulled = false;
 
+                    // Left magnetic zone
+                    if (unit.x < EDGE_MARGIN) {
+                        unit.vx -= PULL_STRENGTH; // accelerate toward left edge
+                        pulled = true;
+                    }
+                    // Right magnetic zone
+                    if (unit.x > canvas.width - EDGE_MARGIN) {
+                        unit.vx += PULL_STRENGTH; // accelerate toward right edge
+                        pulled = true;
+                    }
+
+                    // Delete once fully outside the screen
+                    if (unit.x < -100 || unit.x > canvas.width + 100) {
+                        toDelete.push(idx);
+                        return;
+                    }
+
+                    // Bottom fall zone — pull downward then delete
+                    if (unit.y > _groundMax + FALL_MARGIN) {
+                        toDelete.push(idx);
+                        return;
+                    }
+                }
+
+                // ── SYNC MOCK-UNIT STATE FOR ANIMATION DRIVERS ───────────────
+                const mu          = unit.mockUnit;
+                const isMoving    = (unit.state === "walk") || !unit.isOnGround;
+                const isAttacking = unit.isAttacking;
+
+                if (isAttacking) {
+                    mu.state = "attacking";
+                    const maxCd = (unit.type === "archer" || unit.type === "horse_archer") ? 170 : 300;
+                    mu.cooldown = Math.max(1, maxCd - ((unit.frame * 2) % maxCd));
+                } else {
+                    mu.state    = "idle";
+                    mu.cooldown = 0;
+                }
+
+                // ── DRAW ──────────────────────────────────────────────────────
                 ctx.save();
                 ctx.translate(unit.x, unit.y);
-                ctx.scale(2.5, 2.5); 
-                drawEpicUnit(ctx, { ...unit, x: 0, y: 0 });
+                ctx.scale(RENDER_SCALE, RENDER_SCALE);
+
+                try {
+                    if (unit.isCavalry) {
+                        if (typeof drawCavalryUnit === "function") {
+                            drawCavalryUnit(
+                                ctx, 0, 0,
+                                isMoving,
+                                unit.frame,
+                                unit.factionColor,
+                                isAttacking,
+                                unit.type,
+                                mu.side,
+                                unit.unitName,
+                                /*isFleeing*/     false,
+                                mu.cooldown,
+                                /*unitAmmo*/      10,
+                                mu,
+                                /*reloadProgress*/0
+                            );
+                        }
+                    } else {
+                        if (typeof drawInfantryUnit === "function") {
+                            drawInfantryUnit(
+                                ctx, 0, 0,
+                                isMoving,
+                                unit.frame,
+                                unit.factionColor,
+                                unit.type,
+                                isAttacking,
+                                mu.side,
+                                unit.unitName,
+                                /*isFleeing*/     false,
+                                mu.cooldown,
+                                /*unitAmmo*/      10,
+                                mu,
+                                /*reloadProgress*/0
+                            );
+                        }
+                    }
+                } catch (e) {
+                    // Silently swallow rare draw errors
+                }
+
                 ctx.restore();
             });
+
+            // ── REMOVE DELETED UNITS (reverse order to keep indices valid) ────
+            for (let i = toDelete.length - 1; i >= 0; i--) {
+                backgroundUnits.splice(toDelete[i], 1);
+            }
+
+            // ── REPLENISH: spawn a new unit for each one deleted ──────────────
+            const deficit = UNIT_COUNT - backgroundUnits.length
+                          - (window._menuSpawnQueue ? window._menuSpawnQueue.length : 0);
+            for (let s = 0; s < deficit; s++) {
+                // Short delay so they don't all pour in at once
+                const poolIdx = Math.floor(Math.random() * MENU_UNIT_POOL.length);
+                if (!window._menuSpawnQueue) window._menuSpawnQueue = [];
+                window._menuSpawnQueue.push({
+                    at: _menuFrame + 30 + Math.floor(Math.random() * 90),
+                    index: poolIdx
+                });
+            }
 
             menuAnimFrameId = requestAnimationFrame(animateMenu);
         }

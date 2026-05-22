@@ -142,12 +142,25 @@ const activeCommander = battleEnvironment.units.find(u =>
             
             u.selected = willBeSelected;
             
-            // ---> NEW SURGERY: BREAK THE LAZY CHARGE UPON SELECTION <---
+            // ---> SURGERY: BREAK THE LAZY CHARGE UPON SELECTION (RANGED ONLY) <---
+            // Ranged: wipe target so the player can precisely redirect them.
+            // Melee: convert to "siege_assault" so they keep marching toward their
+            //        current objective and don't freeze when deselected.
             if (u.selected && u.orderType === "seek_engage") {
-                u.hasOrders = false;
-                u.orderType = null; 
-                u.orderTargetPoint = null;
-                u.target = null; // Forces them to clear dynamic targets and await orders
+                const _chkStr = String((u.stats?.role || "") + " " + (u.unitType || "")).toLowerCase();
+                const _isRangedUnit = u.stats?.isRanged ||
+                    /\b(archer|bow|crossbow|slinger|rocket)\b/.test(_chkStr);
+                if (_isRangedUnit) {
+                    // Ranged — full clear so the player can redirect
+                    u.hasOrders = false;
+                    u.orderType = null;
+                    u.orderTargetPoint = null;
+                    u.target = null;
+                } else {
+                    // Melee — switch to a resumable order type; keep target & momentum
+                    u.orderType = "siege_assault";
+                    // hasOrders and target intentionally left intact
+                }
             }
         });
         
@@ -1065,7 +1078,7 @@ document.addEventListener('mouseup', (e) => {
 
         if (selectedUnits.length > 0) {
             // ACTION: FORMATION MOVE TO RECTANGLE
-            executeBoxFormationMove(selectedUnits, minX, maxX, minY, maxY);
+            (window.executeBoxFormationMove || executeBoxFormationMove)(selectedUnits, minX, maxX, minY, maxY);
         } else {
             // ACTION: SELECT UNITS IN RECTANGLE
             playerUnits.forEach(u => {
@@ -1104,7 +1117,7 @@ document.addEventListener('mouseup', (e) => {
 });
 
 // --- RECTANGLE FORMATION MATHEMATICS ---
-function executeBoxFormationMove(units, minX, maxX, minY, maxY) {
+window.executeBoxFormationMove = function executeBoxFormationMove(units, minX, maxX, minY, maxY) {
     if (!units || units.length === 0) return;
     
     if (typeof stopLazyGeneral === 'function') stopLazyGeneral(); 

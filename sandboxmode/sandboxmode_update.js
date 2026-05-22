@@ -307,7 +307,7 @@ function enterOverworldMode() {
     // IMPORTANT: do NOT touch __activeScenario here — clearing it mid-session
     // destroys the trigger/dialogue system every time the player exits a battle.
     // FIX: protect both Story 1 and Story 2 campaign sessions.
-    if (!window.__campaignStory1Active && !window.__campaignStory2Active) {
+    if (!window.__campaignStory1Active && !window.__campaignStory2Active && !window.__campaignStory3Active) {
         window.__npcSpawnBans      = null;
         window.__mongolWaveAllowed = false;
     }
@@ -442,7 +442,50 @@ function update() {
 					// Apply movement: On land, waterSpeedMulti is 1.0 so they move at normal battle speed
 					calculateMovement(((player.baseSpeed / 4) * 0.70) * waterSpeedMulti, null, typeof BATTLE_TILE_SIZE !== 'undefined' ? BATTLE_TILE_SIZE : 8, null, null, true);
 					
-					if (typeof updateBattleUnits === 'function') updateBattleUnits();
+					// ★ BLS v4.2: clamp player commander to deploy zone during pre-deploy.
+					// calculateMovement only clamps to map bounds (0..bW, 0..bH); the
+					// deploy zone is a much smaller rectangle and must be enforced here,
+					// BEFORE updateBattleUnits runs (which syncs pCmdr.x = player.x).
+					//
+					// ★ v4.2.2 FIX: NAVAL CLAMP
+					// Previously naval was excluded (!window.inNavalBattle) so commander
+					// could walk off the ship deck and engage enemies before COMMENCE.
+					// Now we use the ship's bounds (z.shipRef) as the clamp rectangle.
+					// Falls back to the zone rectangle if shipRef is missing.
+					if (window.__preDeploymentActive && window.__playerDeployZone) {
+					    const z = window.__playerDeployZone;
+					    if (z.type === "naval" && z.shipRef) {
+					        // Use ship deck as clamp box (with small inset so player
+					        // doesn't sit exactly on the hull edge)
+					        const ship = z.shipRef;
+					        const inset = 18;
+					        const minX = ship.x - ship.width  * 0.45 + inset;
+					        const maxX = ship.x + ship.width  * 0.45 - inset;
+					        const minY = ship.y - ship.height * 0.45 + inset;
+					        const maxY = ship.y + ship.height * 0.45 - inset;
+					        if (player.x < minX) player.x = minX;
+					        if (player.x > maxX) player.x = maxX;
+					        if (player.y < minY) player.y = minY;
+					        if (player.y > maxY) player.y = maxY;
+					        // Extra safety: if commander somehow landed on WATER/EDGE,
+					        // snap back toward ship center
+					        if (typeof window.getNavalSurfaceAt === 'function') {
+					            const surf = window.getNavalSurfaceAt(player.x, player.y);
+					            if (surf === 'WATER' || surf === 'EDGE') {
+					                player.x = ship.x;
+					                player.y = ship.y;
+					            }
+					        }
+					    } else if (z.type !== "naval") {
+					        // Standard rectangle clamp for land / river / siege
+					        if (player.x < z.minX) player.x = z.minX;
+					        if (player.x > z.maxX) player.x = z.maxX;
+					        if (player.y < z.minY) player.y = z.minY;
+					        if (player.y > z.maxY) player.y = z.maxY;
+					    }
+					}
+					
+					if (typeof window.updateBattleUnits === 'function') window.updateBattleUnits();
 
 					// (NOTE: The secondary 'UNIVERSAL WATER SLOWDOWN FOR ALL TROOPS' loop has been 
 					// completely removed from here, as updateRiverPhysics handles it properly!)
@@ -624,6 +667,7 @@ function update() {
             let storyAttritionMultiplier = 1.0;
             if      (window.__campaignStory1Active) storyAttritionMultiplier = 0.2;  // Story 1 — Hakata Bay: 5× slower
             else if (window.__campaignStory2Active) storyAttritionMultiplier = 0.2;  // Story 2 — Suzhou: 5× slower
+            else if (window.__campaignStory3Active) storyAttritionMultiplier = 0.2;  // Story 3 — Wall Garrison: 5× slower
             // else if (window.__campaignStory3Active) storyAttritionMultiplier = X; // Story 3 — placeholder
             // else if (window.__campaignStory4Active) storyAttritionMultiplier = X; // Story 4 — placeholder
 
@@ -773,7 +817,7 @@ function update() {
                 // is set.
                 const _introDone   = !!window.__DoG_introDone;
                 const _bootMs      = window.__DoG_scenarioBootTime;
-                const _inCampaign  = !!window.__campaignStory1Active || !!window.__campaignStory2Active;
+                const _inCampaign  = !!window.__campaignStory1Active || !!window.__campaignStory2Active || !!window.__campaignStory3Active;
                 const _bootBlocking = _inCampaign && !_introDone &&
                     _bootMs && (Date.now() - _bootMs) < 5000;
 
@@ -793,6 +837,17 @@ function update() {
                         recruitBox.style.pointerEvents = isEnemy ? 'none' : 'auto';
                     }
                     if (hostileBox) hostileBox.style.display = isEnemy ? 'flex' : 'none';
+
+                    // Story 2: disable the "Camp beside Settlement" siege button entirely —
+                    // the player should not be able to manually siege cities in the Mongol campaign.
+                    const siegeBtn = document.getElementById('siege-button');
+                    if (siegeBtn) {
+                        if (window.__campaignStory2Active) {
+                            siegeBtn.style.display = 'none';
+                        } else {
+                            siegeBtn.style.display = '';
+                        }
+                    }
 
                     if (isEnemy) {
                         player.stunTimer = 60;
@@ -823,7 +878,8 @@ function update() {
     if (++uiSyncTick % 30 === 0) syncSiegeUIVisibility();
 }
 
-function draw() {
+
+window.draw = function draw() {
     if (!player || isNaN(player.x) || isNaN(player.y)) {
         console.warn("NaN caught in draw! Healing coordinates to prevent black screen.");
         player.x = 800;
@@ -1072,7 +1128,7 @@ if (canDrawForts) {
 
     requestAnimationFrame(() => {
         update();
-        draw();
+        (window.draw || draw)();
     });
 
     updateAndDrawPlayerSystems(ctx, player, zoom, WORLD_WIDTH, WORLD_HEIGHT, typeof globalNPCs !== 'undefined' ? globalNPCs : []);
@@ -1262,7 +1318,9 @@ function updateCityPanelUI(city) {
     if (isHostile) {
         recruitBox.style.display = 'none';
         hostileBox.style.display = 'flex';
-    } else {
+        // Story 2: hide the camp button — player cannot manually siege in campaign
+        const siegeBtnUI = document.getElementById('siege-button');
+        if (siegeBtnUI) siegeBtnUI.style.display = window.__campaignStory2Active ? 'none' : '';
         recruitBox.style.display = 'flex';
         hostileBox.style.display = 'none';
     }

@@ -1352,11 +1352,15 @@ window.QuestSystem = (function () {
             }
 
             // Where the quest came from + where it's going
+            // Guard: giverPos may be undefined for story/legacy quests — omit coords safely
+            let _posStr = (q.giverPos && typeof q.giverPos.x === "number")
+                ? `&nbsp;(${Math.round(q.giverPos.x)}, ${Math.round(q.giverPos.y)})`
+                : "";
             let locationHTML = `
                 <div style="color:#888;font-size:11px;margin-top:3px;">
-                    📍 <b style="color:#d4b886">${q.giverName}</b>
-                    in <b style="color:#ffe600">${q.giverCityName}</b>
-                    &nbsp;(${Math.round(q.giverPos.x)}, ${Math.round(q.giverPos.y)})
+                    📍 <b style="color:#d4b886">${q.giverName || "Unknown"}</b>
+                    in <b style="color:#ffe600">${q.giverCityName || "Unknown"}</b>
+                    ${_posStr}
                 </div>`;
 
             let targetHTML = q.targetCityName && q.targetCityName !== q.giverCityName
@@ -1365,12 +1369,23 @@ window.QuestSystem = (function () {
             let rewardHTML = `<div style="color:#ffca28;font-size:12px;font-weight:bold;margin-top:4px;">
                 ${st === "completed" ? "✅" : "💰"} ${q.reward} Gold</div>`;
 
-            let abandonHTML = st === "active"
-                ? `<button onclick="window.QuestSystem.abandonQuest('${q.id}');window.QuestSystem.openQuestLog();"
-                    style="margin-top:8px;padding:5px 12px;
-                    background:rgba(255,0,0,0.08);border:1px solid #ff5252;color:#ff5252;
-                    font-family:Georgia,serif;font-size:11px;border-radius:3px;cursor:pointer;
-                    touch-action:manipulation;">Abandon</button>` : "";
+            // Story / campaign quests (type:"main", isMain, isStoryQuest, or any campaign active)
+            // are permanently locked — hide the abandon button entirely and show a lock note.
+            const _isStoryQuest = (q.type === "main") || !!q.isStoryQuest || !!q.isMain ||
+                                  !!(window.__campaignStory1Active || window.__campaignStory2Active || window.__campaignStory3Active);
+            let abandonHTML = "";
+            if (st === "active") {
+                if (_isStoryQuest) {
+                    abandonHTML = `<div style="margin-top:8px;font-size:10px;color:#666;font-style:italic;">
+                        🔒 Campaign quest — cannot be abandoned</div>`;
+                } else {
+                    abandonHTML = `<button onclick="window.QuestSystem.abandonQuest('${q.id}');window.QuestSystem.openQuestLog();"
+                        style="margin-top:8px;padding:5px 12px;
+                        background:rgba(255,0,0,0.08);border:1px solid #ff5252;color:#ff5252;
+                        font-family:Georgia,serif;font-size:11px;border-radius:3px;cursor:pointer;
+                        touch-action:manipulation;">Abandon</button>`;
+                }
+            }
 
             return `<div style="background:rgba(0,0,0,0.4);border:1px solid ${color}30;
                 border-left:3px solid ${color};border-radius:4px;
@@ -1472,13 +1487,22 @@ window.QuestSystem = (function () {
             `;
         }
 
+        function _safeCard(q, st) {
+            try { return _card(q, st); }
+            catch (e) {
+                console.warn("[QuestSystem] _card render error for quest", (q && q.id) || "?", e);
+                return `<div style="color:#888;font-size:11px;padding:6px;">
+                    ⚠️ Quest "${(q && q.title) || "?"}" could not be displayed.</div>`;
+            }
+        }
+
         let activeHTML    = log.active.length === 0
             ? `<div style="color:#555;font-size:12px;padding:10px 0;">No active quests. Visit cities to find quest givers.</div>`
-            : log.active.map(q => _card(q, "active")).join("");
+            : log.active.map(q => _safeCard(q, "active")).join("");
 
         let completedHTML = log.completed.length === 0
             ? `<div style="color:#555;font-size:12px;padding:10px 0;">No completed quests yet.</div>`
-            : log.completed.slice().reverse().slice(0, 10).map(q => _card(q, "completed")).join("");
+            : log.completed.slice().reverse().slice(0, 10).map(q => _safeCard(q, "completed")).join("");
 
         panel.innerHTML = `
             <!-- Header -->
@@ -1573,6 +1597,14 @@ window.QuestSystem = (function () {
         let log = _log();
         let q   = log.active.find(aq => aq.id === qid);
         if (!q) return;
+        // ── Block abandoning story / campaign quests ──────────────────────────
+        // Quests with type:"main", isMain, isStoryQuest, or any quests active during
+        // a campaign session are permanently locked and cannot be abandoned.
+        const _isCampaign = !!(window.__campaignStory1Active || window.__campaignStory2Active || window.__campaignStory3Active);
+        if ((q.type === "main") || !!q.isStoryQuest || !!q.isMain || _isCampaign) {
+            _showToast("🔒 Campaign quests cannot be abandoned.");
+            return;
+        }
         q.status      = "abandoned";
         q.completedAt = Date.now();
         log.active     = log.active.filter(aq => aq.id !== qid);

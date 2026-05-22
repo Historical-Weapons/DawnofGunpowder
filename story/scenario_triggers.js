@@ -1829,32 +1829,46 @@ async function _maybePlayStoryIntro(scenarioDoc) {
                 // Let the Ken-Burns zoom-in settle before opening dialogue
                 await _sleep(3000);
 
-                // Build optional mid-dialogue art-swap callback
+                // Build optional mid-dialogue art-swap callback (supports up to 3 arts).
+                // ── No-void instant swap ──────────────────────────────────────────────────
+                // The old approach called dismissArt() then waited art2CrossfadeMs (≥1200ms)
+                // before showing the next art, producing a black void while #sp-art sat at
+                // opacity:0.  The fix: call showArt() directly without dismissing first.
+                // showArt() increments sp.artGen, so the previous art's stale 1-second
+                // cleanup timeout sees artGen !== myGen and skips clearing backgroundImage.
+                // Since #sp-art already carries the 'shown' class (opacity:1), overwriting
+                // backgroundImage is instant — zero opacity dip, zero black void.
+                // Ken-Burns resets correctly via the class-remove→reflow→re-add path inside
+                // showArt._begin().
                 var _onLineArtSwitch = null;
-                if (intro.art2 && typeof intro.art2OnLine === "number") {
+                if ((intro.art2 && typeof intro.art2OnLine === "number") ||
+                    (intro.art3 && typeof intro.art3OnLine === "number")) {
                     var _art2Shown = false;
+                    var _art3Shown = false;
                     _onLineArtSwitch = function(lineIdx) {
-                        if (!_art2Shown && lineIdx === intro.art2OnLine) {
+                        // Art 2 transition
+                        if (intro.art2 && !_art2Shown && lineIdx === intro.art2OnLine) {
                             _art2Shown = true;
-                            // Dismiss art1 — this starts the 1000ms CSS fade-out +
-                            // a 1000ms delayed cleanup in showArt's finish().
-                            window.StoryPresentation.dismissArt();
-                            // ── Cross-fade delay must exceed the 1000ms cleanup
-                            // timeout in showArt's finish() — otherwise Art 1's
-                            // stale cleanup timer fires AFTER Art 2's _begin() and
-                            // clears the new backgroundImage, blanking Art 2.
-                            // art2CrossfadeMs defaults to 1200ms for safety.
-                            var _xfadeMs = (typeof intro.art2CrossfadeMs === "number")
-                                           ? intro.art2CrossfadeMs : 1200;
-                            setTimeout(function() {
-                                window.StoryPresentation.showArt(intro.art2, {
-                                    ms:             0,
-                                    background:     true,
-                                    kenburns:       !!intro.kenburns,
-                                    caption:        intro.art2Caption || "",
-                                    clickToAdvance: false
-                                });
-                            }, _xfadeMs);
+                            window.StoryPresentation.showArt(intro.art2, {
+                                ms:             0,
+                                background:     true,
+                                kenburns:       !!intro.kenburns,
+                                caption:        intro.art2Caption || "",
+                                clickToAdvance: false
+                            });
+                        }
+                        // Art 3 transition
+                        if (intro.art3 && !_art3Shown &&
+                            typeof intro.art3OnLine === "number" &&
+                            lineIdx === intro.art3OnLine) {
+                            _art3Shown = true;
+                            window.StoryPresentation.showArt(intro.art3, {
+                                ms:             0,
+                                background:     true,
+                                kenburns:       !!intro.kenburns,
+                                caption:        intro.art3Caption || "",
+                                clickToAdvance: false
+                            });
                         }
                     };
                 }

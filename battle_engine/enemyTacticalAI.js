@@ -73,6 +73,9 @@
   let _formingTicks   = 0;
   let _crisisActive   = false;        // true while emergency general-defence is live
   let _formationStyle = 'STANDARD';   // STANDARD | SQUARE | SHIELD_WALL
+  // Cached at start() so stale window.inRiverBattle from a previous battle
+  // never pollutes the phase routing for the current session.
+  let _isRiverBattleCached = false;
 
   // ══════════════════════════════════════════════════════════════════════════
   // TUNABLE CONSTANTS
@@ -369,10 +372,34 @@
   // ══════════════════════════════════════════════════════════════════════════
 
   function orderMove(unit, tx, ty) {
+    const safe = _clampToMap(tx, ty);
     unit.hasOrders        = true;
     unit.orderType        = 'move_to_point';
-    unit.orderTargetPoint = safePoint(tx, ty);
+    unit.orderTargetPoint = safePoint(safe.x, safe.y);
     unit.reactionDelay    = 0;
+
+    // ── CRITICAL FIX (regression caused by BLS deployment-zone work) ─────────
+    // processAction's "move_to_point" branch (in ai_categories.js) only runs
+    // _handleMovement when (orderType === "move_to_point" && unit.target &&
+    // unit.target.isDummy).  Without a dummy target, the unit falls through to
+    // the no-target branch which sets state="idle" and never animates legs —
+    // any visible motion after that comes only from collision push / pinball,
+    // which is exactly the "sliding south without leg animation" symptom.
+    //
+    // For PLAYER units, processTacticalOrders synthesizes this dummy target
+    // every frame (battlefield_commands.js ~line 626).  Enemy units are not
+    // processed by that function, so EnemyTacticalAI must synthesize it here.
+    //
+    // Wrap it in priorityOverride so processAction routes through the dummy
+    // movement branch even on edge cases.  The dummy has hp:9999 so it never
+    // dies / never triggers target re-acquisition spam.
+    unit.target = {
+      x: safe.x,
+      y: safe.y,
+      hp: 9999,
+      isDummy: true,
+      stats: { meleeDefense: 0, armor: 0, health: 9999 }
+    };
   }
 
   function orderHold(unit) {
@@ -506,6 +533,17 @@
     }
 
     return { x: tx, y: ty };
+  }
+
+  // ── Map bounds guard used by calcAdvanceTarget and river approach ────────
+  function _clampToMap(x, y, margin) {
+    margin = margin || 60;
+    const mW = (typeof W.BATTLE_WORLD_WIDTH  !== 'undefined') ? W.BATTLE_WORLD_WIDTH  : 2400;
+    const mH = (typeof W.BATTLE_WORLD_HEIGHT !== 'undefined') ? W.BATTLE_WORLD_HEIGHT : 1800;
+    return {
+      x: Math.max(margin, Math.min(mW - margin, x)),
+      y: Math.max(margin, Math.min(mH - margin, y))
+    };
   }
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -899,8 +937,8 @@
 
       // Normal-force continues its phase (infantry still advances / holds)
       if (normalForce.length > 0) {
-        if (isRiverBattle()) tickRiver(normalForce, playerUnits, playerCentroid);
-        else                  tickLand (normalForce, playerUnits, playerCentroid);
+        if (_isRiverBattleCached) tickRiver(normalForce, playerUnits, playerCentroid);
+        else                       tickLand (normalForce, playerUnits, playerCentroid);
       }
       return;
     }
@@ -911,8 +949,8 @@
     // ════════════════════════════════════════════════════════════════════════
     //  NORMAL PHASE ROUTING
     // ════════════════════════════════════════════════════════════════════════
-    if (isRiverBattle()) tickRiver(enemyUnits, playerUnits, playerCentroid);
-    else                  tickLand (enemyUnits, playerUnits, playerCentroid);
+    if (_isRiverBattleCached) tickRiver(enemyUnits, playerUnits, playerCentroid);
+    else                       tickLand (enemyUnits, playerUnits, playerCentroid);
   }
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -928,7 +966,7 @@
    *   The first orders are issued immediately (no 500 ms delay on tick one).
    *   River battles skip
    */
-function start() {
+function start(opts) {
     if (!isAllowedBattle()) return; // Siege / naval / unsupported → do nothing
 
     teardown(); // idempotent — stops any existing loop before starting fresh
@@ -937,8 +975,41 @@ function start() {
     _skirmishTicks = 0;
     _formingTicks  = 0;
 
-    if (isRiverBattle()) {
-      _phase = 'RIVER_ADVANCING'; // Keep the loop alive for river maps
+    // ── v4.2.4: skipForming option ──────────────────────────────────────────
+    // When called from battle-loading-screen.js's _commenceBattle, the enemy
+    // units have already been standing in formation in their deploy zone for
+    // the entire pre-deployment phase (5-30+ seconds while the player set up).
+    // Forcing them through another 2-second FORMING pause makes them look
+    // frozen and unresponsive to the player who just clicked COMMENCE BATTLE.
+    //
+    // With skipForming:true, the AI jumps directly into the ADVANCING phase —
+    // enemies start marching toward the player immediately. They still get
+    // formation-aware advance waypoints (executeAdvancing chooses _formationStyle
+    // from player composition), they just don't pause to "decide" first.
+    const skipForming = !!(opts && opts.skipForming);
+
+    // ── FIX: Hard-read the battle type flags at start time so the AI is never
+    // confused by a stale window.inRiverBattle left over from a previous battle.
+    // isRiverBattle() reads W.inRiverBattle every call, but if the flag wasn't
+    // properly reset between battles the whole phase routing uses the wrong branch
+    // and sends all units south forever.  We cache the result once here and use
+    // _isRiverBattleCached throughout this session.
+    _isRiverBattleCached = isRiverBattle();
+
+    if (_isRiverBattleCached) {
+      _phase = 'RIVER_ADVANCING';
+    } else if (skipForming) {
+      // Skip the formation pause — go directly to ADVANCING.
+      // _formationStyle is normally chosen on the last FORMING tick from player
+      // composition; pick it now using the same logic.
+      _phase = 'ADVANCING';
+      const playerUnitsNow = getPlayerUnits();
+      if (playerUnitsNow.length > 0) {
+        const pComp = analysePlayer(playerUnitsNow);
+        _formationStyle = pickFormationStyle(pComp);
+      } else {
+        _formationStyle = 'STANDARD';
+      }
     } else {
       _phase          = 'FORMING';
       _formationStyle = 'STANDARD'; // will be refined on last FORMING tick
@@ -948,13 +1019,108 @@ function start() {
     const playerUnits = getPlayerUnits();
 
     if (enemyUnits.length > 0 && playerUnits.length > 0) {
-      if (!isRiverBattle()) {
+      // ══════════════════════════════════════════════════════════════════════
+      // ★ v4.2.5: POST-PRE-DEPLOY DEEP RESET ★
+      // ══════════════════════════════════════════════════════════════════════
+      // The AI was originally written for the OLD flow:
+      //     enterBattlefield → start() → FORMING → ADVANCING → fight
+      // Now there's a NEW intermediate phase introduced by battle-loading-
+      // screen.js:
+      //     enterBattlefield → stop() → loading screen 2.5s → _applyEnemyFormation
+      //     → pre-deploy (INDEFINITE time) → COMMENCE → start({skipForming})
+      //
+      // During pre-deploy, _applyEnemyFormation REPOSITIONS every enemy unit
+      // into formation slots and sets them to {orderType:'hold_position',
+      // hasOrders:true, vx:0, vy:0, target:null}.  The engine itself (battlefield_logic.js,
+      // ai_categories.js) also writes a bunch of internal tracking fields onto
+      // units across every tick — anchorX/Y for stuck-prevention, stuckLog for
+      // siege wall pathing, formationTimer / reactionDelay for orderHold cooldowns,
+      // priorityOverride, unstickCooldown, randomPanicTimer, ladderSlideTimer,
+      // escapePoint/escapeType for fleeing, _etai_origSpeed/_etai_riverTargetX
+      // from any previous AI session.
+      //
+      // ANY one of these stale fields, set during pre-deploy, can prevent the
+      // enemy from moving after COMMENCE — the unit's order says "advance" but
+      // some engine-side flag (anchor lock, stuck ghost mode, formationTimer
+      // cooldown, etc.) keeps it pinned to its pre-deploy formation slot.
+      // Symptom: "enemy AI completely frozen" even though start() correctly
+      // issued orderMove + dummy target.
+      //
+      // The fix is to do a thorough, defensive wipe of ALL engine-side state
+      // before issuing the first AI orders.  The old wipe (below) only cleared
+      // the AI-side fields; the deep wipe also clears the engine-side ones.
+      enemyUnits.forEach(u => {
+        // ── AI-side state (always cleared, unchanged from before) ──────────
+        u.hasOrders        = false;
+        u.orderType        = null;
+        u.orderTargetPoint = null;
+        u.target           = null;
+        u.state            = 'idle';
+        u.vx               = 0;
+        u.vy               = 0;
+        u.fleeing          = false;
+        u.isFleeing        = false;
+        u.formationTimer   = 0;
+        u.reactionDelay    = 0;
+
+        // ── Restore speed (idempotent — no-op if not backed up) ────────────
+        restoreSpeed(u);
+        if (u._etai_riverTargetX !== undefined) delete u._etai_riverTargetX;
+
+        // ── Engine-side state set by battlefield_logic / ai_categories ──────
+        // Stuck-prevention (battlefield_logic.js handleStuckPrevention):
+        // anchorX/Y get set on first call and define the unit's "home" — if
+        // they're still pointing at the pre-deploy formation slot, the stuck
+        // detector treats every step as movement away from anchor and either
+        // accumulates stuckTimer or triggers ghost mode (siege-only after the
+        // v4.2.3 fix, but clearing is still defensive).
+        if (u.anchorX !== undefined)  u.anchorX = u.x;
+        if (u.anchorY !== undefined)  u.anchorY = u.y;
+        u.stuckTimer    = 0;
+        u.ghostTimer    = 0;
+        if (u.alpha !== undefined && u.alpha < 1) u.alpha = 1.0;
+
+        // ai_categories.js stuckLog (used in siege _handleMovement, but
+        // defensively cleared in case any code path checks it):
+        if (u.stuckLog) {
+          u.stuckLog.x = u.x;
+          u.stuckLog.y = u.y;
+          u.stuckLog.ticks = 0;
+        }
+
+        // ai_categories priority/cooldown locks that could short-circuit movement:
+        u.priorityOverride  = false;
+        u.unstickCooldown   = 0;
+        u.randomPanicTimer  = 0;
+        u.ladderSlideTimer  = 0;
+        u.escapePoint       = null;
+        u.escapeType        = null;
+        u.breachTimestamp   = null;
+
+        // Cooldown bleed — if BLS set a high cooldown to prevent pre-deploy
+        // shooting (commander only — but defensive on all units), make sure
+        // it's reset so the unit can fight on the very next frame.
+        if (u.cooldown > 30) u.cooldown = 0;
+
+        // Animation state must be neutral or _handleMovement's hasMoved check
+        // might be confused by a stale "FLEEING" state from a previous battle:
+        if (u.state === 'FLEEING' || u.state === 'retreated') {
+          u.state = 'idle';
+        }
+      });
+
+      if (_isRiverBattleCached) {
+        // River battles charge straight in — no formation pause
+      } else if (skipForming) {
+        // Issue immediate advance waypoints so units start walking on the
+        // very next frame instead of waiting for the first tick (500 ms).
+        const playerCentroid = centroid(playerUnits);
+        const { avgSpeed } = analyseEnemy(enemyUnits);
+        executeAdvancing(enemyUnits, playerCentroid, _formationStyle, avgSpeed);
+      } else {
         // Land battles start with the formation pause
-        const pc = centroid(playerUnits);
         executeForming(enemyUnits);
       }
-      // Note: We removed the instant "executeRiverCharge" and "teardown" here
-      // so that tickRiver() is allowed to run its new logic on the interval.
     }
 
     // Start the heartbeat interval

@@ -743,7 +743,7 @@ function initializeNPCs(cities, mapData, tileSize, cols, rows, padX, padY) {
     // no-op; hakata_bay_scenario.install() re-stamps __npcSpawnBans after this call
     // anyway (it handles exactly this case in its own re-stamp comment).
     // FIX: guard both Story 1 and Story 2 campaign sessions.
-    if (!window.__campaignStory1Active && !window.__campaignStory2Active) {
+    if (!window.__campaignStory1Active && !window.__campaignStory2Active && !window.__campaignStory3Active) {
         window.__npcSpawnBans        = null;
         window.__activeScenario      = null;
         window.__mongolWaveAllowed   = false;

@@ -1,6 +1,6 @@
 // ============================================================================
 // MONGOL CONQUEST OF WESTERN XIA — THE MARCH SOUTH
-// mongolconquestxia_scenario.js  v6.0
+// mongolconquestxia_scenario.js  v7.4  (engine-integrated + ending)
 // ============================================================================
 //
 // Campaign: Dawn of Gunpowder — Story 2  (Mongol perspective)
@@ -215,22 +215,14 @@ var CONFIG = {
         startY:   110,
         spacing:    5,   // v6.0 — very tight, almost touching
 
+        // v7.0 — reduced from 15 down to 5 NPCs total (leader + 4 followers).
+        //         Kept the high-profile commanders the dialogues reference.
         names: [
             "Genghis Khan",          //  0 — leader
             "Subutai",               //  1
             "Tolui Khan",            //  2
-            "Ögedei Khan",           //  3
-            "Chagaan Noyan",         //  4
-            "Muqali's Successor",    //  5
-            "Jebe's Vanguard",       //  6
-            "Right Tümen Noyan",     //  7
-            "Center Tümen Noyan",    //  8
-            "Left Tümen Noyan",      //  9
-            "Keshig Commander",      // 10
-            "Siege Train Captain",   // 11
-            "Supply Train Noyan",    // 12
-            "Rearguard Noyan",       // 13
-            "Messenger Corps Chief"  // 14 — tail (escort reference NPC)
+            "Chagaan Noyan",         //  3
+            "Messenger Corps Chief"  //  4 — tail (escort reference NPC)
         ],
 
         troops:  100,
@@ -278,27 +270,26 @@ var CONFIG = {
     //   Xiliang            — Wuwei; surrenders
     //   Xingqing (Zhongxing) — capital siege; Genghis dies during siege
     //
+    // v7.0 — ISSUE 7 FIX: convoy route now ENDS at Shazhou (Subutai lingers).
+    //         Genghis Khan's detachment is split off at the divide trigger and
+    //         heads to Suzhou via a separate auto-march loop, where it begins
+    //         its own siege independently. The player travels with Subutai's
+    //         column. After Shazhou the convoy stops and Subutai stays there.
     convoyRoute: [
-        { cityName: "Khara-Khoto",    stayMs: 28000,  onArriveTriggerId: "t_arrive_KharaKhoto"             },
-        { cityName: "Army Divide Point",     stayMs:  9000,  onArriveTriggerId: "t_arrive_divide"              },
-        // ── Subutai's western corridor: westward order from divide point ───────
-        { cityName: "Yanchi Pass Fort",      stayMs: 18000,  onArriveTriggerId: "t_mission_yanchi"             },
-        { cityName: "Changle",               stayMs: 22000,  onArriveTriggerId: "t_mission_changle_ultimatum"  },
-        { cityName: "Guazhou",               stayMs: 16000,  onArriveTriggerId: "t_mission_guazhou_screen"     },
-        { cityName: "Shazhou",               stayMs: 35000,  onArriveTriggerId: "t_mission_shazhou_stuck"      },
-        // ── Player rides east alone; rejoins Genghis near Suzhou ─────────────
-        { cityName: "Suzhou",                stayMs: 25000,  onArriveTriggerId: "t_arrive_suzhou"              },
-        { cityName: "Ganzhou",               stayMs: 38000,  onArriveTriggerId: "t_arrive_ganzhou"             },
-        { cityName: "Xiliang",               stayMs: 10000,  onArriveTriggerId: "t_arrive_xiliang"             },
-        { cityName: "Xingqing (Zhongxing)",  stayMs: 45000,  onArriveTriggerId: "t_arrive_xingqing"           },
+        { cityName: "Heishui Commandary",    stayMs: 28000,  onArriveTriggerId: "t_arrive_KharaKhoto"            },
+        { cityName: "Army Divide Point",     stayMs:  9000,  onArriveTriggerId: "t_arrive_divide"                },
+        { cityName: "Yanchi Pass Fort",      stayMs: 18000,  onArriveTriggerId: "t_mission_yanchi"               },
+        // Subutai's western corridor terminal — convoy lingers indefinitely.
+        { cityName: "Shazhou",               stayMs: 9999999,onArriveTriggerId: "t_mission_shazhou_beacon"       },
     ],
 
     // ── CONVOY MOVEMENT SPEEDS ────────────────────────────────────────────────
     // Half-speed march pace for v6.0 — slow, realistic column movement.
     // followerPxSec slightly above leader so stragglers gradually close up.
+    // v7.3 R1 — Mongol NPC speeds +30%: leader 7→9, follower 10→13.
     convoySpeed: {
-        leaderPxSec:    7,
-        followerPxSec: 10,
+        leaderPxSec:    9,
+        followerPxSec: 13,
         arrivalPx:       8
     },
 
@@ -320,7 +311,8 @@ var CONFIG = {
 
     // ── ESCORT DISTANCES (player ↔ convoy tail NPC) ───────────────────────────
     escort: {
-        tailId:   "convoy_npc_14",  // storyId of the tail NPC
+        // v7.0 — tail is now convoy_npc_4 (was _14) after roster reduction.
+        tailId:   "convoy_npc_4",   // storyId of the tail NPC
         warnPx:   200,              // beyond this → warning every 5 s
         failPx:   500               // beyond this → defeat + menu reload
     },
@@ -560,11 +552,19 @@ var STORY_INTRO = {
         ms:       4800
     },
 
-    art:             ART_PATHS.marching_desert,
-    art2:            ART_PATHS.hexi_mountains,
-    art2OnLine:      4,
-    art2CrossfadeMs: 1300,
-    art2Caption:     "The KharaKhoto valley. One hundred and eighty thousand men. North to south.",
+    art:         ART_PATHS.marching_desert,
+    art2:        ART_PATHS.hexi_mountains,
+    art2OnLine:  4,          // Narrator: "Genghis Khan understood the weakness of such a defence"
+    art2Caption: "The KharaKhoto valley. One hundred and eighty thousand men. North to south.",
+
+    art3:        ART_PATHS.siege_prepare,
+    art3OnLine:  5,          // Subutai: "We are close to Khara-Khoto, the first city of the Tanguts"
+    art3Caption: "The Mongol vanguard masses before the walls of Khara-Khoto.",
+
+    // art2CrossfadeMs is intentionally removed.  The old dismiss+setTimeout approach
+    // left a 1300 ms black void between images.  scenario_triggers.js now performs an
+    // instant background-image swap (showArt directly, no dismissArt call), so no
+    // cross-fade delay is needed and the property is unused.
 
     artMs:    5200,
     kenburns: true,
@@ -676,11 +676,92 @@ var SCENARIO_VARS = {
 // DATA
 // ============================================================================
 
+// v7.0 — ISSUE 10: STORY QUEST CATALOGUE
+// Mirrors how Hakata Bay (Story 1) defines a top-level storyQuests array that
+// the StoryQuests module loads and auto-advances. Each entry is anchored to a
+// city; triggers call story_quest_set / story_quest_complete to step the chain.
+var STORY_QUESTS = [
+    {
+        id:           "sq2_sack_kharakhoto",
+        title:        "Sack Khara-Khoto (Heishui Commandary)",
+        description:  "Breach the Black City and break the northern Xia frontier.",
+        x:            1720, y: 598,
+        radius:       320,
+        isMain:       true,
+        autoActivate: true,
+        noAutoComplete: true
+    },
+    {
+        id:           "sq2_follow_subutai",
+        title:        "Follow Subutai west",
+        description:  "Stay close to Subutai's tümen through the western corridor.",
+        x:            900, y: 1000,
+        radius:       400,
+        autoActivate: true,
+        dependsOn:    "sq2_sack_kharakhoto",
+        noAutoComplete: true
+    },
+    {
+        id:           "sq2_raid_yanchi",
+        title:        "Raid Yanchi Pass Fort",
+        description:  "Storm the granary fort before it signals Shazhou.",
+        x:            900, y: 1000,
+        radius:       320,
+        autoActivate: true,
+        dependsOn:    "sq2_follow_subutai",
+        noAutoComplete: true
+    },
+    {
+        id:           "sq2_take_shazhou",
+        title:        "Take Shazhou with Subutai",
+        description:  "Destroy the beacon and break Shazhou's outer wall.",
+        x:            285, y: 1048,
+        radius:       320,
+        autoActivate: true,
+        dependsOn:    "sq2_raid_yanchi",
+        noAutoComplete: true
+    },
+    {
+        id:           "sq2_message_to_khan",
+        title:        "Messenger ride east to Genghis Khan",
+        description:  "Subutai lingers in Shazhou. Carry word east to the Great Khan at Suzhou.",
+        x:            1160, y: 1257,
+        radius:       360,
+        autoActivate: true,
+        dependsOn:    "sq2_take_shazhou",
+        triggerOnArrive: "t_arrive_suzhou",
+        noAutoComplete: true
+    },
+    {
+        id:           "sq2_ganzhou",
+        title:        "Reach Ganzhou with Genghis Khan",
+        description:  "Chagaan Noyan's birthplace — march east with the host.",
+        x:            1700, y: 1450,
+        radius:       360,
+        autoActivate: true,
+        dependsOn:    "sq2_message_to_khan",
+        triggerOnArrive: "t_arrive_ganzhou",
+        noAutoComplete: true
+    },
+    {
+        id:           "sq2_xingqing",
+        title:        "The Capital Siege — Xingqing",
+        description:  "March on Xingqing. Finish the campaign.",
+        x:            2400, y: 1900,
+        radius:       400,
+        autoActivate: true,
+        dependsOn:    "sq2_ganzhou",
+        triggerOnArrive: "t_arrive_xingqing",
+        noAutoComplete: true
+    }
+];
+
 var DATA = {
     playerSetup:   PLAYER_SETUP,
     importantNpcs: IMPORTANT_NPCS,
     storyIntro:    STORY_INTRO,
     scenarioVars:  SCENARIO_VARS,
+    storyQuests:   STORY_QUESTS,
     triggers:      null
 };
 
@@ -747,6 +828,42 @@ var _CONVOY_STOP_ACTIONS = CONFIG.convoyRoute.map(function (stop) {
 //   t_arrive_xingqing     — Capital siege; Genghis's health fails
 // ============================================================================
 
+
+// v7.2 — ENGINE FIX E4: AUTO-TAKEOVER HELPER
+// _mcStoryTake(cityName, attackerColor) — flips city.faction to Mongol Empire,
+// sets color, marks __mc_storyProtected, and pushes an "Overtaken" banner via
+// the existing siege-outcome system. Called from every arrival trigger AFTER
+// surrender dialogue but BEFORE the player can interact with the city.
+function _mcStoryTake(cityName, attackerColor) {
+    return { type: "custom_js", params: {
+        code: [
+            "var cName = " + JSON.stringify(cityName) + ";",
+            "var col   = " + JSON.stringify(attackerColor || "#c8a200") + ";",
+            "var arrs = [window.cities_sandbox, window.cities];",
+            "var found = false;",
+            "arrs.forEach(function(arr) {",
+            "    if (!Array.isArray(arr)) return;",
+            "    for (var i = 0; i < arr.length; i++) {",
+            "        if (arr[i] && arr[i].name === cName) {",
+            "            arr[i].faction = 'Mongol Empire';",
+            "            arr[i].color = col;",
+            "            arr[i].isUnderSiege = false;",
+            "            arr[i].__mc_storyProtected = true;   // siege button refused for this city",
+            "            found = true;",
+            "        }",
+            "    }",
+            "});",
+            "if (!found) console.warn('[MC] _mcStoryTake — city not found: ' + cName);",
+            "else console.log('[MC] Story take-over: ' + cName + ' is now Mongol Empire (color=' + col + ', protected).');",
+            "window.__mc_siegeOutcomes = window.__mc_siegeOutcomes || {};",
+            "window.__mc_siegeOutcomes[cName] = { msg: '🏴 Overtaken!', color: '#44dd88', expires: Date.now() + 4000 };",
+            "if (typeof window.logGameEvent === 'function') {",
+            "    window.logGameEvent('🏴 ' + cName + ' has fallen to the Mongol Empire.', 'war');",
+            "}"
+        ].join("\n")
+    }};
+}
+
 var TRIGGERS = [
 
     // ════════════════════════════════════════════════════════════════════════
@@ -809,6 +926,160 @@ var TRIGGERS = [
         actions: (function () {
             var acts = [];
 
+            // 0. Inject virtual waypoints ───────────────────────────────────────────
+            // "Army Divide Point" and "Yanchi Pass Fort" are narrative story locations
+            // that have no named city entry in story2_map_and_update.js.  The patched
+            // convoy tick calls _cityPos(stop.cityName) which does an exact string
+            // match against window.cities_sandbox / window.cities.  Without these
+            // entries the convoy silently skips both stops (routeIndex++) and jumps
+            // straight to the first real city it recognises.
+            // We push lightweight objects with just the fields the convoy needs
+            // (name, x, y) into both city arrays here, before start_npc_convoy runs,
+            // so _cityPos finds them.  isVirtual:true prevents siege/UI systems from
+            // treating them as real population centres.
+            // Pixel coordinates (world: 4000 × 2992):
+            //   Army Divide Point  — south of Heishui (1720,598), north of Suzhou (1160,1257)
+            //   Yanchi Pass Fort   — west of the divide, east of Guazhou (720,1018)
+            // v7.2 — ENGINE FIX E3: waypoint cities Army Divide Point / Yanchi Pass
+            // Fort are NEVER pushed to window.cities or window.cities_sandbox.  The
+            // sandbox draw loop iterates the cities array and draws every entry; the
+            // only way to guarantee invisibility is to keep them OUT of that array.
+            // The convoy's _cityPos() helper resolves them from a static lookup table
+            // (see the _VIRT_POS object inside the patched convoy tick below).
+            //
+            // Yanchi Pass Fort *was* drawn before because we added it as a city for
+            // the convoy. Now it lives only in _VIRT_POS — the convoy still arrives,
+            // fires its trigger, but the player sees nothing at that pixel.
+            acts.push({ type: "custom_js", params: {
+                code: "console.log('[MC] v7.2 — virtual waypoints kept out of cities array; rendered only via _VIRT_POS lookup.');"
+            }});
+
+            // v7.3 R0 — also wrap moveNpc / moveOneNPC if engine exposes them.
+            // Some games run their movement loop separately from updateNPCs;
+            // covering more entry points makes the dialogue freeze airtight.
+            acts.push({ type: "custom_js", params: {
+                code: [
+                    "if (!window.__mc_moveLoop_patched) {",
+                    "    window.__mc_moveLoop_patched = true;",
+                    "    ['moveNPC','moveOneNPC','tickNPC','updateOneNPC','npcStep'].forEach(function(fn) {",
+                    "        if (typeof window[fn] !== 'function') return;",
+                    "        var _orig = window[fn];",
+                    "        window[fn] = function() { if (window.__ST_dialogueBusy) return; return _orig.apply(this, arguments); };",
+                    "        console.log('[MC] v7.3 — wrapped ' + fn + ' to honour dialogue pause.');",
+                    "    });",
+                    "}"
+                ].join("\n")
+            }});
+
+            // v7.3 R0 — ALSO log every main quest into quest_system.js's player.questLog
+            // (not just StoryQuests). Hakata-style players use this log; v7.2 only
+            // added story_quest_set which is a separate waypoint system.
+            acts.push({ type: "custom_js", params: {
+                code: [
+                    "function _mcAddQuestLog(q) {",
+                    "    if (typeof window.player === 'undefined' || !window.player) return;",
+                    "    if (!window.player.questLog) window.player.questLog = { active: [], completed: [] };",
+                    "    var L = window.player.questLog;",
+                    "    if (L.active.some(function(x){return x.id===q.id;}) || L.completed.some(function(x){return x.id===q.id;})) return;",
+                    "    L.active.push(q);",
+                    "    if (typeof window.logGameEvent === 'function') window.logGameEvent('📜 Quest: ' + q.title, 'objective');",
+                    "    console.log('[MC] v7.3 — quest logged in player.questLog: ' + q.id);",
+                    "}",
+                    "window._mcAddQuestLog = _mcAddQuestLog;",
+                    "function _mcCompleteQuestLog(id) {",
+                    "    if (!window.player || !window.player.questLog) return;",
+                    "    var L = window.player.questLog;",
+                    "    for (var i = 0; i < L.active.length; i++) {",
+                    "        if (L.active[i].id === id) {",
+                    "            var q = L.active.splice(i, 1)[0];",
+                    "            q.completedAt = Date.now();",
+                    "            L.completed.push(q);",
+                    "            if (typeof window.logGameEvent === 'function') window.logGameEvent('✅ Quest complete: ' + q.title, 'objective');",
+                    "            return;",
+                    "        }",
+                    "    }",
+                    "}",
+                    "window._mcCompleteQuestLog = _mcCompleteQuestLog;",
+                    "// Update a live quest's description text (called at each story beat)",
+                    "function _mcUpdateQuestDesc(id, desc) {",
+                    "    if (!window.player || !window.player.questLog) return;",
+                    "    var q = window.player.questLog.active.find(function(x){ return x.id === id; });",
+                    "    if (q) { q.description = desc; }",
+                    "}",
+                    "window._mcUpdateQuestDesc = _mcUpdateQuestDesc;",
+                    "// Seed the seven main story quests immediately",
+                    "var _quests = [",
+                    "    { id:'sq2_sack_kharakhoto',  title:'Sack Khara-Khoto (Heishui Commandary)', type:'main', description:'The convoy has arrived at Heishui Commandary. Hold position while the siege unfolds — the city must fly Mongol colours before we march south.' },",
+                    "    { id:'sq2_follow_subutai',   title:'Follow Subutai west', type:'main', description:'Genghis Khan drives south. You ride with Subutai\\'s tümen along the western corridor. Keep pace with the column — do not fall behind.' },",
+                    "    { id:'sq2_raid_yanchi',      title:'Raid Yanchi Pass Fort', type:'main', description:'Subutai orders you to clear Yanchi Pass Fort. Strike fast — the garrison must not be allowed to warn the cities west.' },",
+                    "    { id:'sq2_take_shazhou',     title:'Take Shazhou with Subutai', type:'main', description:'Ride with Subutai\\'s column to Shazhou. The city controls the western end of the Hexi Corridor.' },",
+                    "    { id:'sq2_message_to_khan',  title:'Messenger ride east to Genghis Khan', type:'main', description:'Shazhou is taken. Subutai holds the west. Ride east alone to Suzhou — find the Great Khan and report the western corridor is sealed.' },",
+                    "    { id:'sq2_ganzhou',          title:'Reach Ganzhou with Genghis Khan', type:'main', description:'Genghis Khan has taken Suzhou and marches east. Join the main host at Ganzhou — Chagaan Noyan\\'s birthplace awaits.' },",
+                    "    { id:'sq2_xingqing',         title:'The Capital Siege — Xingqing', type:'main', description:'The final march. Xingqing, capital of the Western Xia, must fall. End the campaign.' }",
+                    "];",
+                    "setTimeout(function() {",
+                    "    _mcAddQuestLog(_quests[0]);   // open first quest now; rest unlock at story beats",
+                    "}, 2000);",
+                    "console.log('[MC] v7.3 — Quest log helpers installed.');"
+                ].join("\n")
+            }});
+
+            // v7.2 — ENGINE FIX E1: PAUSE ALL NPCs DURING DIALOGUE
+            // Wraps window.updateNPCs so the entire NPC simulation freezes whenever
+            // a dialogue card is on screen. Previously the convoy tick was paused
+            // but every other NPC (cosmetic civilians, enemy garrisons, etc.) kept
+            // moving — making the world look alive while a "frozen" cutscene played.
+            acts.push({ type: "custom_js", params: {
+                code: [
+                    "if (!window.__mc_updateNPCs_paused_patched) {",
+                    "    window.__mc_updateNPCs_paused_patched = true;",
+                    "    var _wait = setInterval(function() {",
+                    "        if (typeof window.updateNPCs !== 'function') return;",
+                    "        clearInterval(_wait);",
+                    "        var _origUpdate = window.updateNPCs;",
+                    "        window.updateNPCs = function() {",
+                    "            if (window.__ST_dialogueBusy) return;   // freeze every NPC while dialogue shows",
+                    "            return _origUpdate.apply(this, arguments);",
+                    "        };",
+                    "        console.log('[MC] v7.2 — updateNPCs now pauses on dialogue.');",
+                    "    }, 250);",
+                    "}"
+                ].join("\n")
+            }});
+
+            // v7.4 — fur-cap wrapper removed: engine-side drawFactionHat() handles all factions now.
+
+// v7.2 — ENGINE FIX E2: BLOCK 'Camp beside Settlement' (siege menu) for
+            // any city flagged __mc_storyProtected. Story arrivals flip this flag
+            // before the player can reach the settlement panel; the button still
+            // shows but the call is short-circuited so the player can't get stuck
+            // in a story-controlled siege state.
+            acts.push({ type: "custom_js", params: {
+                code: [
+                    "if (!window.__mc_initiatePlayerSiege_patched) {",
+                    "    window.__mc_initiatePlayerSiege_patched = true;",
+                    "    var _waitSiege = setInterval(function() {",
+                    "        if (typeof window.initiatePlayerSiege !== 'function') return;",
+                    "        clearInterval(_waitSiege);",
+                    "        var _origSiege = window.initiatePlayerSiege;",
+                    "        window.initiatePlayerSiege = function(city) {",
+                    "            if (city && city.__mc_storyProtected) {",
+                    "                if (window.StoryPresentation && window.StoryPresentation.showSubtitle) {",
+                    "                    window.StoryPresentation.showSubtitle(",
+                    "                        '⚔️ This city is being taken by the Mongol host. Stand aside.',",
+                    "                        4000, '#f5d76e');",
+                    "                }",
+                    "                console.log('[MC] Player siege blocked for story-protected city: ' + city.name);",
+                    "                return;",
+                    "            }",
+                    "            return _origSiege.apply(this, arguments);",
+                    "        };",
+                    "        console.log('[MC] v7.2 — initiatePlayerSiege now refuses story-protected cities.');",
+                    "    }, 250);",
+                    "}"
+                ].join("\n")
+            }});
+
             // 1. War relation
             acts.push({ type: "set_relation", params: { a: FAC.PLAYER, b: FAC.ENEMY, rel: "War" } });
 
@@ -870,7 +1141,14 @@ var TRIGGERS = [
                     "        }",
                     "        return null;",
                     "    }",
+                    "    // v7.0 — also resolve invisible waypoints from a static table",
+                    "    // so we never depend on them being in window.cities.",
+                    "    var _VIRT_POS = {",
+                    "        'Army Divide Point': { x: 1440, y: 850 },",
+                    "        'Yanchi Pass Fort':  { x:  900, y:1000 }",
+                    "    };",
                     "    function _cityPos(name) {",
+                    "        if (_VIRT_POS[name]) return _VIRT_POS[name];",
                     "        var arr = window.cities_sandbox || window.cities || [];",
                     "        for (var i = 0; i < arr.length; i++) {",
                     "            if (arr[i].name === name) return arr[i];",
@@ -947,6 +1225,8 @@ var TRIGGERS = [
                     "        for (var i = 0; i < _S.followerIds.length; i++) {",
                     "            var npc = _findNpc(_S.followerIds[i]);",
                     "            if (!npc || npc === window.player) continue;",
+                    "            // v7.0 — ISSUE 7 FIX: skip detached NPCs (Genghis's eastern army).",
+                    "            if (npc.__mc_detached) continue;",
                     "            if (!isFinite(npc.x) || !isFinite(npc.y)) { npc.x = leader.x; npc.y = leader.y; continue; }",
                     "",
                     "            var slot = _S.formationSlots[i] || _slotFor3Col(i);",
@@ -977,10 +1257,21 @@ var TRIGGERS = [
                     "        var dt = Math.min(timestamp - _S._lastMs, 100);",
                     "        _S._lastMs = timestamp;",
                     "",
+                    "        // v7.0 — ISSUE 0 FIX: PAUSE EVERYTHING DURING DIALOGUE",
+                    "        // Whenever a dialogue is on-screen, freeze the leader AND",
+                    "        // every follower in place so the convoy doesn't keep marching",
+                    "        // off-camera while the player reads the lines.",
+                    "        if (window.__ST_dialogueBusy) {",
+                    "            _S._rafId = requestAnimationFrame(_patchedConvoyTick);",
+                    "            return;",
+                    "        }",
+                    "",
                     "        var leader = _findNpc(_S.leaderId);",
                     "",
                     "        if (_S.staying || !leader) {",
-                    "            if (leader) _safeFollowers(leader, dt);",
+                    "            // LAYER 1 FREEZE: While __mc_heishuiFreeze is active, NPCs do NOT",
+                    "            // move at all — not even the formation-holding _safeFollowers tick.",
+                    "            if (!window.__mc_heishuiFreeze && leader) _safeFollowers(leader, dt);",
                     "            _S._rafId = requestAnimationFrame(_patchedConvoyTick);",
                     "            return;",
                     "        }",
@@ -1072,7 +1363,7 @@ var TRIGGERS = [
 
             // 8a. Subtitle at boot
             acts.push(_sub(
-                "KharaKhoto Commandary — Autumn 1225.  Follow Genghis Khan's column south.",
+                "Heishui Commandary (Khara-Khoto) — Autumn 1225.  Follow Genghis Khan's column south.",
                 8000, "#f5d76e"
             ));
 
@@ -1082,6 +1373,15 @@ var TRIGGERS = [
                 "Temür Noyan rides at the rear. Follow the convoy south. Do not fall behind.",
                 "general"
             ));
+
+            // v7.0 — ISSUE 10: open first main quest in the log
+            acts.push({ type: "story_quest_set", params: {
+                id:          "sq2_sack_kharakhoto",
+                title:       "Sack Khara-Khoto (Heishui Commandary)",
+                description: "Breach the Black City and break the northern Xia frontier.",
+                x: 1720, y: 598, radius: 320,
+                noAutoComplete: true
+            }});
 
             // 9. Vars + spawn ban restamp
             acts.push({ type: "set_var", params: { name: "phase",         value: "march" } });
@@ -1108,6 +1408,9 @@ var TRIGGERS = [
         conditions: [
             { type: "custom_js", params: {
                 code: [
+                    "// v7.0 — ISSUE 3 FIX: respect the permanent-disable flag set",
+                    "// when Heishui Commandary falls.",
+                    "if (window.__mc_escortPermDisabled) return false;",
                     "if (!window.__mc_escortActive) return false;",
                     "if (typeof window.__mc_warnLast === 'undefined') window.__mc_warnLast = -99;",
                     "if (ctx.elapsedSec - window.__mc_warnLast < 5) return false;",
@@ -1156,6 +1459,8 @@ var TRIGGERS = [
         conditions: [
             { type: "custom_js", params: {
                 code: [
+                    "// v7.0 — ISSUE 3 FIX: never trigger menu-reload after Heishui falls.",
+                    "if (window.__mc_escortPermDisabled) return false;",
                     "if (!window.__mc_escortActive) return false;",
                     "var _npc = (window.globalNPCs || []).find(function(n) {",
                     "    return n.storyId === '" + ESC.tailId + "' || n.id === '" + ESC.tailId + "__story';",
@@ -1225,6 +1530,51 @@ var TRIGGERS = [
     },
 
     // ════════════════════════════════════════════════════════════════════════
+    // T0.FOOD_REPLENISH — v7.0 ISSUE 5
+    //
+    // Every 30 s, top off the food of every convoy NPC AND the player if it
+    // has fallen below the replenish threshold. Models foraging / supply
+    // trains so the campaign doesn't end early to starvation. Threshold
+    // 200, replenished up to 800.
+    // ════════════════════════════════════════════════════════════════════════
+    {
+        id: "t0_food_replenish",
+        name: "Ongoing — Mongol Food Replenish (every 30 s)",
+        enabled: true, once: false, activatedBy: null,
+        conditions: [
+            { type: "custom_js", params: {
+                code: [
+                    "if (typeof window.__mc_foodLast === 'undefined') window.__mc_foodLast = 0;",
+                    "if (ctx.elapsedSec - window.__mc_foodLast < 30) return false;",
+                    "window.__mc_foodLast = ctx.elapsedSec;",
+                    "return true;"
+                ].join("\n")
+            }}
+        ],
+        actions: [
+            { type: "custom_js", params: {
+                code: [
+                    "var THRESHOLD = 200, REFILL = 800;",
+                    "var topped = 0;",
+                    "(window.globalNPCs || []).forEach(function(n) {",
+                    "    if (!n) return;",
+                    "    var isConvoy = (n.storyId && n.storyId.indexOf('convoy_npc_') === 0) ||",
+                    "                   (n.id && n.id.indexOf('convoy_npc_') === 0);",
+                    "    if (!isConvoy) return;",
+                    "    if (typeof n.food === 'number' && n.food < THRESHOLD) {",
+                    "        n.food = REFILL; topped++;",
+                    "    }",
+                    "});",
+                    "if (window.player && typeof window.player.food === 'number' && window.player.food < THRESHOLD) {",
+                    "    window.player.food = REFILL; topped++;",
+                    "}",
+                    "if (topped > 0) console.log('[MC] Food replenished for ' + topped + ' unit(s).');"
+                ].join("\n")
+            }}
+        ]
+    },
+
+    // ════════════════════════════════════════════════════════════════════════
     // CITY ARRIVAL TRIGGERS
     // Each fires once when the convoy arrives at its stop (via onArriveTriggerId).
     // Sequences use staggered subtitles + a log entry to simulate siege activity.
@@ -1282,13 +1632,179 @@ var TRIGGERS = [
                     "// matching the convoy stayMs (28000ms) so the army does not",
                     "// depart before the sack is announced.",
                     "var SP = window.StoryPresentation;",
+                    "// ══════════════════════════════════════════════════════════════",
+                    "// TRIPLE-LAYER NPC FREEZE — holds ALL convoy NPCs stationary at",
+                    "// Heishui until the city faction confirms 'Mongol Empire'.",
+                    "// Cleared only inside the verified faction-switch block below.",
+                    "// ══════════════════════════════════════════════════════════════",
+                    "// LAYER 1: __mc_heishuiFreeze — read by the patched convoy tick;",
+                    "//          skips _safeFollowers entirely so NPCs don't wobble.",
+                    "window.__mc_heishuiFreeze = true;",
+                    "// LAYER 2: pin every convoy NPC position right now so they can't",
+                    "//          drift between this tick and the freeze check.",
+                    "(function _pinConvoyNPCs() {",
+                    "    var ids = (window.__ScenarioConvoy && window.__ScenarioConvoy.followerIds) || [];",
+                    "    var leaderId = window.__ScenarioConvoy && window.__ScenarioConvoy.leaderId;",
+                    "    var allIds = leaderId ? [leaderId].concat(ids) : ids;",
+                    "    allIds.forEach(function(sid) {",
+                    "        var npc = (window.globalNPCs || []).find(function(n) {",
+                    "            return n && (n.storyId === sid || n.id === sid || n.id === sid + '__story');",
+                    "        });",
+                    "        if (!npc) return;",
+                    "        npc.__mc_frozenX = npc.x;",
+                    "        npc.__mc_frozenY = npc.y;",
+                    "        npc.__mc_frozen  = true;",
+                    "    });",
+                    "    console.log('[MC] Heishui freeze: pinned ' + allIds.length + ' convoy NPCs.');",
+                    "})();",
+                    "// LAYER 3: an interval that re-applies frozen positions every 50ms",
+                    "//          as a hard backstop in case any other system moves NPCs.",
+                    "var _freezeInterval = setInterval(function() {",
+                    "    if (!window.__mc_heishuiFreeze) { clearInterval(_freezeInterval); return; }",
+                    "    (window.globalNPCs || []).forEach(function(npc) {",
+                    "        if (!npc || !npc.__mc_frozen) return;",
+                    "        npc.x = npc.__mc_frozenX;",
+                    "        npc.y = npc.__mc_frozenY;",
+                    "        npc.isMoving = false;",
+                    "        npc.targetX  = npc.__mc_frozenX;",
+                    "        npc.targetY  = npc.__mc_frozenY;",
+                    "    });",
+                    "}, 50);",
                     "var subs = [",
                     "    [4000,  '🪨 Mongol catapults breach the north-wall parapet. Garrison archers retreat from the battlements.'],",
                     "    [8000,  '🔥 Water channel diverted. The cisterns will be dry by nightfall.'],",
                     "    [12000, '⚔️ Ram reaches the north gate. Tangut defenders fight street by street inside the walls.'],",
                     "    [16000, '🏴 The garrison commander is cut down in the market square. Resistance collapses.'],",
-                    "    [20000, '🏴 KharaKhoto Commandary is sacked. Khara-Khoto — the Black City — falls to the Mongol Empire.']",
+                    "    [20000, '🏴 Heishui Commandary (Khara-Khoto) is OVERTAKEN — the Black City now flies Mongol colours.']",
                     "];",
+                    "// v7.0 — ISSUE 2 FIX: guaranteed city take-over at the end of the",
+                    "// 20-second sack timer. We flip the city's faction + color (just",
+                    "// like siege_system.js does on a successful conquest) and trigger",
+                    "// the Overtaken banner via __mc_siegeOutcomes so the world map",
+                    "// reflects the take-over before the army-divide phase begins.",
+                    "setTimeout(function() {",
+                    "    var arrs = [window.cities_sandbox, window.cities];",
+                    "    var attackerFaction = 'Mongol Empire';",
+                    "    var attackerColor = null;",
+                    "    if (window.FACTIONS && window.FACTIONS[attackerFaction] && window.FACTIONS[attackerFaction].color) {",
+                    "        attackerColor = window.FACTIONS[attackerFaction].color;",
+                    "    }",
+                    "    arrs.forEach(function(arr) {",
+                    "        if (!Array.isArray(arr)) return;",
+                    "        for (var i = 0; i < arr.length; i++) {",
+                    "            if (arr[i] && arr[i].name === 'Heishui Commandary') {",
+                    "                arr[i].faction = attackerFaction;",
+                    "                if (attackerColor) arr[i].color = attackerColor;",
+                    "                arr[i].isUnderSiege = false;",
+                    "                arr[i].__mc_storyProtected = true;   // v7.2 — block player siege menu",
+                    "                console.log('[MC] Heishui Commandary OVERTAKEN by Mongol Empire (faction+color updated).');",
+                    "            }",
+                    "        }",
+                    "    });",
+                    "    // ── CLEAR ALL THREE FREEZE LAYERS ─────────────────────────────────",
+                    "    // City is now confirmed Mongol — unpin NPCs and release the freeze.",
+                    "    window.__mc_heishuiFreeze = false;",
+                    "    (window.globalNPCs || []).forEach(function(npc) {",
+                    "        if (!npc || !npc.__mc_frozen) return;",
+                    "        delete npc.__mc_frozen;",
+                    "        delete npc.__mc_frozenX;",
+                    "        delete npc.__mc_frozenY;",
+                    "    });",
+                    "    console.log('[MC] Heishui freeze RELEASED — all layers cleared, Mongol faction confirmed.');",
+                    "    // Banner via siege outcome system (Overtaken green text)",
+                    "    if (window.__mc_siegeOutcomes) {",
+                    "        window.__mc_siegeOutcomes['Heishui Commandary'] = {",
+                    "            msg:'🏴 Overtaken!', color:'#44dd88',",
+                    "            expires: Date.now() + 4000",
+                    "        };",
+                    "    }",
+                    "    // ISSUE 3: disable the too-far-away escort fail FOREVER after",
+                    "    // Heishui falls. Player follows Subutai for the rest of Story 2.",
+                    "    window.__mc_escortActive = false;",
+                    "    window.__mc_escortPermDisabled = true;",
+                    "    console.log('[MC] Escort fail disabled permanently — Heishui has fallen.');",
+                    "    // v7.3 R3 — fade + teleport player to Subutai, then stick-mode until messenger arc.",
+                    "    var SP = window.StoryPresentation;",
+                    "    if (SP && SP.fadeOut) SP.fadeOut(900, '#000000');",
+                    "    setTimeout(function() {",
+                    "        var subutai = (window.globalNPCs || []).find(function(n) {",
+                    "            return n.storyId === 'convoy_npc_1' || n.id === 'convoy_npc_1__story';",
+                    "        });",
+                    "        if (subutai && window.player) {",
+                    "            var rx = (Math.random() * 7 + 3) * (Math.random() < 0.5 ? -1 : 1);",
+                    "            var ry = (Math.random() * 7 + 3) * (Math.random() < 0.5 ? -1 : 1);",
+                    "            window.player.x = subutai.x + rx;",
+                    "            window.player.y = subutai.y + ry;",
+                    "            console.log('[MC] v7.3 R3 — player teleported to Subutai at offset (' + rx.toFixed(1) + ',' + ry.toFixed(1) + ')');",
+                    "        }",
+                    "        if (SP && SP.fadeIn) SP.fadeIn(900);",
+                    "        // Activate stick-mode: v7.3 R4 — setInterval(100ms) replaces rAF to stop bouncing.",
+                    "        // Correction is skipped whenever the player is pressing WASD so there is no",
+                    "        // invisible-force fighting the input every frame.",
+                    "        window.__mc_stickToSubutai = true;",
+                    "        // ── FOLLOW HUD label ─────────────────────────────────────────────────",
+                    "        // Create a persistent on-screen reminder shown only while the player",
+                    "        // is idle (no WASD) and the drift correction is actively nudging them.",
+                    "        var _followHUD = document.getElementById('mc-follow-hud');",
+                    "        if (!_followHUD) {",
+                    "            _followHUD = document.createElement('div');",
+                    "            _followHUD.id = 'mc-follow-hud';",
+                    "            _followHUD.style.cssText = [",
+                    "                'position:fixed',",
+                    "                'bottom:18%',",
+                    "                'left:50%',",
+                    "                'transform:translateX(-50%)',",
+                    "                'background:rgba(0,0,0,0.72)',",
+                    "                'border:1px solid #e8a030',",
+                    "                'color:#e8a030',",
+                    "                'font-family:Georgia,serif',",
+                    "                'font-size:13px',",
+                    "                'font-style:italic',",
+                    "                'padding:7px 18px',",
+                    "                'border-radius:5px',",
+                    "                'z-index:9200',",
+                    "                'pointer-events:none',",
+                    "                'display:none',",
+                    "                'text-align:center',",
+                    "                'letter-spacing:0.5px'",
+                    "            ].join(';');",
+                    "            _followHUD.textContent = '🐎 Follow Subutai';",
+                    "            document.body.appendChild(_followHUD);",
+                    "        }",
+                    "        var _stickInterval = setInterval(function() {",
+                    "            if (!window.__mc_stickToSubutai) {",
+                    "                clearInterval(_stickInterval);",
+                    "                if (_followHUD) _followHUD.style.display = 'none';",
+                    "                console.log('[MC] v7.3 R4 — stick-to-Subutai released.');",
+                    "                return;",
+                    "            }",
+                    "            if (window.__ST_dialogueBusy) { if (_followHUD) _followHUD.style.display = 'none'; return; }",
+                    "            var sub = (window.globalNPCs || []).find(function(n) {",
+                    "                return n.storyId === 'convoy_npc_1' || n.id === 'convoy_npc_1__story';",
+                    "            });",
+                    "            if (!sub || !window.player || window.player.disableAICombat) { if (_followHUD) _followHUD.style.display = 'none'; return; }",
+                    "            // KEY FIX: skip correction while player is actively pressing WASD/arrows",
+                    "            var ks = window.keys || {};",
+                    "            var playerMoving = ks['w'] || ks['s'] || ks['a'] || ks['d'] ||",
+                    "                               ks['arrowup'] || ks['arrowdown'] || ks['arrowleft'] || ks['arrowright'];",
+                    "            var dx = sub.x - window.player.x, dy = sub.y - window.player.y;",
+                    "            var dist = Math.sqrt(dx*dx + dy*dy);",
+                    "            // Show the 'Follow Subutai' label only when the player is idle AND drifting",
+                    "            if (_followHUD) _followHUD.style.display = (!playerMoving && dist > 60) ? 'block' : 'none';",
+                    "            if (playerMoving) return;",
+                    "            if (dist > 300) {",
+                    "                // Safety-net hard snap only when very far away",
+                    "                window.player.x = sub.x + 4; window.player.y = sub.y + 4;",
+                    "            } else if (dist > 60) {",
+                    "                // Gentle drift toward Subutai when player is idle",
+                    "                window.player.x += dx * 0.18; window.player.y += dy * 0.18;",
+                    "            }",
+                    "        }, 100);",
+                    "    }, 1100);",
+                    "// v7.3 R4: Fire at 12 500ms (when the garrison commander falls — subtitle index 3).",
+                    "// This is well before the convoy departs at 28 000ms, so the world-map city",
+                    "// icon already shows Mongol colours BEFORE the army starts heading south.",
+                    "}, 12500);",
                     "(function _waitDialogueThenSubs() {",
                     "    if (window.__ST_dialogueBusy) { setTimeout(_waitDialogueThenSubs, 200); return; }",
                     "    subs.forEach(function(s) {",
@@ -1378,8 +1894,27 @@ var TRIGGERS = [
                       "The Hexi Corridor is about to be taken from both ends simultaneously.",
                 color: "#d4b886"
             }},
+            // v7.0 — ISSUE 10: advance the quest log past Khara-Khoto
+            { type: "story_quest_complete", params: { id: "sq2_sack_kharakhoto" } },
+            { type: "story_quest_set", params: {
+                id:          "sq2_follow_subutai",
+                title:       "Follow Subutai west",
+                description: "Stay close to Subutai's tümen through the western corridor.",
+                x: 900, y: 1000, radius: 400,
+                noAutoComplete: true
+            }},
+            { type: "custom_js", params: { code: [
+                "if (typeof window._mcCompleteQuestLog === 'function') window._mcCompleteQuestLog('sq2_sack_kharakhoto');",
+                "if (typeof window._mcUpdateQuestDesc === 'function')",
+                "    window._mcUpdateQuestDesc('sq2_follow_subutai', 'The army has divided. Genghis Khan drives south — you ride with Subutai westward. Keep pace with the column and do not fall behind.');"
+            ].join("\n") }},
             _sub("The army divides. Genghis Khan rides east — Subutai takes the western corridor.", 8000, "#f5d76e"),
-            _log("⚔️ 1225 — Khara-Khoto falls. The Mongol host divides: Genghis Khan drives south toward Suzhou; Subutai's tümen sweeps the western corridor.", "general")
+            _log("⚔️ 1225 — Khara-Khoto falls. The Mongol host divides: Genghis Khan drives south toward Suzhou; Subutai's tümen sweeps the western corridor.", "general"),
+            // v7.0 — ISSUE 3 FIX: surface a clear notice that the escort-fail",
+            // mechanic is gone for the western corridor. Player follows Subutai",
+            // closely until Shazhou; later a quest will redirect them to Genghis.",
+            _sub("📜 You now follow Subutai's column closely until Shazhou. The 'too-far' fail is OFF.", 7000, "#8bd8a0"),
+            _log("🛡 Escort restriction lifted — keep near Subutai until Shazhou is reached.", "general")
         ]
     },
 
@@ -1411,24 +1946,115 @@ var TRIGGERS = [
                       "You ride with the centre. Suzhou is three days' march ahead.",
                 color: "#d4b886"
             }},
+            // v7.0 — ISSUE 7 FIX: GENGHIS DETACHMENT BREAKS EAST TO SUZHOU
+            // Spawn an independent auto-march loop for Genghis Khan + Tolui Khan
+            // + Chagaan Noyan. They detach from the player's convoy, march east
+            // to Suzhou, and start their own siege. Subutai (NPC 1) becomes the
+            // new convoy leader; player's column heads west.
+            { type: "custom_js", params: {
+                code: [
+                    "(function _splitArmies() {",
+                    "    function _findNpc(id) {",
+                    "        var arr = window.globalNPCs || [];",
+                    "        for (var i = 0; i < arr.length; i++) {",
+                    "            if (arr[i] && (arr[i].storyId === id || arr[i].id === id + '__story')) return arr[i];",
+                    "        }",
+                    "        return null;",
+                    "    }",
+                    "    function _cityPos(name) {",
+                    "        var arr = window.cities_sandbox || window.cities || [];",
+                    "        for (var i = 0; i < arr.length; i++) {",
+                    "            if (arr[i].name === name) return arr[i];",
+                    "        }",
+                    "        return null;",
+                    "    }",
+                    "    var suzhou = _cityPos('Suzhou');",
+                    "    if (!suzhou) { console.warn('[MC] Suzhou not found for Genghis detachment'); return; }",
+                    "    var detachIds = ['convoy_npc_0', 'convoy_npc_2', 'convoy_npc_3'];",
+                    "    var detach = detachIds.map(_findNpc).filter(Boolean);",
+                    "    if (detach.length === 0) { console.warn('[MC] no detachment NPCs found'); return; }",
+                    "    // Mark these NPCs so the convoy patched tick ignores them",
+                    "    detach.forEach(function(n) { n.__mc_detached = true; });",
+                    "    // Hot-swap convoy leader to Subutai (convoy_npc_1) so the column",
+                    "    // continues west under his command with the player following.",
+                    "    var _S = window.__ScenarioConvoy;",
+                    "    if (_S) {",
+                    "        _S.leaderId = 'convoy_npc_1';",
+                    "        _S.followerIds = ['convoy_npc_4'];   // only the messenger remains",
+                    "        console.log('[MC] Convoy leader handed to Subutai; messenger trails. Detachment count=' + detach.length);",
+                    "    }",
+                    "    // v7.3 R2 — rAF-driven smooth movement (was 200ms setTimeout — choppy)",
+                    "    // v7.3 R1 — +30% speed (was 6, now 8 px/sec)",
+                    "    var speed = 8;",
+                    "    var arrivedAtSuzhou = false;",
+                    "    var _lastTs = null;",
+                    "    function _detTick(ts) {",
+                    "        if (!detach[0] || !suzhou) return;",
+                    "        if (window.__ST_dialogueBusy) { _lastTs = null; requestAnimationFrame(_detTick); return; }",
+                    "        if (_lastTs === null) _lastTs = ts;",
+                    "        var dt = Math.min((ts - _lastTs) / 1000, 0.05);   // cap at 50 ms",
+                    "        _lastTs = ts;",
+                    "        var leader = detach[0];",
+                    "        var dx = suzhou.x - leader.x, dy = suzhou.y - leader.y;",
+                    "        var d = Math.sqrt(dx*dx + dy*dy);",
+                    "        if (d > 8) {",
+                    "            var step = speed * dt;",
+                    "            leader.x += (dx / d) * step;",
+                    "            leader.y += (dy / d) * step;",
+                    "            leader.targetX = suzhou.x;",
+                    "            leader.targetY = suzhou.y;",
+                    "        } else if (!arrivedAtSuzhou) {",
+                    "            arrivedAtSuzhou = true;",
+                    "            leader.x = suzhou.x; leader.y = suzhou.y;",
+                    "            console.log('[MC] Genghis detachment reached Suzhou — starting siege.');",
+                    "            // Start a siege on Suzhou via siege_system if available",
+                    "            if (typeof window.startSiege === 'function') {",
+                    "                try { window.startSiege(leader, suzhou); }",
+                    "                catch (e) { console.warn('[MC] startSiege threw:', e); }",
+                    "            }",
+                    "            // Banner — Genghis is now sieging Suzhou independently",
+                    "            if (window.StoryPresentation && window.StoryPresentation.showSubtitle) {",
+                    "                window.StoryPresentation.showSubtitle(",
+                    "                    '⚔️ Genghis Khan begins his siege of Suzhou (independent army).',",
+                    "                    7000, '#e8a030');",
+                    "            }",
+                    "            if (typeof window.logGameEvent === 'function') {",
+                    "                window.logGameEvent('⚔️ Genghis Khan\\'s detachment has laid siege to Suzhou.', 'general');",
+                    "            }",
+                    "        }",
+                    "        // Drag followers right behind the leader (tight column)",
+                    "        for (var i = 1; i < detach.length; i++) {",
+                    "            var f = detach[i];",
+                    "            if (!f) continue;",
+                    "            var bx = leader.x - (i * 6);",
+                    "            var by = leader.y - (i * 4);",
+                    "            f.x = bx; f.y = by;",
+                    "            f.targetX = bx; f.targetY = by;",
+                    "        }",
+                    "        requestAnimationFrame(_detTick);",
+                    "    }",
+                    "    requestAnimationFrame(_detTick);",
+                    "    window.__mc_genghisDetachStarted = true;",
+                    "})();"
+                ].join("\n")
+            }},
             // Shift formation to 2-column after Subutai departs
             { type: "custom_js", params: {
                 code: [
-                    "// After Subutai (NPC 1) departs the main column, shift remaining",
-                    "// followers to a tighter 2-column formation.",
+                    "// v7.0 — ISSUE 4 FIX: ULTRA-TIGHT column after army divide.",
+                    "// Was col=55, gap=70 — far too spread. Match the pre-divide tight",
+                    "// 3-col values (colGap 4 / rowGap 7) so the column stays compact.",
                     "var _S = window.__ScenarioConvoy;",
                     "if (_S && _S.formationSlots) {",
-                    "    var col = 55;  // px lateral gap between columns",
-                    "    var gap = 70;  // px depth per row",
-                    "    // followerIds[0] was Subutai (convoy_npc_1) — keep its slot but",
-                    "    // the NPC is gone; remaining NPCs 2–14 (indices 1–13) get 2-col layout",
+                    "    var col = 3;   // px lateral gap between columns (was 55)",
+                    "    var gap = 6;   // px depth per row (was 70)",
                     "    for (var i = 0; i < _S.followerIds.length; i++) {",
                     "        var col2 = (i % 2 === 0) ? -col : col;",
                     "        var row2 = Math.floor(i / 2) + 1;",
                     "        _S.formationSlots[i] = { dx: col2, dy: row2 * gap };",
                     "    }",
-                    "    window.__mc_formation = '2col';",
-                    "    console.log('[MC] Formation shifted to 2-column after army divide.');",
+                    "    window.__mc_formation = '2col-tight';",
+                    "    console.log('[MC] Formation shifted to tight 2-column after army divide (col=' + col + ', gap=' + gap + ').');",
                     "}"
                 ].join("\n")
             }}
@@ -1456,6 +2082,20 @@ var TRIGGERS = [
         enabled: true, once: true, activatedBy: "t0_boot",
         conditions: [ { type: "custom_js", params: { code: "return false;" } } ],
         actions: [
+            // v7.0 — ISSUE 10: open Yanchi quest in the log
+            { type: "story_quest_complete", params: { id: "sq2_follow_subutai" } },
+            { type: "story_quest_set", params: {
+                id:          "sq2_raid_yanchi",
+                title:       "Raid Yanchi Pass Fort",
+                description: "Storm the granary fort before it signals Shazhou.",
+                x: 900, y: 1000, radius: 320,
+                noAutoComplete: true
+            }},
+            { type: "custom_js", params: { code: [
+                "if (typeof window._mcCompleteQuestLog === 'function') window._mcCompleteQuestLog('sq2_follow_subutai');",
+                "if (typeof window._mcUpdateQuestDesc === 'function')",
+                "    window._mcUpdateQuestDesc('sq2_raid_yanchi', 'Storm the Yanchi Pass granary fort. Kill the relay riders first, then take the gate — do not let a single man warn Shazhou.');"
+            ].join("\n") }},
             _sub("Yanchi Pass Fort — raid the granary before it warns Shazhou.", 7000, "#e8a030"),
             _log("⚔️ Mission 1 — Subutai orders: storm the Yanchi Pass granary fort. Silence it before it can send riders to warn Shazhou.", "general"),
             { type: "show_dialogue", params: {
@@ -1473,6 +2113,8 @@ var TRIGGERS = [
                 color: "#8b0000"
             }},
             { type: "spawn_important_npc", params: { id: "xia_yanchi_captain" } },
+            // v7.2 — ENGINE FIX E4: auto-take Yanchi BEFORE settlement menu can open
+            _mcStoryTake("Yanchi Pass Fort", "#c8a200"),
             { type: "custom_js", params: {
                 code: [
                     "// Staggered raid-activity subtitles — wait for dialogue to finish first.",
@@ -1525,6 +2167,20 @@ var TRIGGERS = [
         enabled: true, once: true, activatedBy: "t0_boot",
         conditions: [ { type: "custom_js", params: { code: "return false;" } } ],
         actions: [
+            // v7.0 — ISSUE 10: advance log to Shazhou objective
+            { type: "story_quest_complete", params: { id: "sq2_raid_yanchi" } },
+            { type: "story_quest_set", params: {
+                id:          "sq2_take_shazhou",
+                title:       "Take Shazhou with Subutai",
+                description: "Destroy the beacon and break Shazhou's outer wall.",
+                x: 285, y: 1048, radius: 320,
+                noAutoComplete: true
+            }},
+            { type: "custom_js", params: { code: [
+                "if (typeof window._mcCompleteQuestLog === 'function') window._mcCompleteQuestLog('sq2_raid_yanchi');",
+                "if (typeof window._mcUpdateQuestDesc === 'function')",
+                "    window._mcUpdateQuestDesc('sq2_take_shazhou', 'Advance on Shazhou with Subutai. Destroy the beacon tower on the outer wall and take the city.');"
+            ].join("\n") }},
             _sub("Shazhou — destroy the beacon tower on the outer wall.", 7000, "#e8a030"),
             _log("⚔️ Mission 2 — Shazhou's outer wall beacon tower must fall before the city can warn Guazhou or Suzhou.", "general"),
             { type: "show_dialogue", params: {
@@ -1541,6 +2197,8 @@ var TRIGGERS = [
                 color: "#ffffff"
             }},
             { type: "spawn_important_npc", params: { id: "xia_beacon_master" } },
+            // v7.2 — ENGINE FIX E4: auto-take Shazhou
+            _mcStoryTake("Shazhou", "#c0392b"),
             { type: "custom_js", params: {
                 code: [
                     "var SP = window.StoryPresentation;",
@@ -1571,16 +2229,165 @@ var TRIGGERS = [
         enabled: true, once: true, activatedBy: "t_mission_shazhou_beacon",
         conditions: [ { type: "custom_js", params: { code: "return !!window.__mc_shazhou_done;" } } ],
         actions: [
-            _sub("Shazhou falls. Mission 3: screen Guazhou from Xia scouts.", 6000, "#e8a030"),
+            // v7.0 — ISSUE 10: Shazhou taken; quest log redirects player east to Genghis
+            { type: "story_quest_complete", params: { id: "sq2_take_shazhou" } },
+            { type: "story_quest_set", params: {
+                id:          "sq2_message_to_khan",
+                title:       "Messenger ride east to Genghis Khan",
+                description: "Shazhou has fallen. Subutai holds the western corridor. Ride east to Suzhou — approach within 100 paces of the Great Khan and report: the west is sealed.",
+                x: 1160, y: 1257, radius: 360,
+                noAutoComplete: true
+            }},
+            { type: "custom_js", params: { code: [
+                "if (typeof window._mcCompleteQuestLog === 'function') window._mcCompleteQuestLog('sq2_take_shazhou');",
+                "if (typeof window._mcUpdateQuestDesc === 'function')",
+                "    window._mcUpdateQuestDesc('sq2_message_to_khan', 'Shazhou has fallen. Subutai holds the western corridor. Ride east to Suzhou — approach within 100 paces of the Great Khan and report: the west is sealed.');"
+            ].join("\n") }},
+            // v7.0 — ISSUE 7: route the player east to Genghis Khan now that
+            // Subutai's western corridor has terminated at Shazhou.
+            _sub("Shazhou taken. Subutai releases you — ride east alone to Genghis Khan.", 7000, "#f5d76e"),
             { type: "show_dialogue", params: {
                 speaker: "Subutai", portrait: ART_PATHS.portraits["Subutai"],
-                text: "The smoke from that beacon will have told Guazhou everything. " +
-                      "Their scouts are already riding the desert road. " +
-                      "I need you ahead of them — cut off whoever they send west to rally help. " +
-                      "Screen the city until I bring the column up.",
+                text: "The western corridor is sealed, Temür. Yanchi. Shazhou. Every wall along the Hexi is ours — " +
+                      "you helped take them all. The Great Khan needs to hear this from a man who was there. " +
+                      "Ride east. Find him at Suzhou. Tell him his western flank is safe and the cities are ours.",
                 color: "#c0392b"
             }},
-            _log("📜 Mission 3 issued — intercept Xia scouts riding west from Guazhou before they can rally reinforcements.", "objective")
+            { type: "show_dialogue", params: {
+                speaker: "Subutai", portrait: ART_PATHS.portraits["Subutai"],
+                text: "I am consolidating our gains here — I cannot spare the column. " +
+                      "But I can spare YOU and your men. Take your hundred cavalry east " +
+                      "as reinforcement for the Khan's siege at Suzhou. You are worth more to him there than here.",
+                color: "#c0392b"
+            }},
+            { type: "show_dialogue", params: {
+                speaker: "Temür Noyan", portrait: ART_PATHS.portraits["Temür Noyan"],
+                text: "Understood. We ride east to the Great Khan at Suzhou. " +
+                      "I will tell him the western corridor is closed and that your tümen holds every city.",
+                color: "#ffffff"
+            }},
+            // The escort fail-on-distance is already disabled (issue 3); reaffirm it.
+            { type: "custom_js", params: {
+                code: [
+                    "window.__mc_escortActive = false;",
+                    "window.__mc_escortPermDisabled = true;",
+                    "window.__mc_stickToSubutai = false;   // v7.3 R3 — release stick-mode",
+                    "// Hide the Follow Subutai HUD if still visible",
+                    "var hud = document.getElementById('mc-follow-hud');",
+                    "if (hud) hud.style.display = 'none';",
+                    "// ── GENGHIS PROXIMITY POLL ───────────────────────────────────────────────",
+                    "// Fire t_arrive_suzhou when the player rides within 100 px of Genghis Khan",
+                    "// (convoy_npc_0) at Suzhou. Also accepts proximity to the Suzhou city point",
+                    "// as a fallback in case the NPC has been removed/detached.",
+                    "window.__mc_gengisProximityActive = true;",
+                    "var _gpInterval = setInterval(function() {",
+                    "    if (!window.__mc_gengisProximityActive) { clearInterval(_gpInterval); return; }",
+                    "    if (!window.player) return;",
+                    "    // Find Genghis NPC",
+                    "    var genghis = (window.globalNPCs || []).find(function(n) {",
+                    "        return n && (n.storyId === 'convoy_npc_0' || n.id === 'convoy_npc_0__story');",
+                    "    });",
+                    "    var tx, ty;",
+                    "    if (genghis && isFinite(genghis.x)) {",
+                    "        tx = genghis.x; ty = genghis.y;",
+                    "    } else {",
+                    "        // Fallback: Suzhou city position",
+                    "        var suz = (window.cities_sandbox || window.cities || []).find(function(c){ return c.name === 'Suzhou'; });",
+                    "        if (!suz) return;",
+                    "        tx = suz.x; ty = suz.y;",
+                    "    }",
+                    "    var dx = window.player.x - tx, dy = window.player.y - ty;",
+                    "    if (dx*dx + dy*dy <= 100*100) {",
+                    "        window.__mc_gengisProximityActive = false;",
+                    "        clearInterval(_gpInterval);",
+                    "        console.log('[MC] Player within 100 px of Genghis Khan — firing t_arrive_suzhou.');",
+                    "        if (window.ScenarioTriggers && window.ScenarioTriggers.fireTrigger) {",
+                    "            window.ScenarioTriggers.fireTrigger('t_arrive_suzhou');",
+                    "        }",
+                    "    }",
+                    "}, 250);",
+                    "console.log('[MC] Player released from Subutai — riding east as messenger + reinforcement. Proximity poll active.');"
+                ].join("\n")
+            }},
+            { type: "custom_js", params: { code: [
+                "// ── v7.4 R1: XIA CAVALRY AMBUSH GROUPS ─────────────────────────────────",
+                "// Spawn 3 groups of Xia cavalry between Shazhou (x~280) and Suzhou (x~1160).",
+                "// Groups are spread along the route so the player encounters them while",
+                "// riding east as messenger. Each group spawns with a proximity dialogue:",
+                "// 'He rides alone — Xia cavalry, go get him!'",
+                "(function _spawnXiaAmbush() {",
+                "    if (window.__mc_xiaAmbushSpawned) return;",
+                "    window.__mc_xiaAmbushSpawned = true;",
+                "    function _randBetween(a,b){ return a + Math.random()*(b-a); }",
+                "    // Three ambush groups placed along the Shazhou→Suzhou corridor",
+                "    // Shazhou nx=0.07 (x≈280), Suzhou nx=0.29 (x≈1160); World H=3000",
+                "    // Spread groups at nx≈0.11, 0.17, 0.23 (y stays near corridor ny≈0.38-0.42)",
+                "    var groups = [",
+                "        { x: 440,  y: _randBetween(1100,1200), troops: _randBetween(20,28)|0 },",
+                "        { x: 680,  y: _randBetween(1150,1280), troops: _randBetween(22,32)|0 },",
+                "        { x: 920,  y: _randBetween(1100,1220), troops: _randBetween(24,40)|0 }",
+                "    ];",
+                "    var rosterTypes = ['Lancer','Lancer','Horse Archer','Horse Archer'];",
+                "    var spoken = [false, false, false];",
+                "    groups.forEach(function(g, gIdx) {",
+                "        if (!window.globalNPCs) return;",
+                "        var count = g.troops;",
+                "        var roster = [];",
+                "        for (var i=0;i<count;i++) roster.push({ type: rosterTypes[i%4], exp:1 });",
+                "        var npc = {",
+                "            id: 'xia_ambush_' + gIdx,",
+                "            storyId: 'xia_ambush_' + gIdx,",
+                "            isImportant: true,",
+                "            name: 'Xia Cavalry ' + (gIdx+1),",
+                "            role: 'Military',",
+                "            count: count,",
+                "            roster: roster,",
+                "            faction: 'Xiaran Dominion',",
+                "            color: '#fbc02d',",
+                "            originCity: null,",
+                "            targetCity: null,",
+                "            x: g.x, y: g.y,",
+                "            targetX: g.x, targetY: g.y,",
+                "            hp: 120, maxHealth: 120,",
+                "            attack: 18, defense: 14, armor: 8,",
+                "            speed: 1.2,",
+                "            __mc_xiaAmbush: true,",
+                "            __aiOverride: false,",
+                "            aiPreset: 'patrol'",
+                "        };",
+                "        window.globalNPCs.push(npc);",
+                "    });",
+                "    // Proximity poll: when player nears an ambush group, show dialogue once",
+                "    var _xiaProxTimer = setInterval(function() {",
+                "        if (!window.player) return;",
+                "        var allDead = true;",
+                "        groups.forEach(function(g, gIdx) {",
+                "            var npc = (window.globalNPCs||[]).find(function(n){ return n && n.id === 'xia_ambush_'+gIdx; });",
+                "            if (!npc || npc.count <= 0) { return; } // dead/gone",
+                "            allDead = false;",
+                "            if (spoken[gIdx]) return;",
+                "            var dx=window.player.x-npc.x, dy=window.player.y-npc.y;",
+                "            if (dx*dx+dy*dy <= 280*280) {",
+                "                spoken[gIdx]=true;",
+                "                var SP = window.StoryPresentation;",
+                "                if (SP && SP.showSubtitle)",
+                "                    SP.showSubtitle('\u26a0\uFE0F Xia cavalry spotted! He is isolated — cut him off!', 4500, '#cc2200');",
+                "                if (typeof window.logGameEvent === 'function')",
+                "                    window.logGameEvent('\u26a0\uFE0F Xia cavalry patrol: \u201CHe rides alone — Xia cavalry, go get him!\u201D', 'general');",
+                "                // Set the NPC to chase the player",
+                "                npc.targetX = window.player.x;",
+                "                npc.targetY = window.player.y;",
+                "                npc.aiPreset = 'repel';",
+                "                npc.__aiOverride = false;",
+                "            }",
+                "        });",
+                "        if (allDead) clearInterval(_xiaProxTimer);",
+                "    }, 350);",
+                "    window.__mc_xiaProxTimer = _xiaProxTimer;",
+                "    console.log('[MC XiaAmbush v7.4] 3 Xia cavalry ambush groups spawned between Shazhou and Suzhou.');",
+                "})();"
+            ].join("\n") }},
+            _log("📜 Mission — ride east alone to meet Genghis Khan at Suzhou. Your men ride with you as reinforcement. Approach Genghis within 100 paces to report.", "objective")
         ]
     },
 
@@ -1738,6 +2545,8 @@ var TRIGGERS = [
         actions: [
             _sub("Suzhou — the city closes its gates.", 6000, "#f5d76e"),
             _log("⚔️ 1226 — The Mongol host reaches Suzhou. The walls are manned. The siege begins.", "general"),
+            // v7.2 — ENGINE FIX E4: Suzhou taken by Genghis's eastern detachment
+            _mcStoryTake("Suzhou", "#c8a200"),
             { type: "show_dialogue", params: {
                 speaker: "Genghis Khan", portrait: ART_PATHS.portraits["Genghis Khan"],
                 text: "They choose walls. Good. Every man who dies on a wall is a man " +
@@ -1793,6 +2602,8 @@ var TRIGGERS = [
         actions: [
             _sub("Ganzhou — Chagaan Noyan's hometown. His father commands the garrison.", 7000, "#f5d76e"),
             _log("⚔️ 1226 — The army reaches Ganzhou. General Chagaan Noyan recognises the city — it is his birthplace, and his father commands its walls.", "general"),
+            // v7.2 — ENGINE FIX E4: Ganzhou taken
+            _mcStoryTake("Ganzhou", "#c8a200"),
             { type: "show_dialogue", params: {
                 speaker: "Chagaan Noyan", portrait: ART_PATHS.portraits["Chagaan Noyan"],
                 text: "Great Khan. Give me leave to ride to the gate. My father is in there. " +
@@ -1858,6 +2669,8 @@ var TRIGGERS = [
         actions: [
             _sub("Xiliang — the city gates open before the first arrow is fired.", 6000, "#f5d76e"),
             _log("🏳️ 1226 — Xiliang (Wuwei) surrenders without a siege. Its garrison watched what happened to Ganzhou.", "general"),
+            // v7.2 — ENGINE FIX E4: Xiliang surrenders peacefully
+            _mcStoryTake("Xiliang", "#c8a200"),
             { type: "show_dialogue", params: {
                 speaker: "City Elder", portrait: ART_PATHS.portraits["City Elder"],
                 text: "We have heard what befell Suzhou. We have heard what befell Ganzhou. " +
@@ -1891,6 +2704,15 @@ var TRIGGERS = [
                     "    }",
                     "})();"
                 ].join("\n")
+            }},
+            // v7.4 R1: chain to Xingqing quest marker after Xiliang is taken
+            { type: "story_quest_set", params: {
+                id:          "sq2_xingqing_march",
+                title:       "The Final March — Xingqing",
+                description: "The Hexi Corridor is ours. March east to Xingqing, capital of Western Xia. End the campaign.",
+                x: 2880, y: 1620, radius: 400,
+                triggerOnArrive: "t_arrive_xingqing",
+                noAutoComplete: false
             }}
         ]
     },
@@ -1904,6 +2726,8 @@ var TRIGGERS = [
         actions: [
             _sub("Xingqing — the Tangut capital. The final siege begins.", 7000, "#cc2200"),
             _log("⚔️ 1227 — The Mongol host encircles Xingqing (Zhongxing), capital of Western Xia. Emperor Xianzong is inside.", "general"),
+            // v7.2 — ENGINE FIX E4: Xingqing (capital) eventually taken
+            _mcStoryTake("Xingqing (Zhongxing)", "#c8a200"),
             { type: "show_dialogue", params: {
                 speaker: "Narrator", portrait: ART_PATHS.portraits["Narrator"],
                 text: "Asha finally moves his army east to relieve the capital. " +
@@ -1951,9 +2775,159 @@ var TRIGGERS = [
             }},
             _log("📜 1227 — Western Xia is destroyed. The campaign is complete. Genghis Khan dies in his tent.", "general")
         ]
+    },
+// ════════════════════════════════════════════════════════════════════════
+    // v7.3 R5 — STORY 2 ENDING SEQUENCE (after Ganzhou)
+    // ════════════════════════════════════════════════════════════════════════
+    // Plays a cinematic narrator sequence covering the historical ending:
+    //   Aug 1226 Qilian Mountains → Wuwei surrender → Emperor Xianzong dies →
+    //   Liangzhou taken → Helan Shan crossing → Nov 1226 Lingwu siege →
+    //   Battle of Yellow River (300k Xia dead) → 1227 Yinchuan siege →
+    //   Ögedei + Chagaan push into Jin / Wei River / Shaanxi →
+    //   Genghis & Subutai split: Subutai through Tao River + Lanzhou;
+    //   Genghis through Qing Shui river / Liupan / Longde →
+    //   Chagaan negotiates with Mozhu while Genghis secretly plans his death →
+    //   August 1227 Genghis Khan dies (cause uncertain — illness, fall, arrow) →
+    //   Sept 1227 Emperor Mozhu surrenders, is executed →
+    //   Yinchuan sacked, Western Xia annihilated.
+    {
+        id: "t_story_ending",
+        name: "ENDING — Genghis Khan's Death and the Annihilation of Western Xia",
+        enabled: true, once: true, activatedBy: "t_arrive_ganzhou",
+        conditions: [ { type: "custom_js", params: { code: "return false;" } } ],
+        actions: [
+            { type: "custom_js", params: {
+                code: [
+                    "if (window.StoryPresentation && window.StoryPresentation.fadeOut) {",
+                    "    window.StoryPresentation.fadeOut(2000, '#000000');",
+                    "}"
+                ].join("\n")
+            }},
+            _sub("August 1226 — the Qilian Mountains.", 6000, "#f5d76e"),
+            _log("📜 1226 — Ganzhou subdued. The campaign turns toward the heart of Western Xia.", "general"),
+            { type: "show_dialogue", params: {
+                speaker: "Narrator", portrait: ART_PATHS.portraits["Narrator"],
+                text: "Genghis Khan escapes the summer heat in the Qilian Mountains while his armies " +
+                      "approach Wuwei — the second-largest city of the Western Xia empire. No relief " +
+                      "comes from the capital. Wuwei surrenders rather than be erased.",
+                color: "#d4b886"
+            }},
+            { type: "show_dialogue", params: {
+                speaker: "Narrator", portrait: ART_PATHS.portraits["Narrator"],
+                text: "Inside the capital, Emperor Xianzong dies — exhausted, broken, or simply old. " +
+                      "His successor Mozhu inherits a kingdom whose collapse is now a matter of months.",
+                color: "#d4b886"
+            }},
+            { type: "show_dialogue", params: {
+                speaker: "Narrator", portrait: ART_PATHS.portraits["Narrator"],
+                text: "In autumn, Genghis rejoins his column, takes Liangzhou, crosses the Helan Shan " +
+                      "desert, and in November lays siege to Lingwu — only thirty kilometres from " +
+                      "the Tangut capital of Yinchuan.",
+                color: "#d4b886"
+            }},
+            _sub("Battle of the Yellow River — November 1226.", 6000, "#cc2200"),
+            { type: "show_dialogue", params: {
+                speaker: "Narrator", portrait: ART_PATHS.portraits["Narrator"],
+                text: "On the frozen Yellow River and its canals, the last great Western Xia field army " +
+                      "— three hundred thousand strong — counter-attacks. The Mongols destroy them. " +
+                      "Three hundred thousand Xia soldiers are counted in the snow afterwards. " +
+                      "The Xia have no more armies to lose.",
+                color: "#d4b886"
+            }},
+            { type: "show_dialogue", params: {
+                speaker: "Genghis Khan", portrait: ART_PATHS.portraits["Genghis Khan"],
+                text: "Yinchuan is alone. Surround it. We will outlast them. " +
+                      "Meanwhile — Ögedei and Chagaan ride south, into Jin territory. " +
+                      "Subutai breaks the Tao River and Lanzhou. I will follow the Qing Shui " +
+                      "and meet whoever still believes a sword can save them.",
+                color: "#c8a200"
+            }},
+            _sub("1227 — the siege of Yinchuan lasts six months.", 6000, "#cc2200"),
+            { type: "show_dialogue", params: {
+                speaker: "Narrator", portrait: ART_PATHS.portraits["Narrator"],
+                text: "Six months Yinchuan holds. Genghis directs the siege of Longde, then sends " +
+                      "Chagaan Noyan to negotiate. Mozhu agrees to surrender — but asks one month " +
+                      "to prepare suitable gifts. Genghis accepts. In private, he plans the emperor's " +
+                      "execution.",
+                color: "#d4b886"
+            }},
+            { type: "show_dialogue", params: {
+                speaker: "Chagaan Noyan", portrait: ART_PATHS.portraits["Chagaan Noyan"],
+                text: "He believes the gift will buy him a life. He does not understand what kind " +
+                      "of man he is dealing with.",
+                color: "#7a9e5c"
+            }},
+            _sub("August 1227 — Liupan Mountains.", 6000, "#cc2200"),
+            { type: "show_dialogue", params: {
+                speaker: "Narrator", portrait: ART_PATHS.portraits["Narrator"],
+                text: "Then, in August 1227, in the Liupan Mountains near Guyuan, Genghis Khan dies.",
+                color: "#d4b886"
+            }},
+            { type: "show_dialogue", params: {
+                speaker: "Narrator", portrait: ART_PATHS.portraits["Narrator"],
+                text: "How? No one knows for certain. Illness — perhaps. A fall from a horse — perhaps. " +
+                      "An arrow wound that festered, in some accounts. A Tangut princess hidden in his " +
+                      "tent with a small dagger, in others. The Mongols never tell. The Tanguts never " +
+                      "learn. The truth dies with him.",
+                color: "#d4b886"
+            }},
+            { type: "show_dialogue", params: {
+                speaker: "Subutai", portrait: ART_PATHS.portraits["Subutai"],
+                text: "Tell no one. The campaign is not finished. Until Mozhu is in our hands the " +
+                      "Great Khan lives. Do you understand me, Temür? The Great Khan LIVES.",
+                color: "#c0392b"
+            }},
+            { type: "show_dialogue", params: {
+                speaker: "Temür Noyan", portrait: ART_PATHS.portraits["Temür Noyan"],
+                text: "He lives, commander. Until the work is done.",
+                color: "#ffffff"
+            }},
+            _sub("September 1227 — Emperor Mozhu surrenders.", 6000, "#cc2200"),
+            { type: "show_dialogue", params: {
+                speaker: "Narrator", portrait: ART_PATHS.portraits["Narrator"],
+                text: "September 1227. Mozhu rides out of Yinchuan with his gifts and his pleas. " +
+                      "He is executed at the gate. The Mongols then pillage Yinchuan, slaughter its " +
+                      "population, plunder the imperial tombs west of the city, and complete the " +
+                      "effective annihilation of the Western Xia state.",
+                color: "#d4b886"
+            }},
+            { type: "show_dialogue", params: {
+                speaker: "Narrator", portrait: ART_PATHS.portraits["Narrator"],
+                text: "Within a generation, the Tangut script will be unreadable. Their books will be " +
+                      "scattered. Their kingdom will be a list of cities on a map and a footnote in " +
+                      "the histories of their conquerors.",
+                color: "#d4b886"
+            }},
+            { type: "show_dialogue", params: {
+                speaker: "Narrator", portrait: ART_PATHS.portraits["Narrator"],
+                text: "Temür Noyan lives. He marries into the Keshig, the imperial guard. He sees " +
+                      "Ögedei crowned. He sees the campaign against the Jin completed. He outlives " +
+                      "Subutai by three years and is buried in the steppe with his sword and his bow.",
+                color: "#d4b886"
+            }},
+            { type: "show_dialogue", params: {
+                speaker: "Narrator", portrait: ART_PATHS.portraits["Narrator"],
+                text: "The world the Great Khan crossed the Gobi to teach a lesson no longer exists. " +
+                      "The lesson was learned. By everyone.",
+                color: "#d4b886"
+            }},
+            _sub("THE END — The Wrath of the Khan — Story 2 complete.", 12000, "#cc2200"),
+            _log("📜 1227 — Genghis Khan dies. Western Xia is annihilated. The campaign of " +
+                 "Temür Noyan is complete.", "general"),
+            { type: "custom_js", params: {
+                code: [
+                    "if (window._mcCompleteQuestLog) {",
+                    "    ['sq2_sack_kharakhoto','sq2_follow_subutai','sq2_raid_yanchi',",
+                    "     'sq2_take_shazhou','sq2_message_to_khan','sq2_ganzhou','sq2_xingqing']",
+                    "    .forEach(function(id) { try { window._mcCompleteQuestLog(id); } catch(e){} });",
+                    "}",
+                    "console.log('[MC] v7.3 R5 — Story 2 ending sequence complete.');"
+                ].join("\n")
+            }}
+        ]
     }
-
 ];
+
 
 // ── Apply legacy show_dialogue adapter to every trigger ─────────────────────
 // Rewrites all 39 legacy {speaker, portrait, text, color} call sites into the
@@ -2035,6 +3009,7 @@ function install() {
     s.playerSetup   = DATA.playerSetup;
     s.importantNpcs = DATA.importantNpcs;
     s.scenarioVars  = DATA.scenarioVars;
+    s.storyQuests   = DATA.storyQuests;   // v7.0 — quest log catalogue (Issue 10)
 
     var _existing = (s.triggers || []).filter(function (t) {
         return !DATA.triggers.some(function (ours) { return ours.id === t.id; });
@@ -2176,7 +3151,7 @@ return {
     install: install,
     DATA:    DATA,
     CONFIG:  CONFIG,
-    VERSION: "5.1.0"
+    VERSION: "7.0.0"
 };
 
 })();
@@ -2302,8 +3277,8 @@ function _patchArrivalTriggerSubtitles() {
         "t_mission_guazhou_screen":   { text: "Guazhou — intercept the Xia scouting party before they break west.", ms: 7000, color: "#e8a030" },
         "t_mission_guazhou_done":     { text: "Guazhou screened. Mission 4: deliver Subutai's ultimatum to Changle Gate.", ms: 6000, color: "#e8a030" },
         "t_mission_changle_ultimatum":{ text: "Changle — deliver Subutai's ultimatum at the gate.", ms: 7000, color: "#e8a030" },
-        "t_mission_changle_done":     { text: "The western corridor is yours. Subutai releases you — ride east to Ganzhou.", ms: 7000, color: "#f5d76e" },
-        "t_arrive_suzhou":            { text: "Suzhou — the city closes its gates.", ms: 6000, color: "#f5d76e" },
+        "t_mission_changle_done":     { text: "Changle yields. Subutai releases you — ride east with 300 cavalry reinforcements for the Khan.", ms: 8000, color: "#f5d76e" },
+        "t_arrive_suzhou":            { text: "Suzhou — already fallen. Genghis Khan's column is encamped in the ruins.", ms: 7000, color: "#f5d76e" },
         "t_arrive_ganzhou":           { text: "Ganzhou — Chagaan Noyan's hometown. His father commands the garrison.", ms: 7000, color: "#f5d76e" },
         "t_arrive_xiliang":           { text: "Xiliang — the city gates open before the first arrow is fired.", ms: 6000, color: "#f5d76e" },
         "t_arrive_xingqing":          { text: "Xingqing — the Tangut capital. The final siege begins.", ms: 7000, color: "#cc2200" }
@@ -2733,3 +3708,228 @@ function _waitAndInstall() {
 _waitAndInstall();
 
 })();  // end _MongolPatch IIFE
+
+
+// =============================================================================
+// story2_ganzhou_expansion_patch.js  v7.2 (compact rewrite, original was truncated)
+// =============================================================================
+(function () {
+    "use strict";
+    var P = {
+        genghis:        "art/story2/Mongol_General.jpg",
+        subutai:        "art/story2/Mongol_Officer1.jpg",
+        temur:          "art/story2/Mongol_General.jpg",
+        narrator:       "art/story2/old_man.jpg",
+        chagaan:        "art/story2/Mongol_Officer1.jpg",
+        messenger:      "art/story2/Mongol_Infantry1.jpg"
+    };
+    function _dlg(lines) { return { type: "show_dialogue", params: { lines: lines } }; }
+    function _L(speaker, portrait, text, color) {
+        return { speaker: speaker, portrait: portrait, text: text, color: color || "#d4b886" };
+    }
+    function _sub(text, ms, color) {
+        return { type: "show_subtitle", params: { text: text, ms: ms || 5000, color: color || "#f5d76e" } };
+    }
+    function _log(text, cat) { return { type: "log_message", params: { text: text, category: cat || "general" } }; }
+    var OVERRIDES = {};
+
+    // ── v7.4 R1 FIX: t_arrive_suzhou — boots east march + Xia ambush NPCs spawn
+    // Previously the OVERRIDE set the quest marker but never launched the NPC march loop.
+    // This version:
+    //   1. Plays reunion dialogue.
+    //   2. Takes Suzhou for Mongol Empire.
+    //   3. Boots east-march loop: Genghis detachment → Ganzhou → Xiliang → Xingqing.
+    //   4. Sets proximity polls so arrival triggers fire when the PLAYER nears each city.
+    OVERRIDES["t_arrive_suzhou"] = {
+        name: "Arrival — Suzhou (player messenger meets Genghis Khan, joint siege)",
+        actions: [
+            _sub("\u2694\uFE0F Suzhou — you ride into the Great Khan's camp.", 7000, "#f5d76e"),
+            _log("\u2694\uFE0F 1226 — Tem\u00FCr Noyan reaches Suzhou. Genghis Khan's siege is already underway.", "general"),
+            { type: "story_quest_complete", params: { id: "sq2_message_to_khan" } },
+            { type: "custom_js", params: { code: [
+                "if (typeof window._mcCompleteQuestLog === 'function') window._mcCompleteQuestLog('sq2_message_to_khan');",
+                "if (typeof window._mcUpdateQuestDesc === 'function')",
+                "    window._mcUpdateQuestDesc('sq2_ganzhou', 'Suzhou has fallen. March east with Genghis Khan to Ganzhou.');",
+                "window.__mc_gengisProximityActive = false;"
+            ].join("\n") }},
+            _dlg([_L("Genghis Khan", P.genghis,
+                "Tem\u00FCr. You came from the west. Subutai sent you? Good. " +
+                "Tell me \u2014 what did you take?",
+                "#c8a200")]),
+            _dlg([_L("Tem\u00FCr Noyan", P.temur,
+                "Great Khan \u2014 Yanchi Pass Fort, Shazhou, Guazhou, Changle. " +
+                "The entire western corridor is ours. Subutai holds every city and consolidates. " +
+                "He sent my hundred east as reinforcement for your siege here.",
+                "#ffffff")]),
+            _dlg([_L("Genghis Khan", P.genghis,
+                "The west is sealed. Then Suzhou is the last wall between us and Ganzhou. " +
+                "Your men join my siege train. Suzhou will not hold another week.",
+                "#c8a200")]),
+            // Auto-take Suzhou
+            { type: "custom_js", params: { code: [
+                "var arrs = [window.cities_sandbox, window.cities];",
+                "arrs.forEach(function(arr) {",
+                "    if (!Array.isArray(arr)) return;",
+                "    var c = arr.find(function(x){ return x && x.name === 'Suzhou'; });",
+                "    if (!c) return;",
+                "    c.faction = 'Mongol Empire';",
+                "    c.isUnderSiege = false;",
+                "    c.__mc_storyProtected = true;",
+                "    if (window.FACTIONS && window.FACTIONS['Mongol Empire']) c.color = window.FACTIONS['Mongol Empire'].color;",
+                "    console.log('[MC] Suzhou taken — Mongol Empire.');",
+                "});",
+                "if (window.__mc_siegeOutcomes) {",
+                "    window.__mc_siegeOutcomes['Suzhou'] = { msg:'\u2694\uFE0F Suzhou Taken!', color:'#c8a200', expires: Date.now()+4000 };",
+                "}"
+            ].join("\n") }},
+            // ── v7.4 R1: Boot east march — Genghis + detachment → Ganzhou → Xiliang → Xingqing
+            { type: "custom_js", params: { code: [
+                "(function _bootEastMarch() {",
+                "    function _cp(name) {",
+                "        var arr = window.cities_sandbox || window.cities || [];",
+                "        return arr.find(function(c){ return c && c.name === name; }) || null;",
+                "    }",
+                "    function _np(id) {",
+                "        return (window.globalNPCs || []).find(function(n){",
+                "            return n && (n.storyId === id || n.id === id + '__story');",
+                "        }) || null;",
+                "    }",
+                "    function _takecity(name) {",
+                "        var arrs = [window.cities_sandbox, window.cities];",
+                "        arrs.forEach(function(arr) {",
+                "            if (!Array.isArray(arr)) return;",
+                "            var c = arr.find(function(x){ return x && x.name === name; });",
+                "            if (!c) return;",
+                "            c.faction = 'Mongol Empire';",
+                "            c.isUnderSiege = false;",
+                "            c.__mc_storyProtected = true;",
+                "            if (window.FACTIONS && window.FACTIONS['Mongol Empire']) c.color = window.FACTIONS['Mongol Empire'].color;",
+                "        });",
+                "        if (window.__mc_siegeOutcomes)",
+                "            window.__mc_siegeOutcomes[name] = { msg:'\u2694\uFE0F ' + name + ' Taken!', color:'#c8a200', expires: Date.now()+4000 };",
+                "        console.log('[MC EastMarch] City taken:', name);",
+                "    }",
+                "    var EAST_ROUTE       = ['Ganzhou', 'Xiliang', 'Xingqing (Zhongxing)'];",
+                "    var EAST_TRIGGERS    = ['t_arrive_ganzhou', 't_arrive_xiliang', 't_arrive_xingqing'];",
+                "    var EAST_STAY_MS     = [5000, 4000, 4000];",
+                "    var eastIdx = 0;",
+                "    var speed   = 9;",
+                "    var _lastTs = null;",
+                "    var _staying = false;",
+                "    var _triggered = [false, false, false];",
+                "    var detachIds = ['convoy_npc_0', 'convoy_npc_2', 'convoy_npc_3'];",
+                "    var detach = detachIds.map(_np).filter(Boolean);",
+                "    detach.forEach(function(n){ n.__mc_detached = true; });",
+                "    function _fireTrigger(idx) {",
+                "        if (_triggered[idx]) return;",
+                "        _triggered[idx] = true;",
+                "        _takecity(EAST_ROUTE[idx]);",
+                "        var tid = EAST_TRIGGERS[idx];",
+                "        if (window.ScenarioTriggers && window.ScenarioTriggers.fireTrigger && tid)",
+                "            try { window.ScenarioTriggers.fireTrigger(tid); } catch(e){}",
+                "        console.log('[MC EastMarch] Fired:', tid);",
+                "    }",
+                "    function _marchTick(ts) {",
+                "        if (_staying) return;",
+                "        if (eastIdx >= EAST_ROUTE.length) return;",
+                "        var tgt = _cp(EAST_ROUTE[eastIdx]);",
+                "        if (!tgt) { eastIdx++; requestAnimationFrame(_marchTick); return; }",
+                "        if (_lastTs === null) _lastTs = ts;",
+                "        var dt = Math.min((ts - _lastTs) / 1000, 0.08);",
+                "        _lastTs = ts;",
+                "        var leader = detach.length > 0 ? detach[0] : null;",
+                "        if (!leader) { eastIdx++; requestAnimationFrame(_marchTick); return; }",
+                "        var dx = tgt.x - leader.x, dy = tgt.y - leader.y;",
+                "        var d = Math.sqrt(dx*dx + dy*dy);",
+                "        if (d > 14) {",
+                "            var step = speed * dt;",
+                "            leader.x += (dx/d)*step; leader.y += (dy/d)*step;",
+                "            leader.targetX = tgt.x; leader.targetY = tgt.y;",
+                "            for (var i=1;i<detach.length;i++) {",
+                "                var f=detach[i]; if(!f) continue;",
+                "                f.x=leader.x-(i*7); f.y=leader.y-(i*5);",
+                "                f.targetX=f.x; f.targetY=f.y;",
+                "            }",
+                "            requestAnimationFrame(_marchTick);",
+                "        } else {",
+                "            leader.x=tgt.x; leader.y=tgt.y;",
+                "            var arrivedIdx=eastIdx; eastIdx++;",
+                "            _staying=true;",
+                "            _fireTrigger(arrivedIdx);",
+                "            setTimeout(function(){ _staying=false; _lastTs=null; requestAnimationFrame(_marchTick); }, EAST_STAY_MS[arrivedIdx]||4000);",
+                "        }",
+                "    }",
+                "    // Proximity poll — also fires triggers when PLAYER walks into each city",
+                "    var _proxIdx = 0;",
+                "    var _proxTimer = setInterval(function() {",
+                "        if (_proxIdx >= EAST_ROUTE.length) { clearInterval(_proxTimer); return; }",
+                "        if (!window.player) return;",
+                "        var tgt = _cp(EAST_ROUTE[_proxIdx]);",
+                "        if (!tgt) return;",
+                "        var pdx=window.player.x-tgt.x, pdy=window.player.y-tgt.y;",
+                "        if (pdx*pdx+pdy*pdy <= 320*320) {",
+                "            var idx=_proxIdx; _proxIdx++;",
+                "            _fireTrigger(idx);",
+                "        }",
+                "    }, 400);",
+                "    window.__mc_eastProxTimer = _proxTimer;",
+                "    requestAnimationFrame(_marchTick);",
+                "    window.__mc_eastMarchStarted = true;",
+                "    console.log('[MC EastMarch v7.4] Booted: Ganzhou → Xiliang → Xingqing.');",
+                "})();"
+            ].join("\n") }},
+            { type: "story_quest_set", params: {
+                id:          "sq2_ganzhou",
+                title:       "Reach Ganzhou with Genghis Khan",
+                description: "Suzhou has fallen. Follow Genghis Khan east to Ganzhou.",
+                x: 1560, y: 1500, radius: 360,
+                noAutoComplete: true
+            }}
+        ]
+    };
+
+    // ── v7.4 R1 FIX: t_arrive_ganzhou — chains to Xiliang quest after dialogue
+    OVERRIDES["t_arrive_ganzhou"] = {
+        name: "Arrival — Ganzhou (Chagaan drama, compact)",
+        actions: [
+            _sub("Ganzhou — Chagaan's father commands the walls.", 7000, "#f5d76e"),
+            _log("\u2694\uFE0F 1226 — The army reaches Ganzhou. Chagaan Noyan's father commands its walls.", "general"),
+            _dlg([_L("Chagaan Noyan", P.chagaan, "Great Khan, let me speak with my father.", "#7a9e5c"),
+                  _L("Genghis Khan", P.genghis, "Go. You have until midday.", "#c8a200")]),
+            _sub("An hour passes. Then shouting from within the walls.", 5000, "#a89060"),
+            _dlg([_L("Chagaan Noyan", P.chagaan, "My father is dead. Wei Bochang killed him in the council hall. Thirty-five officers stood by.", "#7a9e5c")]),
+            _dlg([_L("Genghis Khan", P.genghis, "Then those thirty-five will die. The rest live, on Chagaan's plea. Begin the siege.", "#c8a200")]),
+            _log("\u1F54A\uFE0F 1226 — After five months, Ganzhou opens. 35 conspirators executed at the gate; the city is spared.", "general"),
+            { type: "story_quest_complete", params: { id: "sq2_ganzhou" } },
+            { type: "custom_js", params: { code: [
+                "if (typeof window._mcCompleteQuestLog === 'function') window._mcCompleteQuestLog('sq2_ganzhou');"
+            ].join("\n") }},
+            { type: "story_quest_set", params: {
+                id:          "sq2_xiliang_march",
+                title:       "March to Xiliang",
+                description: "Ganzhou is ours. The host presses east — Xiliang (Wuwei) surrenders without a siege.",
+                x: 2040, y: 1800, radius: 360,
+                triggerOnArrive: "t_arrive_xiliang",
+                noAutoComplete: false
+            }}
+        ]
+    };
+
+    var _patchedIds = [];
+    function _applyPatch() {
+        if (!window.ScenarioTriggers || !window.ScenarioTriggers._state) { setTimeout(_applyPatch, 120); return; }
+        var triggers = window.ScenarioTriggers._state.triggers;
+        if (!Array.isArray(triggers) || triggers.length === 0) { setTimeout(_applyPatch, 120); return; }
+        triggers.forEach(function (t) {
+            var ov = OVERRIDES[t.id];
+            if (!ov) return;
+            t.actions = ov.actions;
+            if (ov.name) t.name = ov.name;
+            _patchedIds.push(t.id);
+        });
+        console.log("[GanzhouPatch v7.2] Applied: " + _patchedIds.join(", "));
+    }
+    setTimeout(_applyPatch, 0);
+    window.__story2GanzhouPatch = { apply: _applyPatch, patched: function () { return _patchedIds.slice(); } };
+    console.log("[GanzhouPatch v7.2] story2_ganzhou_expansion_patch.js loaded.");
+})();

@@ -281,7 +281,19 @@ settingsBox.innerHTML = `
 const actionBox = document.createElement("div");
         const backBtn = createCBBtn("Main Menu", () => exitCustomBattleMenu());
         const randomBtn = createCBBtn("🎲 Random Battle", () => launchRandomBattle());
-        const startBtn = createCBBtn("Start Battle", () => launchCustomBattle());
+        // FIX: Call window.launchCustomBattle (the BLS-wrapped version) not the local
+        // closure directly — the local closure bypasses the loading-screen wrapper.
+        // FIX: Expose enemySetup to the BLS wrapper before calling — launchCustomBattle()
+        // takes no arguments so _wrapLaunchFn cannot extract the enemy from arguments[0].
+        const startBtn = createCBBtn("Start Battle", () => {
+            window.__blsPendingEnemy = {
+                faction: enemySetup.faction,
+                color:   enemySetup.color,
+                roster:  enemySetup.roster.map(name => ({ type: name })),
+                count:   enemySetup.roster.length
+            };
+            (window.launchCustomBattle || launchCustomBattle)();
+        });
         
         actionBox.appendChild(backBtn);
         actionBox.appendChild(randomBtn);
@@ -800,8 +812,19 @@ if (countEl) {
         }
 
         // 5. Sync UI and Launch
-        updateUI(); 
-        launchCustomBattle();
+        updateUI();
+        // FIX: Call through window.launchCustomBattle so the battle-loading-screen.js
+        // wrapper intercepts it.  A direct call to launchCustomBattle() here hits the
+        // closure-local declaration and bypasses the window-level BLS patch entirely,
+        // causing the loading screen to never appear for random battles.
+        // FIX: Expose enemySetup to BLS wrapper (launchCustomBattle has no args).
+        window.__blsPendingEnemy = {
+            faction: enemySetup.faction,
+            color:   enemySetup.color,
+            roster:  enemySetup.roster.map(name => ({ type: name })),
+            count:   enemySetup.roster.length
+        };
+        (window.launchCustomBattle || launchCustomBattle)();
     }
 
 function startCustomBattleMonitor() {
@@ -1009,6 +1032,7 @@ else {
                 }
             };
             
+			
             // Spawn armies
             customSpawnLoop(playerSetup.roster, "player", playerSetup.faction, playerSetup.color);
             customSpawnLoop(enemySetup.roster, "enemy", enemySetup.faction, enemySetup.color);
@@ -1088,6 +1112,11 @@ else {
         startCustomBattleMonitor();
         console.log("Custom Battle Launched: Units Spawned =", battleEnvironment.units.length);
     }
+
+    // FIX: Export to window so battle-loading-screen.js can wrap it.
+    // Without this, _wrapLaunchFn("launchCustomBattle") finds window.launchCustomBattle
+    // === undefined and returns immediately — the BLS never intercepts non-siege battles.
+    window.launchCustomBattle = launchCustomBattle;
 
 // --- CUSTOM SPAWNER FOR THIS UI (REWRITTEN: MIRRORED COMMANDER & FALLBACK ARMOR) ---
     function customSpawnLoop(rosterArray, side, faction, color) {

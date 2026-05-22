@@ -1420,7 +1420,7 @@ let peakSpawnThreshold = isMobile ? 0.991 : 0.984;
     // spawn bans from a previous scenario session never bleed into sandbox play.
     // FIX: guard both Story 1 and Story 2 campaign sessions so initializeNPCs
     // does not wipe __activeScenario and __npcSpawnBans mid-session.
-    if (!window.__campaignStory1Active && !window.__campaignStory2Active) {
+    if (!window.__campaignStory1Active && !window.__campaignStory2Active && !window.__campaignStory3Active) {
         window.__activeScenario  = null;
         window.__npcSpawnBans    = null;
     }

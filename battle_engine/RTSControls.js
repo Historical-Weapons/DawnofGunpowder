@@ -1,4 +1,3 @@
-
 ;(function (W, D) {
   'use strict';
 
@@ -25,7 +24,7 @@
         position: fixed;
         /* Math: 50px (Bar Height) + 44px (Safe Area/Notch) + 10px (Buffer) = ~104px */
         top: calc(env(safe-area-inset-top, 0px) + 60px); 
-        left: max(env(safe-area-inset-left, 0px) + 10px, 10px);
+        right: max(env(safe-area-inset-right, 0px) + 10px, 10px);
         background: rgba(14, 6, 3, 0.85);
         border: 2.5px solid #5d4037;
         border-radius: 6px;

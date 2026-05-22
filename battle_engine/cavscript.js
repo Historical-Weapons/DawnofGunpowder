@@ -47,6 +47,9 @@ function drawCavalryUnit(ctx, x, y, moving, frame, factionColor, isAttacking, ty
     // Mirrors the same flag used for the Yumi bow. Has zero effect in sandbox.
     const isJapan = (factionColor === "#c2185b") || (window.__campaignStory1Active && unit && unit.side === 'player');
 
+    // Safety: factionColor must always be a valid string for headgear switch logic
+    if (!factionColor || typeof factionColor !== 'string') factionColor = '#888888';
+
     let animFrame = frame || (Date.now() / 100);
     // dir is always 1 — ctx.scale(facingDir) above handles all mirroring.
     // Keeping dir so all mount/rider offset math below compiles unchanged.
@@ -1375,9 +1378,128 @@ break;
     ctx.moveTo(3, -10.7);    ctx.lineTo(5.2, -10.7);
     ctx.stroke();
         }
-    } 
-	else { //camel 
-           }
+    } else {
+        // ── LOW ARMOR TIER (< 8) ─────────────────────────────────────────────
+        // Every cavalry unit always gets SOME headgear — light steppe/nomad gear
+        // appropriate to faction. Horse archers (armor 5) land here most often.
+        const fc = (factionColor || '').toLowerCase();
+        const laBob = isMoving ? Math.sin(animFrame * 0.9) * 1.2 : 0;
+
+        if (fc === '#1976d2') {
+            // ── Mongol felt cap (Toqoz-style) — fur-trimmed leather bowl ──
+            ctx.fillStyle = '#3e2723'; // dark leather bowl
+            ctx.strokeStyle = 'rgba(0,0,0,0.55)';
+            ctx.lineWidth = 0.8;
+            ctx.beginPath(); ctx.arc(0, -13, 3.4, Math.PI, 0); ctx.fill(); ctx.stroke();
+
+            // Fur trim ring at the brim
+            ctx.fillStyle = '#4e342e';
+            ctx.beginPath(); ctx.ellipse(0, -12.8, 4, 1.4, 0, 0, Math.PI * 2); ctx.fill();
+
+            // Single short black horsehair tassel at the top
+            ctx.strokeStyle = 'rgba(15,15,15,0.85)';
+            ctx.lineWidth = 1.5; ctx.lineCap = 'round';
+            ctx.beginPath();
+            ctx.moveTo(0, -16.4);
+            ctx.quadraticCurveTo(-3.5, -14 + laBob, -5, -10 + laBob * 1.2);
+            ctx.stroke();
+            ctx.beginPath();
+            ctx.moveTo(0, -16.4);
+            ctx.quadraticCurveTo(2.5, -14.5 + laBob, 3, -11 + laBob);
+            ctx.stroke();
+
+            // Small brass spike finial
+            ctx.fillStyle = '#a88c48';
+            ctx.beginPath();
+            ctx.moveTo(-0.8, -16); ctx.lineTo(0, -18.2); ctx.lineTo(0.8, -16);
+            ctx.fill();
+
+        } else if (fc === '#455a64') {
+            // ── Jurchen Jin: simple iron skullcap with leather ear-flaps ──
+            ctx.fillStyle = '#455a64';
+            ctx.strokeStyle = '#263238';
+            ctx.lineWidth = 0.8;
+            ctx.beginPath(); ctx.arc(0, -13, 3.6, Math.PI, 0); ctx.fill(); ctx.stroke();
+
+            // Iron banding (subtle horizontal lines)
+            ctx.strokeStyle = 'rgba(0,0,0,0.35)'; ctx.lineWidth = 0.5;
+            ctx.beginPath(); ctx.moveTo(-3, -14.5); ctx.lineTo(3, -14.5); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(-3.3, -13); ctx.lineTo(3.3, -13); ctx.stroke();
+
+            // Leather ear flaps
+            ctx.fillStyle = '#4e342e'; ctx.strokeStyle = '#3e2723'; ctx.lineWidth = 0.5;
+            ctx.fillRect(-5, -13, 2.2, 4.5); ctx.strokeRect(-5, -13, 2.2, 4.5);
+            ctx.fillRect(2.8, -13, 2.2, 4.5); ctx.strokeRect(2.8, -13, 2.2, 4.5);
+
+        } else if (fc === '#c2185b') {
+            // ── Yamato: simple eboshi (black lacquered court cap) ──
+            ctx.fillStyle = '#111111';
+            ctx.strokeStyle = '#333333'; ctx.lineWidth = 0.7;
+            ctx.beginPath();
+            ctx.moveTo(-3.2, -11.5);
+            ctx.lineTo(-0.8, -18.5);
+            ctx.lineTo(1.5,  -18.2);
+            ctx.lineTo(3.2,  -11.5);
+            ctx.closePath();
+            ctx.fill(); ctx.stroke();
+
+            // Gold band at base
+            ctx.strokeStyle = '#c5a059'; ctx.lineWidth = 1;
+            ctx.beginPath(); ctx.moveTo(-3.2, -11.5); ctx.lineTo(3.2, -11.5); ctx.stroke();
+
+        } else if (fc === '#fbc02d') {
+            // ── Xiaran: simple cloth turban (ochre/gold) ──
+            ctx.fillStyle = '#c59b27';
+            ctx.strokeStyle = 'rgba(0,0,0,0.3)'; ctx.lineWidth = 0.6;
+            ctx.beginPath(); ctx.ellipse(0, -13.5, 3.8, 2.2, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+
+            // Wrap fold lines
+            ctx.strokeStyle = 'rgba(0,0,0,0.2)'; ctx.lineWidth = 0.7;
+            ctx.beginPath(); ctx.moveTo(-3, -12.2); ctx.bezierCurveTo(-1,-14, 1,-14, 3,-12.5); ctx.stroke();
+
+            // Small steel nasal guard
+            ctx.fillStyle = '#78909c';
+            ctx.fillRect(-0.5, -12, 1, 3.5);
+
+            // Trailing silk end
+            ctx.fillStyle = '#a37a1c';
+            ctx.beginPath();
+            ctx.moveTo(3.5, -13.5);
+            ctx.quadraticCurveTo(6, -10 + laBob, 5, -7 + laBob);
+            ctx.lineTo(3, -12);
+            ctx.fill();
+
+        } else if (fc === '#7b1fa2') {
+            // ── Goryun Korean: padded leather cap ──
+            ctx.fillStyle = '#4a148c';
+            ctx.strokeStyle = 'rgba(0,0,0,0.4)'; ctx.lineWidth = 0.7;
+            ctx.beginPath(); ctx.arc(0, -13, 3.3, Math.PI, 0); ctx.fill(); ctx.stroke();
+            ctx.fillStyle = '#6a1b9a';
+            ctx.beginPath(); ctx.ellipse(0, -13, 3.8, 1.4, 0, 0, Math.PI * 2); ctx.fill();
+
+            // Small gold pin
+            ctx.fillStyle = '#d4af37';
+            ctx.beginPath(); ctx.arc(0, -16.3, 0.9, 0, Math.PI * 2); ctx.fill();
+
+        } else if (fc === '#00838f') {
+            // ── Dali: indigo headwrap ──
+            ctx.fillStyle = '#1a237e';
+            ctx.strokeStyle = '#0d47a1'; ctx.lineWidth = 0.5;
+            ctx.fillRect(-3, -14.5, 6, 2);
+            ctx.beginPath(); ctx.arc(0, -14.5, 2.6, Math.PI, 0); ctx.fill(); ctx.stroke();
+            ctx.strokeStyle = 'rgba(255,255,255,0.1)'; ctx.lineWidth = 0.6;
+            ctx.beginPath(); ctx.moveTo(-2.2, -15); ctx.lineTo(2, -15.6); ctx.stroke();
+
+        } else {
+            // ── Generic fallback: basic leather skullcap ──
+            ctx.fillStyle = '#5d4037';
+            ctx.strokeStyle = '#3e2723'; ctx.lineWidth = 0.8;
+            ctx.beginPath(); ctx.arc(0, -13, 3.2, Math.PI, 0); ctx.fill(); ctx.stroke();
+            // Simple brim strip
+            ctx.fillStyle = '#4e342e';
+            ctx.fillRect(-3.5, -13, 7, 1.5);
+        }
+    }
 // --- WEAPONS LOGIC ---
     let weaponBob = isAttacking ? Math.sin(frame * 0.8) * 4 : Math.sin(frame * 0.2) * 1;
 
