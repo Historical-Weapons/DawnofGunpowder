@@ -676,7 +676,21 @@ let py = (y * CITY_TILE_SIZE) + (CITY_TILE_SIZE / 2);
 }
 
 function updateCityGates(grid) {
-    if (!overheadCityGates || !grid) return;
+    // FIX: Custom Siege Battle deep-clones overheadCityGates into
+    // battleEnvironment.cityGates at battle start (see customsiegebattle.js),
+    // so the two become separate objects. This function used to only ever
+    // read overheadCityGates — meaning in custom battles it kept carving the
+    // collision grid based on a gate that was never actually breached, while
+    // the real (cloned) gate the ram/renderer/AI all agree is broken sat
+    // untouched here. That's why the gate could stop rendering/be logically
+    // "open" but the wall tile stayed solid stone in the grid. Standard siege
+    // battles assign battleEnvironment.cityGates = overheadCityGates by
+    // reference, so preferring the live collection is identical there.
+    const gates = (typeof battleEnvironment !== 'undefined' && battleEnvironment.cityGates && battleEnvironment.cityGates.length > 0)
+        ? battleEnvironment.cityGates
+        : overheadCityGates;
+
+    if (!gates || !gates.length || !grid) return;
 
     const margin = 45;
     const wallThick = 12;
@@ -686,7 +700,7 @@ function updateCityGates(grid) {
     const startY = margin;
     const endY = (typeof CITY_LOGICAL_ROWS !== 'undefined' ? CITY_LOGICAL_ROWS : CITY_ROWS) - margin;
 
-    for (let gate of overheadCityGates) {
+    for (let gate of gates) {
 
         // --- AUTO STATE LOGIC ---
         if (gate.gateHP <= 0) {

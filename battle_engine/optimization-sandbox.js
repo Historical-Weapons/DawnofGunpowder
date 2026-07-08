@@ -512,7 +512,10 @@
     function _p8_siegeThrottle() {
         const _orig = window.processSiegeEngines;
         if (typeof _orig !== 'function') return;
-        const SKIP = IS_NATIVE ? 3 : 2;
+        // Was IS_NATIVE ? 3 : 2 — mobile got throttled harder than desktop.
+        // User wants mobile to match desktop behavior, so both now use the
+        // same skip rate.
+        const SKIP = 2;
         let _n = 0;
 
         window.processSiegeEngines = function () {
@@ -533,7 +536,9 @@
     //  Projectiles beyond MAX are silently dropped — units fall back to melee.
     // ────────────────────────────────────────────────────────────────────
     function _p9_projCap() {
-        const MAX = IS_NATIVE ? 100 : 180;
+        // Was IS_NATIVE ? 100 : 180 — mobile got capped lower than desktop.
+        // User wants mobile to match desktop behavior here too.
+        const MAX = 180;
 
         const _poll = setInterval(function () {
             if (typeof battleEnvironment === 'undefined' ||

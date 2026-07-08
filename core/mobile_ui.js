@@ -1201,11 +1201,13 @@ html += `
 
 /* ── JOYSTICK ── */
 #mob-joystick-zone {
-    pointer-events: all;
-    width: 120px;
-    height: 120px;
+    pointer-events: none;
+    width: 0;
+    height: 0;
     position: relative;
     flex-shrink: 0;
+    overflow: hidden;
+    display: none;
 }
 #mob-joystick-base {
     position: absolute;
@@ -1237,6 +1239,142 @@ html += `
     gap: 6px;
     flex-shrink: 0;
 }
+
+/* ── SHIP THROTTLE ZONE (▲/▼ speed buttons, bottom-right, naval only) ── */
+#mob-helm-zone {
+    pointer-events: all;
+    width: 70px;
+    height: 132px;
+    position: fixed;
+    bottom: 18px;
+    right: 14px;
+    z-index: 99999;
+    display: none;
+    flex-direction: column;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    opacity: 1;
+}
+#mob-helm-base { display: none; }
+#mob-helm-knob { display: none; }
+#mob-helm-label {
+    position: absolute;
+    top: -16px; left: 50%;
+    transform: translateX(-50%);
+    font-size: 8px; font-weight: bold;
+    color: rgba(120,200,255,0.8);
+    font-family: Georgia, serif;
+    white-space: nowrap; pointer-events: none;
+    text-shadow: 0 1px 3px rgba(0,0,0,0.7);
+}
+/* ── THROTTLE BUTTONS ── */
+.ship-throttle-btn {
+    pointer-events: all;
+    touch-action: manipulation;
+    width: 60px;
+    height: 56px;
+    border-radius: 10px;
+    background: radial-gradient(circle at 35% 35%, rgba(100,200,255,0.20), rgba(10,40,80,0.85));
+    border: 2px solid rgba(80,170,255,0.60);
+    color: rgba(140,220,255,0.95);
+    font-size: 26px;
+    line-height: 56px;
+    text-align: center;
+    cursor: pointer;
+    user-select: none;
+    -webkit-user-select: none;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.55);
+    flex-shrink: 0;
+}
+.ship-throttle-btn:active {
+    background: radial-gradient(circle at 35% 35%, rgba(160,240,255,0.35), rgba(20,60,110,0.95));
+    border-color: #a0e0ff;
+    transform: scale(0.94);
+}
+/* ── ROTATION JOYSTICK (beside throttle, bottom-right) ── */
+#mob-rot-joy-zone {
+    pointer-events: all;
+    width: 90px;
+    height: 90px;
+    position: fixed;
+    bottom: 39px;
+    right: 96px;
+    z-index: 99999;
+    display: none;
+    opacity: 1;
+}
+#mob-rot-joy-base {
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    background: rgba(30,10,50,0.55);
+    border: 2px solid rgba(180,90,255,0.5);
+    box-shadow: 0 0 12px rgba(90,30,160,0.5);
+}
+#mob-rot-joy-knob {
+    position: absolute;
+    width: 36px; height: 36px;
+    border-radius: 50%;
+    background: radial-gradient(circle at 35% 35%, rgba(210,170,255,0.7), rgba(90,30,180,0.9));
+    border: 2px solid rgba(180,100,255,0.8);
+    box-shadow: 0 2px 8px rgba(0,0,0,0.5);
+    top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    touch-action: none;
+    cursor: grab;
+}
+#mob-rot-joy-label {
+    position: absolute;
+    top: -16px; left: 50%;
+    transform: translateX(-50%);
+    font-size: 8px; font-weight: bold;
+    color: rgba(200,150,255,0.8);
+    font-family: Georgia, serif;
+    white-space: nowrap; pointer-events: none;
+    text-shadow: 0 1px 3px rgba(0,0,0,0.7);
+}
+/* ── BOW DIRECTION NEEDLE ── rotates with ship heading, shows bow direction */
+#mob-rot-joy-needle {
+    position: absolute;
+    top: 50%; left: 50%;
+    width: 3px; height: 34px;
+    margin-left: -1.5px;
+    margin-top: -30px;          /* needle tip at top of circle */
+    transform-origin: 50% 100%; /* pivot at base (centre of joystick) */
+    border-radius: 2px 2px 1px 1px;
+    background: linear-gradient(to top, rgba(255,200,60,0.0), rgba(255,220,80,0.95));
+    pointer-events: none;
+    box-shadow: 0 0 4px rgba(255,200,60,0.6);
+    transition: none;
+}
+/* Fine white dot at joystick centre for needle pivot */
+#mob-rot-joy-pivot {
+    position: absolute;
+    top: 50%; left: 50%;
+    width: 6px; height: 6px;
+    margin: -3px 0 0 -3px;
+    border-radius: 50%;
+    background: rgba(255,240,180,0.9);
+    pointer-events: none;
+    z-index: 2;
+}
+/* Resistance arc: semi-transparent red arc that grows when pushing against bow */
+#mob-rot-joy-resist {
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    pointer-events: none;
+    opacity: 1;
+}
+/* ── (sail CW/CCW buttons removed — sails now auto-trim to wind) ── */
+#mob-rotate-zone { display: none !important; }
+#sail-wheel-canvas { display: none; }
+#mob-rotate-base { display: none; }
+#mob-rotate-knob { display: none; }
+#mob-rotate-label { display: none; }
+/* ── (helm arrow removed — no longer used) ── */
+#mob-helm-arrow { display: none; }
 
 /* ── FORMATION BUTTON ROW ── */
 #mob-formation-row {
@@ -1295,154 +1433,407 @@ body.mob-drawer-open #mob-controls-overlay {
 
         // ── Build the joystick ────────────────────────────────────────────────
         function _buildJoystick(zone) {
-            const base = document.createElement("div");
-            base.id = "mob-joystick-base";
-            const knob = document.createElement("div");
-            knob.id = "mob-joystick-knob";
-            zone.appendChild(base);
-            zone.appendChild(knob);
-
-            const DEAD  = 14;   // dead-zone radius px
-            const MAX_R = 46;   // max knob travel px
-            let   touching = false;
-            let   _repeatTimer = null;
-
-            function _dirFromAngle(angle, dist) {
-                // Returns array of key names active for this joystick position
-                const keys = [];
-                if (dist < DEAD) return keys;
-                // angle 0 = right, 90 = down (screen coords)
-                const deg = ((angle * 180 / Math.PI) + 360) % 360;
-                // Horizontal
-                if (deg > 22.5  && deg < 157.5) keys.push("ArrowDown");
-                if (deg > 202.5 && deg < 337.5) keys.push("ArrowUp");
-                // Vertical
-                if (deg > 292.5 || deg < 67.5)  keys.push("ArrowRight");
-                if (deg > 112.5 && deg < 247.5)  keys.push("ArrowLeft");
-                return keys;
-            }
-
-            function _onMove(cx, cy) {
-                const rect = zone.getBoundingClientRect();
-                const ox = cx - (rect.left + rect.width  / 2);
-                const oy = cy - (rect.top  + rect.height / 2);
-                const dist  = Math.sqrt(ox*ox + oy*oy);
-                const angle = Math.atan2(oy, ox);
-                const clamped = Math.min(dist, MAX_R);
-                const kx = Math.cos(angle) * clamped;
-                const ky = Math.sin(angle) * clamped;
-
-                knob.style.transform = `translate(calc(-50% + ${kx}px), calc(-50% + ${ky}px))`;
-
-                // Update held keys
-                const want = new Set(_dirFromAngle(angle, dist));
-                // release keys no longer needed
-                ["ArrowUp","ArrowDown","ArrowLeft","ArrowRight"].forEach(k => {
-                    if (!want.has(k)) releaseKey(k);
-                });
-                // hold new keys
-                want.forEach(k => holdKey(k));
-            }
-
-            function _onEnd() {
-                touching = false;
-                knob.style.transform = "translate(-50%, -50%)";
-                releaseAllKeys();
-            }
-
-            zone.addEventListener("touchstart", e => {
-                e.preventDefault();
-                touching = true;
-                _onMove(e.touches[0].clientX, e.touches[0].clientY);
-            }, { passive: false });
-
-            zone.addEventListener("touchmove", e => {
-                e.preventDefault();
-                if (!touching) return;
-                _onMove(e.touches[0].clientX, e.touches[0].clientY);
-            }, { passive: false });
-
-            zone.addEventListener("touchend", e => { e.preventDefault(); _onEnd(); }, { passive: false });
-            zone.addEventListener("touchcancel", _onEnd);
+            // DELETED: The movement joystick is now handled exclusively by
+            // RTSControls.js (#mc3-joy, gold themed, bottom-left).
+            // That joystick fires WASD keys and is always visible except in
+            // the main menu — covering battle, overworld, and city modes.
+            // This function is intentionally empty.
         }
-
         // ── Build formation + command buttons ────────────────────────────────
         function _buildButtons(panel) {
-            // Formation row  (Z X V C B)
-            const formationDefs = [
-                { label: "Tight",    key: "z", title: "Tight formation" },
-                { label: "Std",      key: "x", title: "Standard formation" },
-                { label: "Line",     key: "v", title: "Line formation" },
-                { label: "Circle",   key: "c", title: "Circle formation" },
-                { label: "Square",   key: "b", title: "Square formation" },
-            ];
-
-            // Command row  (1-5 select + Q R E F)
-            const selectDefs = [
-                { label: "Inf",   key: "1", title: "Select Infantry" },
-                { label: "Rng",   key: "2", title: "Select Ranged" },
-                { label: "Cav",   key: "3", title: "Select Cavalry" },
-                { label: "Gun",   key: "4", title: "Select Gunpowder" },
-                { label: "All",   key: "5", title: "Select All" },
-            ];
-            const cmdDefs = [
-                { label: "Engage", key: "q", title: "Seek & Engage", cls: "mob-cmd" },
-                { label: "Rtreat", key: "r", title: "Retreat",       cls: "mob-cmd" },
-                { label: "Hold",   key: "e", title: "Hold Ground",   cls: "mob-cmd" },
-                { label: "Follow", key: "f", title: "Follow General",cls: "mob-cmd" },
-            ];
-
-            function makeRow(defs, extraCls) {
-                const row = document.createElement("div");
-                row.className = "mob-formation-row";
-                row.style.cssText = "display:flex;gap:5px;justify-content:flex-end;flex-wrap:wrap;";
-                defs.forEach(def => {
-                    const btn = document.createElement("button");
-                    btn.className = "mob-btn" + (def.cls ? " " + def.cls : "") + (extraCls ? " " + extraCls : "");
-                    btn.textContent = def.label;
-                    btn.title = def.title || "";
-                    btn.addEventListener("touchstart", e => { e.preventDefault(); simulateKey(def.key); btn.classList.add("active"); }, { passive: false });
-                    btn.addEventListener("touchend",   e => { e.preventDefault(); btn.classList.remove("active"); },                  { passive: false });
-                    btn.addEventListener("click",      ()  => simulateKey(def.key));
-                    row.appendChild(btn);
-                });
-                return row;
-            }
-
-            // Speed toggle button
-            const speedBtn = document.createElement("button");
-            speedBtn.id = "mob-speed-btn";
-            speedBtn.className = "mob-btn mob-speed";
-            speedBtn.textContent = "1× Speed";
-            let _speedIndex = 0;
-            const _speeds = [
-                { label: "1× Speed", val: 1  },
-                { label: "2× Speed", val: 2  },
-                { label: "3× Speed", val: 3  },
-                { label: "½ Speed",  val: 0.5 },
-            ];
-            function _applySpeed(idx) {
-                const s = _speeds[idx];
-                speedBtn.textContent = s.label;
-                // battleSpeed is the global used by the battle loop
-                if (typeof window.battleSpeed !== "undefined") window.battleSpeed = s.val;
-                // Also try gameSpeed
-                if (typeof window.gameSpeed   !== "undefined") window.gameSpeed   = s.val;
-                // Update HUD element if present
-                const txt = document.getElementById("speed-text");
-                if (txt) txt.textContent = s.val + "x";
-            }
-            speedBtn.addEventListener("click", () => {
-                _speedIndex = (_speedIndex + 1) % _speeds.length;
-                _applySpeed(_speedIndex);
-            });
-            speedBtn.addEventListener("touchstart", e => { e.preventDefault(); _speedIndex = (_speedIndex + 1) % _speeds.length; _applySpeed(_speedIndex); }, { passive: false });
-
-            panel.appendChild(speedBtn);
-            panel.appendChild(makeRow(formationDefs));
-            panel.appendChild(makeRow(selectDefs));
-            panel.appendChild(makeRow(cmdDefs));
+            // All formation, selection, command, and speed buttons are handled
+            // by RTSControls.js (emoji header buttons at the top of the screen).
+            // This function is intentionally empty to avoid duplicate text buttons.
         }
+
+        // ── Build ship joysticks (MOVE + ROTATE, naval only) ────────────
+        function _buildHelmJoystick() {
+
+            // ── SHARED joystick DOM builder ───────────────────────────────
+            function _makeJoyDOM(zoneId, baseId, knobId, labelId, labelText) {
+                var zone = document.createElement("div"); zone.id = zoneId;
+                var base = document.createElement("div"); base.id = baseId;
+                var knob = document.createElement("div"); knob.id = knobId;
+                var lbl  = document.createElement("div"); lbl.id = labelId;
+                lbl.textContent = labelText;
+                zone.appendChild(base); zone.appendChild(knob); zone.appendChild(lbl);
+                document.body.appendChild(zone);
+                return { zone: zone, knob: knob };
+            }
+
+            // ── THROTTLE BUTTONS (▲ accelerate, ▼ decelerate) ────────────────
+            // Two tap-and-hold buttons replace the old MOVE joystick.
+            // ▲ = dy < 0 = forward thrust  |  ▼ = dy > 0 = brake / reverse
+            // dx (turning torque) comes exclusively from the ROTATION joystick below.
+            (function() {
+                var zone = document.createElement("div"); zone.id = "mob-helm-zone";
+                var lbl  = document.createElement("div"); lbl.id  = "mob-helm-label"; lbl.textContent = "\u26F5 SPEED";
+                var btnU = document.createElement("div"); btnU.className = "ship-throttle-btn"; btnU.textContent = "\u25B2";
+                var btnD = document.createElement("div"); btnD.className = "ship-throttle-btn"; btnD.textContent = "\u25BC";
+                zone.appendChild(lbl); zone.appendChild(btnU); zone.appendChild(btnD);
+                document.body.appendChild(zone);
+
+                function _getDX() { return (window._shipHelmInput && window._shipHelmInput.dx) || 0; }
+
+                function _bindThrottle(btn, dyVal) {
+                    var _holdTimer = null;
+                    function _setThrust() { window._shipHelmInput = { dx: _getDX(), dy: dyVal }; }
+                    function _release()   { window._shipHelmInput = { dx: _getDX(), dy: 0 };
+                                           if (_holdTimer) { clearInterval(_holdTimer); _holdTimer = null; } }
+
+                    // Single merged touchstart handler (non-passive so preventDefault works)
+                    btn.addEventListener("touchstart", function(e) {
+                        if (e.cancelable) e.preventDefault();
+                        e.stopPropagation();
+                        _setThrust();
+                        if (_holdTimer) clearInterval(_holdTimer);
+                        _holdTimer = setInterval(_setThrust, 50); // re-assert every 50ms while held
+                    }, { passive: false });
+                    btn.addEventListener("touchend",    function(e) { if (e.cancelable) e.preventDefault(); _release(); }, { passive: false });
+                    btn.addEventListener("touchcancel", _release, { passive: true });
+
+                    // Mouse fallback (desktop testing) — single merged handler
+                    btn.addEventListener("mousedown", function(e) {
+                        e.preventDefault();
+                        _setThrust();
+                        if (_holdTimer) clearInterval(_holdTimer);
+                        _holdTimer = setInterval(_setThrust, 50);
+                    });
+                    document.addEventListener("mouseup", function() {
+                        var hi = window._shipHelmInput;
+                        if (hi && hi.dy === dyVal) _release();
+                    });
+                }
+                _bindThrottle(btnU, -1); // ▲ forward
+                _bindThrottle(btnD, +1); // ▼ reverse / brake
+            })();
+
+            // ── ROTATION JOYSTICK (mob-rot-joy-zone, writes _shipHelmInput.dx) ──
+            // This joystick is HEADING-LOCKED: the yellow needle always points toward
+            // the ship's current bow direction in screen space (or straight up if no ship
+            // is active). The player slides the knob left/right relative to the needle.
+            //
+            // EXPONENTIAL RESISTANCE: pushing the knob in the OPPOSITE direction to the
+            // bow (i.e. the "wrong" side of the needle) is exponentially harder. The
+            // effective dx that reaches the physics engine is compressed:
+            //   effectiveDx = sign(raw) * pow(|raw|, RESIST_EXP)
+            // where RESIST_EXP rises steeply when the joystick is on the wrong side.
+            // "Wrong side" means: knob is on the left but bow needle points right, etc.
+            //
+            // The zone can also be tapped (no drag) to cycle the player-controlled ship
+            // (same as the PC behaviour).
+            (function() {
+                var DEAD    = 8;         // dead-zone pixels
+                var MAX_R   = 35;        // max knob travel px
+                // ── RESISTANCE TUNING ── <<<<<
+                var EASY_EXP   = 0.75;   // exponent when pushing bow-side (easier) <<<<<
+                var HARD_EXP   = 2.8;    // exponent when pushing against bow (harder) <<<<<
+                // How far from dead centre before we consider the push "against bow"
+                // (0–1, where 1 = fully opposite side). Gives a small grace zone.
+                var RESIST_THRESHOLD = 0.10; // <<<<<
+
+                var touching = false, _tid = null;
+                var _touchStartX = 0, _touchStartTime = 0;
+                var _isDrag = false;
+
+                var els = _makeJoyDOM("mob-rot-joy-zone","mob-rot-joy-base","mob-rot-joy-knob","mob-rot-joy-label","\uD83D\uDD04 TURN");
+                var zone = els.zone, knob = els.knob;
+
+                // ── Inject needle + pivot + resist canvas ────────────────────
+                var needle = document.createElement("div"); needle.id = "mob-rot-joy-needle";
+                var pivot  = document.createElement("div"); pivot.id  = "mob-rot-joy-pivot";
+                var resistEl = document.createElement("canvas");
+                resistEl.id = "mob-rot-joy-resist";
+                resistEl.width  = 90;
+                resistEl.height = 90;
+                zone.appendChild(resistEl);
+                zone.appendChild(needle);
+                zone.appendChild(pivot);
+
+                function _getDY() { return (window._shipHelmInput && window._shipHelmInput.dy) || 0; }
+
+                // ── Get the player ship heading (radians) ─────────────────────
+                function _getShipHeading() {
+                    var env = window.navalEnvironment;
+                    if (!env || !Array.isArray(env.ships)) return null;
+                    var ps = env.ships.find(function(s) { return s.isPlayerControlled; });
+                    return ps ? (ps.heading || 0) : null;
+                }
+
+                // ── Update the needle visual to match current heading ─────────
+                // The needle's transform-origin is at its base (centre of the joystick
+                // circle). The needle points UP at 0°. The ship's heading 0 = east in
+                // canvas (standard math), so the needle should point "bow-ward" in the
+                // player's screen frame. We convert heading → screen angle:
+                //   canvas heading 0 = east = screen right → screen angle = heading - π/2
+                // (because the needle is drawn pointing north = -π/2 relative to east).
+                function _updateNeedle() {
+                    if (!window.inNavalBattle) return;
+                    var h = _getShipHeading();
+                    if (h === null) return;
+                    // heading 0 = east; we want needle pointing east = rotate +90°
+                    var angleDeg = h * (180 / Math.PI) + 90;
+                    needle.style.transform = "rotate(" + angleDeg + "deg)";
+                }
+
+                // ── Draw resistance arc on canvas ─────────────────────────────
+                // Shows a glowing red arc on the "against-bow" side to hint resistance.
+                var _rCtx = resistEl.getContext("2d");
+                function _updateResistArc(rawN) {
+                    // rawN = raw normalised joystick value [-1..1]
+                    _rCtx.clearRect(0, 0, 90, 90);
+                    if (Math.abs(rawN) < 0.05) return;
+
+                    var h = _getShipHeading();
+                    if (h === null) return;
+
+                    // "Bow side" in screen-X: cos(heading) > 0 → bow is to the right
+                    // We treat the joystick purely in screen-X, so:
+                    //   bowScreenX = cos(heading): positive = bow is right, negative = bow is left
+                    var bowScreenX = Math.cos(h);
+                    // If knob is on the SAME side as the bow, no resistance arc
+                    var isSameSide = (rawN > 0 && bowScreenX > 0) || (rawN < 0 && bowScreenX < 0);
+                    if (isSameSide) return;
+
+                    // Intensity: how hard is the push against bow
+                    var intensity = (Math.abs(rawN) - RESIST_THRESHOLD) / (1 - RESIST_THRESHOLD);
+                    intensity = Math.max(0, Math.min(1, intensity));
+                    if (intensity < 0.05) return;
+
+                    var cx = 45, cy = 45, r = 41;
+                    // Arc on the side the knob is pushed toward
+                    var arcStart, arcEnd;
+                    if (rawN < 0) { arcStart = Math.PI * 0.5;  arcEnd = Math.PI * 1.5; }
+                    else          { arcStart = -Math.PI * 0.5; arcEnd = Math.PI * 0.5; }
+
+                    _rCtx.save();
+                    _rCtx.globalAlpha = 0.18 + intensity * 0.32;
+                    var grad = _rCtx.createRadialGradient(cx, cy, r * 0.6, cx, cy, r);
+                    grad.addColorStop(0, "rgba(255,60,60,0)");
+                    grad.addColorStop(1, "rgba(255,60,60,0.9)");
+                    _rCtx.strokeStyle = grad;
+                    _rCtx.lineWidth   = 8;
+                    _rCtx.lineCap     = "round";
+                    _rCtx.beginPath();
+                    _rCtx.arc(cx, cy, r, arcStart, arcEnd);
+                    _rCtx.stroke();
+                    _rCtx.restore();
+                }
+
+                // ── Apply exponential resistance based on bow alignment ───────
+                // Returns an effective dx in [-1, 1] passed to physics.
+                // Pushing bow-side: slight easing (EASY_EXP < 1 = more responsive).
+                // Pushing against bow: steeper curve (HARD_EXP > 1 = less effective).
+                function _applyResistance(rawN) {
+                    if (Math.abs(rawN) < 0.001) return 0;
+                    var h = _getShipHeading();
+                    if (h === null) return rawN; // no ship — pass through
+
+                    var bowScreenX  = Math.cos(h);
+                    var isSameSide  = (rawN > 0 && bowScreenX > 0) || (rawN < 0 && bowScreenX < 0);
+                    var sign        = rawN < 0 ? -1 : 1;
+                    var abs         = Math.abs(rawN);
+
+                    if (isSameSide) {
+                        // Bow-side: slightly easier (gentle easing)
+                        return sign * Math.pow(abs, EASY_EXP);
+                    } else {
+                        // Against bow: exponentially harder
+                        // Below RESIST_THRESHOLD: linear pass-through (grace zone)
+                        if (abs < RESIST_THRESHOLD) return sign * abs;
+                        // Above threshold: remap to [0,1] and apply hard exponent
+                        var t = (abs - RESIST_THRESHOLD) / (1 - RESIST_THRESHOLD);
+                        return sign * (RESIST_THRESHOLD + Math.pow(t, HARD_EXP) * (1 - RESIST_THRESHOLD));
+                    }
+                }
+
+                // ── THROTTLE DISABLE while rotating ──────────────────────────
+                function _setThrottleDisabled(disabled) {
+                    var hz = document.getElementById("mob-helm-zone");
+                    if (!hz) return;
+                    var btns = hz.querySelectorAll(".ship-throttle-btn");
+                    btns.forEach(function(b) {
+                        b.style.pointerEvents = disabled ? "none" : "all";
+                        b.style.opacity       = disabled ? "0.35" : "1";
+                        b.style.filter        = disabled ? "grayscale(60%)" : "";
+                    });
+                    if (disabled && window._shipHelmInput) {
+                        window._shipHelmInput = { dx: window._shipHelmInput.dx, dy: 0 };
+                    }
+                }
+
+                function _onMove(cx) {
+                    var rect = zone.getBoundingClientRect();
+                    var ox   = cx - (rect.left + rect.width / 2);
+                    var dist = Math.abs(ox);
+                    if (dist < DEAD) {
+                        knob.style.transform = "translate(-50%, -50%)";
+                        _updateResistArc(0);
+                        window._shipHelmInput = { dx: 0, dy: _getDY() };
+                        _setThrottleDisabled(false);
+                    } else {
+                        var rawN  = Math.min(dist / MAX_R, 1.0) * (ox < 0 ? -1 : 1);
+                        var effDx = _applyResistance(rawN);
+                        // Knob visual: show full raw travel (player sees where they pushed)
+                        knob.style.transform = "translate(calc(-50% + " + (rawN * MAX_R) + "px), -50%)";
+                        _updateResistArc(rawN);
+                        window._shipHelmInput = { dx: effDx, dy: 0 }; // dy forced to 0 while rotating
+                        _setThrottleDisabled(true);
+                    }
+                }
+                function _onEnd() {
+                    touching = false; _tid = null;
+                    knob.style.transform = "translate(-50%, -50%)";
+                    _updateResistArc(0);
+                    window._shipHelmInput = { dx: 0, dy: _getDY() };
+                    _setThrottleDisabled(false);
+                }
+
+                // ── Ship cycling on tap (no drag) ────────────────────────────
+                // A tap (< 200ms, < 8px travel) on the joystick zone cycles
+                // isPlayerControlled to the next alive ship — same as PC click.
+                function _cyclePlayerShip() {
+                    var env = window.navalEnvironment;
+                    if (!env || !Array.isArray(env.ships) || env.ships.length < 2) return;
+                    var cur = env.ships.findIndex(function(s) { return s.isPlayerControlled; });
+                    if (cur < 0) cur = 0;
+                    // Transfer control to next ship
+                    for (var attempt = 1; attempt < env.ships.length; attempt++) {
+                        var next = (cur + attempt) % env.ships.length;
+                        // Only cycle to player-faction ships
+                        if (env.ships[next].side === "player" || env.ships[next].side === "ally") {
+                            env.ships[cur].isPlayerControlled  = false;
+                            env.ships[next].isPlayerControlled = true;
+                            break;
+                        }
+                    }
+                }
+
+                // ── Touch listeners ──────────────────────────────────────────
+                zone.addEventListener("touchstart", function(e) {
+                    if (e.cancelable) e.preventDefault(); e.stopPropagation();
+                    touching = true; _tid = e.touches[0].identifier;
+                    _touchStartX    = e.touches[0].clientX;
+                    _touchStartTime = Date.now();
+                    _isDrag = false;
+                    _onMove(e.touches[0].clientX);
+                }, { passive: false });
+                zone.addEventListener("touchmove", function(e) {
+                    if (e.cancelable) e.preventDefault(); e.stopPropagation();
+                    if (!touching) return;
+                    for (var i = 0; i < e.touches.length; i++) {
+                        if (e.touches[i].identifier === _tid) {
+                            var moved = Math.abs(e.touches[i].clientX - _touchStartX);
+                            if (moved > 6) _isDrag = true;
+                            _onMove(e.touches[i].clientX);
+                            break;
+                        }
+                    }
+                }, { passive: false });
+                zone.addEventListener("touchend", function(e) {
+                    if (e.cancelable) e.preventDefault();
+                    var elapsed = Date.now() - _touchStartTime;
+                    if (!_isDrag && elapsed < 220) {
+                        // It was a tap — cycle ship
+                        _cyclePlayerShip();
+                    }
+                    _onEnd();
+                }, { passive: false });
+                zone.addEventListener("touchcancel", _onEnd);
+
+                // ── Mouse listeners (desktop) ────────────────────────────────
+                zone.addEventListener("mousedown", function(e) {
+                    touching = true;
+                    _touchStartX    = e.clientX;
+                    _touchStartTime = Date.now();
+                    _isDrag = false;
+                    _onMove(e.clientX);
+                    var mm = function(ev) {
+                        if (!touching) return;
+                        if (Math.abs(ev.clientX - _touchStartX) > 6) _isDrag = true;
+                        _onMove(ev.clientX);
+                    };
+                    var mu = function(ev) {
+                        var elapsed = Date.now() - _touchStartTime;
+                        if (!_isDrag && elapsed < 220) _cyclePlayerShip();
+                        _onEnd();
+                        document.removeEventListener("mousemove", mm);
+                        document.removeEventListener("mouseup", mu);
+                    };
+                    document.addEventListener("mousemove", mm);
+                    document.addEventListener("mouseup", mu);
+                });
+
+                // ── Continuous needle update RAF ──────────────────────────────
+                (function _needleLoop() {
+                    if (window.inNavalBattle) _updateNeedle();
+                    requestAnimationFrame(_needleLoop);
+                })();
+            })();
+
+            // ── SAIL CONTROL REMOVED ─────────────────────────────────────────
+            // Sail angle buttons (CW/CCW) have been removed.
+            // Sails now auto-trim to the optimal angle for the current wind
+            // and ship heading every frame — no player input needed or possible.
+            // See naval_sailing_cosmetics.js _drawJunkSails and naval_battles.js
+            // per-ship physics (_sailManual=false) for the auto-trim logic.
+
+        }  // ── Ship joystick latch ─────────────────────────
+        // Once ships are detected during a live battle this stays true until the
+        // battle actually ends.  This prevents the 250ms poll from ever hiding
+        // the joysticks mid-fight due to flag timing glitches or non-standard
+        // naval launch paths that don't set window.inNavalBattle immediately.
+        var _helmShowing = false;
+        // _helmForced: set by forceNavalHelm(), cleared only by clearNavalHelm().
+        // While true the poll CANNOT clear _helmShowing — guards against the
+        // timing window where the poll fires between launch steps.
+        var _helmForced = false;
+        // _helmForcedAt: timestamp of the last forceNavalHelm() call.
+        // _syncHelmVisibility will not clear state within HELM_COOLDOWN_MS of a
+        // force call — guards the race where launchCustomBattle resets
+        // inNavalBattle=false momentarily before custom_naval_launcher sets it back.
+        var _helmForcedAt   = 0;
+        var HELM_COOLDOWN_MS = 3000;
+
+        function _syncHelmVisibility() {
+            var helmZone = document.getElementById("mob-helm-zone");
+            var rotJoy   = document.getElementById("mob-rot-joy-zone");
+            if (!helmZone) return;
+
+            var isRiver = !!window.inRiverBattle;
+            var isNaval = !!window.inNavalBattle && !isRiver;
+
+            // ABSOLUTE CLEAR: inNavalBattle=false means battle ended via any path.
+            // EXCEPTION: if forceNavalHelm() was called within the last HELM_COOLDOWN_MS
+            // we skip the clear — launchCustomBattle briefly sets inNavalBattle=false
+            // during cleanup before the launcher sets it back, and the 250ms poll can
+            // fire inside that window and wipe the buttons before they ever show.
+            if (!isNaval) {
+                var msSinceForce = Date.now() - _helmForcedAt;
+                if (msSinceForce < HELM_COOLDOWN_MS) return; // still in cooldown — don't clear
+                if (_helmShowing) {
+                    _helmShowing = false;
+                    _helmForced  = false;
+                    helmZone.style.display = "none";
+                    if (rotJoy) rotJoy.style.display = "none";
+                }
+                return;
+            }
+
+            // SHOW when naval battle is live — catches both launch paths
+            var hasShips = !!(window.navalEnvironment &&
+                              Array.isArray(window.navalEnvironment.ships) &&
+                              window.navalEnvironment.ships.length > 0);
+            if (hasShips || _helmForced) _helmShowing = true;
+
+            // BOARDING GUARD: if ships are grappled, disableNavalHelm() owns
+            // the display — the 250ms poll must not fight it by re-showing buttons.
+            if (_helmGrappled) return;
+
+            helmZone.style.display = _helmShowing ? "flex"  : "none";
+            if (rotJoy) rotJoy.style.display = _helmShowing ? "block" : "none";
+        }
+
 
         // ── Pinch-to-zoom ─────────────────────────────────────────────────────
         function _attachPinchZoom() {
@@ -1483,13 +1874,156 @@ body.mob-drawer-open #mob-controls-overlay {
         function _syncVisibility() {
             const overlay = document.getElementById("mob-controls-overlay");
             if (!overlay) return;
-            // Only show during active battle and not while parler/story is up
-            const inBattle  = typeof window.inBattleMode !== "undefined" && window.inBattleMode;
+            var inBattle = false;
+            try { inBattle = !!window.inBattleMode; } catch(e) {}
+            if (!inBattle) { try { if (typeof inBattleMode !== "undefined") inBattle = !!inBattleMode; } catch(e2) {} }
             const storyBusy = window.StoryPresentation && typeof window.StoryPresentation.busy === "function" && window.StoryPresentation.busy();
-            overlay.style.display = (inBattle && !storyBusy) ? "flex" : "none";
+            const isNaval = !!window.inNavalBattle && !window.inRiverBattle;
+
+            if (!inBattle || storyBusy) {
+                // Not in battle — hide everything
+                overlay.style.display = "none";
+            } else if (isNaval) {
+                // NAVAL BATTLE: hide the land-battle overlay (commander joystick, formation buttons etc.)
+                // Ship throttle (#mob-helm-zone) and rotation joystick (#mob-rot-joy-zone) are
+                // separate DOM elements managed by _syncHelmVisibility.
+                // Sail buttons removed — sails auto-trim to wind.
+                // NOTE: RTSControls.js manages its own naval overlay — do not interfere with it.
+                overlay.style.display = "none";
+            } else {
+                // LAND BATTLE: show all controls normally
+                overlay.style.display = "flex";
+            }
         }
 
-        // ── Main init ─────────────────────────────────────────────────────────
+        // ── forceNavalHelm / clearNavalHelm ──────────────────────────────────
+        // Public — called by custom_naval_launcher.js and custom_battle_gui.js
+        // via window.NavalHelmUI (NOT window.MobileControls, which RTSControls
+        // overwrites with its own object).
+        function forceNavalHelm() {
+            _helmGrappled = false; // clear boarding lock — fresh show request always wins
+            _helmForced   = true;
+            _helmShowing  = true;
+            _helmForcedAt = Date.now(); // start cooldown — _syncHelmVisibility won't clear for HELM_COOLDOWN_MS
+            var hz  = document.getElementById("mob-helm-zone");
+            var rj  = document.getElementById("mob-rot-joy-zone");
+            // Restore any opacity/filter that disableNavalHelm may have set, then show
+            if (hz)  { hz.style.opacity = ""; hz.style.filter = ""; hz.style.pointerEvents = ""; hz.style.display = "flex"; }
+            if (rj)  { rj.style.opacity = ""; rj.style.filter = ""; rj.style.pointerEvents = ""; rj.style.display = "block"; }
+        }
+        function clearNavalHelm() {
+            // CRITICAL: If ships are currently boarded/grappled, the cosmetics
+            // poller (naval_sailing_cosmetics.js, 3s interval) must NOT be able
+            // to clear the helm — disableNavalHelm() owns display during boarding.
+            // _helmGrappled is only cleared by enableNavalHelm() (ships separate)
+            // or forceNavalHelm() (fresh battle start).
+            if (_helmGrappled) return;
+
+            _helmForced   = false;
+            _helmShowing  = false;
+            _helmForcedAt = 0;
+            // Reset patch guard so _hookNavalInit re-wraps initNavalBattle on
+            // the next custom battle (otherwise repeated battles skip the hook).
+            if (typeof window.initNavalBattle === "function") {
+                window.initNavalBattle.__helmPatched = false;
+            }
+            var hz  = document.getElementById("mob-helm-zone");
+            var rj  = document.getElementById("mob-rot-joy-zone");
+            if (hz)  hz.style.display  = "none";
+            if (rj)  rj.style.display  = "none";
+        }
+
+        // ── disableNavalHelm / enableNavalHelm — grapple lock UI ─────────────
+        // Called by naval_battles.js every frame when ships are grappled/free.
+        // disableNavalHelm: HIDES buttons completely (not grey — clean screen for melee).
+        // enableNavalHelm:  re-shows via forceNavalHelm so state is fully restored.
+        // _helmGrappled gates clearNavalHelm and _syncHelmVisibility so the
+        // 250ms poll and 3s cosmetics poller cannot fight us during boarding.
+        var _helmGrappled = false;
+        function disableNavalHelm() {
+            if (_helmGrappled) return; // already hidden
+            _helmGrappled = true;
+            // Zero live input so the ship doesn't lurch during boarding
+            if (window._shipHelmInput) window._shipHelmInput = { dx: 0, dy: 0 };
+            var hz = document.getElementById("mob-helm-zone");
+            var rj = document.getElementById("mob-rot-joy-zone");
+            // Hide completely — no greyed ghost buttons during melee boarding
+            if (hz) { hz.style.display = "none"; hz.style.opacity = ""; hz.style.filter = ""; hz.style.pointerEvents = ""; }
+            if (rj) { rj.style.display = "none"; rj.style.opacity = ""; rj.style.filter = ""; rj.style.pointerEvents = ""; }
+        }
+        function enableNavalHelm() {
+            if (!_helmGrappled) return; // already visible
+            _helmGrappled = false;
+            // Re-show via forceNavalHelm so _helmShowing/_helmForced are
+            // correctly restored and the 250ms poll won't immediately hide again.
+            forceNavalHelm();
+        }
+
+        // ── initHelm — ALWAYS runs, desktop AND mobile ────────────────────────
+        // Builds the two ship joysticks and starts their visibility poll.
+        // Completely separate from the isMobile() guard below so these joysticks
+        // exist everywhere.  Covers BOTH naval entry paths:
+        //   Path 1: custom_naval_launcher → calls NavalHelmUI.forceNavalHelm() at end
+        //   Path 2: battlefield_launch sandbox → calls NavalHelmUI.forceNavalHelm() at end
+        // The 250ms poll is the primary mechanism; forceNavalHelm() is belt-and-suspenders.
+        // The last-resort deferred checker is the final fallback for any timing edge cases.
+        var _helmInited = false;
+        function initHelm() {
+            if (_helmInited) return;
+            _helmInited = true;
+
+            _buildHelmJoystick();
+
+            // ── Primary: 250ms poll ───────────────────────────────────────────
+            // Catches ship-presence on every tick. Fast enough to respond within
+            // one frame of either naval launch path completing.
+            setInterval(_syncHelmVisibility, 250);
+            _syncHelmVisibility();
+
+            // ── Hook initNavalBattle — fires synchronously on ship creation ───
+            // Both launch paths call initNavalBattle(), so patching it guarantees
+            // forceNavalHelm() fires the instant ships are created, before even the
+            // first 250ms poll tick.
+            (function _hookNavalInit() {
+                if (typeof window.initNavalBattle === "function" && !window.initNavalBattle.__helmPatched) {
+                    var _orig = window.initNavalBattle;
+                    window.initNavalBattle = function() {
+                        var r = _orig.apply(this, arguments);
+                        forceNavalHelm(); // fires synchronously right after ship creation
+                        return r;
+                    };
+                    window.initNavalBattle.__helmPatched = true;
+                } else if (typeof window.initNavalBattle !== "function") {
+                    // Not loaded yet — retry until it exists
+                    setTimeout(_hookNavalInit, 150);
+                }
+            })();
+
+            // ── Last-resort deferred checker ──────────────────────────────────
+            // If for any reason the poll missed the launch window (e.g. tab was in
+            // background, browser throttled timers, or an unusual launch order),
+            // these one-shot checks fire at 2s, 5s, and 10s after page load.
+            // They're fire-and-forget with no ongoing cost after they run.
+            // Zero performance impact — they only call _syncHelmVisibility() once each.
+            [2000, 5000, 10000].forEach(function(delay) {
+                setTimeout(function() {
+                    _syncHelmVisibility();
+                    // Also explicitly force-show if ships now exist but joysticks missed
+                    var hasShips = !!(window.navalEnvironment &&
+                                     Array.isArray(window.navalEnvironment.ships) &&
+                                     window.navalEnvironment.ships.length > 0);
+                    var isNaval  = !!window.inNavalBattle && !window.inRiverBattle;
+                    if ((hasShips || isNaval) && !_helmShowing) {
+                        forceNavalHelm();
+                    }
+                }, delay);
+            });
+
+            // Expose under NavalHelmUI — RTSControls cannot clobber this name
+            window.NavalHelmUI = { forceNavalHelm: forceNavalHelm, clearNavalHelm: clearNavalHelm, disableNavalHelm: disableNavalHelm, enableNavalHelm: enableNavalHelm };
+        }
+
+        // ── Main init — mobile-only (commander joystick, formation buttons) ───
         let _inited = false;
         function init() {
             if (!isMobile() || _inited) return;
@@ -1517,14 +2051,14 @@ body.mob-drawer-open #mob-controls-overlay {
 
             _attachPinchZoom();
 
-            // Poll visibility every 500ms
+            // Poll land-battle overlay visibility (500ms is fine — not ship-critical)
             setInterval(_syncVisibility, 500);
             _syncVisibility();
 
-            console.log("[MobileControls] Joystick + formation buttons + pinch-zoom initialised.");
+            console.log("[MobileControls] Commander joystick + formation buttons + pinch-zoom initialised.");
         }
 
-        return { init, simulateKey, holdKey, releaseKey, releaseAllKeys };
+        return { init, initHelm, simulateKey, holdKey, releaseKey, releaseAllKeys };
     })();
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -1600,12 +2134,13 @@ function syncDetailButtonVisibility() {
         const inBattle = (typeof inBattleMode !== "undefined" && inBattleMode);
         const inCity   = (typeof inCityMode   !== "undefined" && inCityMode);
         const inParle  = (typeof inParleMode  !== "undefined" && inParleMode);
+        const inCamp   = (typeof window.inCampMode !== "undefined" && window.inCampMode);
         
         // SURGERY: Detect if the Main Menu or Loading Screen is currently active
         const mainMenu = document.getElementById("main-menu");
         const onMenu   = !!(mainMenu && mainMenu.style.opacity !== "0" && mainMenu.style.display !== "none");
         const isLoading = document.body.classList.contains('is-loading-state');
-const isGameStateValid = !inBattle && !inCity && !inParle && !onMenu && !isLoading;
+const isGameStateValid = !inBattle && !inCity && !inParle && !onMenu && !isLoading && !inCamp;
 
 // 1. Mobile button visibility (Enabled for PC testing)
 if (isGameStateValid) { 
@@ -1677,7 +2212,8 @@ window.mobileUI = {
             openDetailDrawer
         };
 
-        MobileControls.init();
+        MobileControls.initHelm();  // always — ship joysticks on ALL devices
+        MobileControls.init();      // mobile-only — commander joystick, buttons
 
         console.log("[mobile_ui.js] Loaded ✓");
     }

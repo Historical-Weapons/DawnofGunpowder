@@ -44,10 +44,13 @@
 //  PB9 ★★★☆☆  Supply line wagons  (5 wagons → 2 on native, per frame)
 //
 //  NAVAL ONLY
-//  PB3 ★★★★☆  Naval map 4800×3200 → 3200×2400  (~50 % grid RAM)
-//  PB4 ★★★☆☆  Wave render throttle  (skip-2 on native)
-//  PB5 ★★★☆☆  Naval fish throttle   (skip-3 on native)
-//  PB6 ★★☆☆☆  Seagull throttle      (skip-3 on native)
+//  PB3 ★★★★☆  Naval map size — platform-fixed scale (see PB_NAVAL_W/H below
+//             for current values/history) — NOT tier-scaled by Graphics Quality
+//  PB4/PB5/PB6 — REMOVED (wave/fish/seagull draw-skip caused flicker).
+//             LOW-tier naval cosmetic savings now live in naval_battles.js:
+//             _navShouldThrottleThisFrame() (30Hz fish/seagull AI, LOW only)
+//             and _navOnScreen() (viewport cull, scaled by tier via
+//             window.NAVAL_CULL_PADDING, set in settings_ui.js).
 //
 // HOW LOD MATH WORKS
 // ──────────────────
@@ -62,6 +65,15 @@
 // ── Idempotency guard ────────────────────────────────────────────────────
 if (window.__OB1__) return;
 window.__OB1__ = true;
+
+// ─────────────────────────────────────────────────────────────────────────
+// DESKTOP GRAPHICAL QUALITY  (0 = aggressive LOD, 80 = high / default, 100 = disabled)
+// ─────────────────────────────────────────────────────────────────────────
+// Set before IS_NATIVE check so settings_ui.js can read/write it at any time.
+// At 80% (default): LOD threshold ≈ 800 world-px → same as previous hardcoded behaviour.
+// At 100%: LOD completely disabled — all units always render as full sprites.
+// At 0%: LOD threshold = 200 world-px → aggressive dot substitution.
+window.desktopBattleQuality = window.desktopBattleQuality ?? 80;
 
 // ─────────────────────────────────────────────────────────────────────────
 // CAPACITOR / ANDROID WEBVIEW DETECTION  (mirrors optimization.js)
@@ -101,25 +113,45 @@ var IS_NATIVE = (
 var PB_LOD_DIST_PX = 800;
 var PB_LOD_DIST_SQ = PB_LOD_DIST_PX * PB_LOD_DIST_PX;  // 160,000 — no sqrt needed
 
-// PB3 — Reduced naval map dimensions.
+// PB3 — Naval map dimensions.
 //
-//  ORIGINAL : 4800 × 3200  =  15.36 MP canvas,  600×400 = 240,000 grid cells
-//  REDUCED  : 3200 × 2400  =   7.68 MP canvas,  400×300 = 120,000 grid cells
+//  BASE (pre-opt) : 4800 × 3200  =  15.36 MP canvas,  600×400 = 240,000 grid cells
+//  PREVIOUS       : 3200 × 2400  =   7.68 MP canvas,  400×300 = 120,000 grid cells
+//  NEW (6×)       : 19200 × 14400 = 276 MP → capped for safety
 //
-// SHIP GEOMETRY VERIFICATION (worst case — HEAVY Dragon, both sides):
-//   Ship size : width=1800, height=660
-//   centerX = 3200/2 = 1600 ;  centerY = 2400/2 = 1200
-//   pShip.y = 1200 + 330 + 125(gap) = 1655  ✓  < 2400
-//   eShip.y = 1200 - 330 - 125(gap) =  745  ✓  > 0
-//   Space below player ship bottom: 2400-(1655+330) = 415 px  ✓
-//   Space above enemy ship top:      745-330         = 415 px  ✓
-//   Inter-ship gap: 1325-1075 = 250 px  ✓  boarding distance intact
+// The background is rendered via drawOptimizedBattleCanvas which viewport-culls
+// to the visible screen area — the full canvas is NEVER rasterised all at once.
+// The grid array is 2400×1800 = 4,320,000 cells at 8px tiles — only the water
+// tile type (11) fills it, so it's mostly a flat typed array with no per-cell
+// draw cost.
 //
-// All spawn logic (deployNavalArmy, _customNavalDeckSpawn, slotForIndex,
-// findValidShipDeckPosition, lastResort2) uses ship.x/.y/.width/.height
-// directly — not the world dimensions.  Safe to reduce.
-var PB_NAVAL_W = 3200;
-var PB_NAVAL_H = 2400;
+// Mobile safety: the background cache canvas is already capped at 4096px per
+// dimension inside drawNavalBackground. We additionally cap the logical world
+// here at a mobile-safe size to avoid grid RAM blowup on low-end devices.
+//
+//  SHIP GEOMETRY VERIFICATION (worst case — HEAVY Dragon 1800×660):
+//   centerX = 19200/2 = 9600  centerY = 14400/2 = 7200
+//   pShip.y  = 7200 + 0.82 * 14400 = 11808  (fraction of world height)
+//   eShip.y  = 7200 + 0.18 * 14400 =  2592
+//   Ships spawn at 18%/82% of map height — enormous engagement distance ✓
+//
+// Mobile cap: IS_NATIVE devices use 4800×3600 (half of the previous 9600×7200)
+// Desktop / web: 9600×7200 (half of the previous 19200×14400)
+//
+// HALVED PER REQUEST (all coastal + ocean naval battles, both launch paths —
+// enterBattlefield()'s Ocean/Coastal branch in battlefield_launch.js AND
+// launchCustomNavalBattle() in custom_naval_launcher.js — since both funnel
+// through the shared initNavalBattle() this file wraps, one change here
+// covers both).
+//
+// This only shrinks the SAILING AREA (world bounds fed to generateNavalMap /
+// generateShips / cosmetic spawn bounds). It does NOT touch wave, seagull, or
+// fish sprite sizes — those are drawn at fixed pixel dimensions inside
+// naval_battles.js regardless of world size; shrinking BATTLE_WORLD_WIDTH/
+// HEIGHT only shrinks the box they're scattered across (so they end up a bit
+// closer together, never smaller).
+var PB_NAVAL_W = IS_NATIVE ? 4800  : 9600;   // half of previous 9600/19200  // <<<< TWEAK MAP SIZE
+var PB_NAVAL_H = IS_NATIVE ? 3600  : 7200;   // half of previous 7200/14400
 
 // ─────────────────────────────────────────────────────────────────────────
 // SHARED HELPERS  (defined before _install so patches can reference them)
@@ -144,8 +176,14 @@ var _EMPTY_MUT = [];
  *   1. player not defined → never LOD  (safe fallback to full render)
  *   2. unit is the player's commander  → never LOD
  *   3. unit is at player's exact position (±2 px float noise) → never LOD
- *   4. dx²+dy² > PB_LOD_DIST_SQ → LOD
- *   5. Otherwise → full render
+ *   4. desktopBattleQuality ≥ 80% (default "HIGH") → LOD disabled entirely
+ *   5. dx²+dy² > dynLodDistSq  → LOD  (threshold scales with quality)
+ *   6. Otherwise → full render
+ *
+ * Dynamic LOD distance (world-px):
+ *   q=0%  → 200 px  (very aggressive)
+ *   q=80% → 800 px  (matches old hardcoded default — "HIGH" threshold reached here)
+ *   q≥80% → disabled (returns false always)
  *
  * Uses squared distance to avoid a sqrt per unit per frame.
  * Called up to ~200 times per frame — must be fast.
@@ -159,9 +197,32 @@ function _shouldLOD(x, y, unit) {
     // Position-based identity check (handles ±2 px float rounding)
     if (Math.abs(x - player.x) < 2 && Math.abs(y - player.y) < 2) return false;
 
+    // Desktop quality: ≥80% = LOD disabled (default is 80%, so default = no dots)
+    // NOTE: desktopBattleQuality is permanently locked to 100 (see
+    // settings_ui.js — desktop always runs MAX, no LOD ever). The branch
+    // below is therefore always skipped on desktop by design; it only
+    // matters if this function is ever reused somewhere desktopBattleQuality
+    // isn't locked.
+    var dq = (typeof window.desktopBattleQuality === 'number')
+              ? Math.max(0, Math.min(100, window.desktopBattleQuality)) : 80;
+    if (dq >= 80) return false;
+
+    // Below 80%: linear scale — 200 world-px at 0%, 800 world-px at 80% threshold
+    var dynLodDist = 200 + (dq / 80) * 600;  // 200..800
+
+    // SIEGE TIGHTENING (replaces the old, dead PS8 mechanism in
+    // optimization-siege.js, which wrote to window.__pb_lod_sq — a property
+    // this function never actually read, making it a permanent no-op).
+    // In siege the camera rarely pans far east/west (the wall is a
+    // horizontal strip), so a tighter LOD zone is genuinely correct —
+    // scaled down proportionally rather than a flat unconditional override.
+    if (typeof inSiegeBattle !== 'undefined' && inSiegeBattle) {
+        dynLodDist = Math.min(dynLodDist, 130 + (dq / 80) * 390); // 130..520
+    }
+
     var dx = x - player.x;
     var dy = y - player.y;
-    return (dx * dx + dy * dy) > PB_LOD_DIST_SQ;
+    return (dx * dx + dy * dy) > dynLodDist * dynLodDist;
 }
 
 /**
@@ -226,22 +287,38 @@ function _install() {
     _pb1_infantryLOD();
     _pb2_cavalryLOD();
     _pb3_navalMapReduction();
-    _pb4_waveThrottle();
-    _pb5_fishThrottle();
-    _pb6_seagullThrottle();
+    // _pb4_waveThrottle()    — REMOVED: drawCosmeticWaves now contains ONLY
+    //   the seagull draw loop (actual wave-crest rendering lives inside
+    //   drawNavalShips, unthrottled, and isn't touched by this patch at all
+    //   anymore — the two diverged at some point). This was a pure seagull
+    //   draw-skip in practice, and its own doc comment's "desktop: no skip"
+    //   claim didn't match the code (SKIP was 2 on desktop, 4 on mobile).
+    //   Skipping the draw call entirely on 1-3 out of every 2-4 frames is
+    //   exactly what flicker is — removed per explicit request.
+    // _pb5_fishThrottle()    — REMOVED: froze fish movement (empty-array
+    //   swap inside updateNavalPhysics) on skip-2 (desktop) / skip-6
+    //   (mobile) frames — same stale "desktop: no throttle" mismatch.
+    // _pb6_seagullThrottle() — REMOVED: same empty-array freeze for
+    //   seagulls, stacked ON TOP of PB4's draw-skip — seagulls were being
+    //   hit by two independent throttles at once.
     _pb7_bloodPoolLOD();
     _pb8_stuckProjectileLOD();
     _pb9_supplyLineReduction();
 
     console.log(
-        '%c[OPT-BATTLES v1.1] Installed successfully\n' +
-        '  Native/Capacitor : ' + IS_NATIVE + '\n' +
-        '  PB1 Infantry LOD  (' + PB_LOD_DIST_PX + ' px threshold, dot replace)\n' +
-        '  PB2 Cavalry LOD   (' + PB_LOD_DIST_PX + ' px threshold, sized dot)\n' +
-        '  PB3 Naval map 4800×3200 → ' + PB_NAVAL_W + '×' + PB_NAVAL_H + '\n' +
-        '  PB4 Wave throttle  (skip-' + (IS_NATIVE ? 2 : 1) + ')\n' +
-        '  PB5 Fish throttle  (skip-' + (IS_NATIVE ? 3 : 1) + ')\n' +
-        '  PB6 Seagull throttle (skip-' + (IS_NATIVE ? 3 : 1) + ')\n' +
+        '%c[OPT-BATTLES v1.3] Installed successfully\n' +
+        '  Native/Capacitor  : ' + IS_NATIVE + '\n' +
+        '  Desktop quality   : window.desktopBattleQuality=' + (typeof window.desktopBattleQuality === 'number' ? window.desktopBattleQuality : 100) + '%\n' +
+        '                      (always 100% / MAX on desktop — locked in settings_ui.js)\n' +
+        '                      (0%=200px LOD, 80%=800px LOD, ≥80%=LOD disabled / default)\n' +
+        '                      Controlled by Graphics Quality slider in Options menu\n' +
+        '  PB1 Infantry LOD  (dynamic threshold, dot replace)\n' +
+        '  PB2 Cavalry LOD   (dynamic threshold, sized dot)\n' +
+        '  PB3 Naval map ' + PB_NAVAL_W + '×' + PB_NAVAL_H + ' (platform-fixed — not tier-scaled)\n' +
+        '  PB4/PB5/PB6 (wave/fish/seagull draw-skip) — REMOVED, caused flicker.\n' +
+        '              LOW-tier naval savings now come from naval_battles.js\n' +
+        '              instead: _navShouldThrottleThisFrame() (30Hz fish/seagull\n' +
+        '              AI, LOW only) + _navOnScreen() (viewport cull, all tiers).\n' +
         '  PB7 Blood pool LOD (skip far corpses)\n' +
         '  PB8 stuckProjectile LOD (stash-restore, no prototype patching)\n' +
         '  PB9 Supply wagons  (' + (IS_NATIVE ? 2 : 5) + ' wagons per side on native)',
@@ -484,7 +561,8 @@ function _pb3_navalMapReduction() {
 // Desktop (IS_NATIVE=false): no skip.
 // ────────────────────────────────────────────────────────────────────────
 function _pb4_waveThrottle() {
-    var SKIP = 1;
+    // Tripled from original values: native 2→6, desktop 1→3
+    var SKIP = IS_NATIVE ? 4 : 2;  // desktop skip-2: smooth; native skip-4: 2× original
     var _n4  = 0;
 
     var _tryWrap = function () {
@@ -540,8 +618,9 @@ function _pb4_waveThrottle() {
 // Desktop: no throttle.
 // ────────────────────────────────────────────────────────────────────────
 function _pb5_fishThrottle() {
-    var SKIP = 1;
-    if (SKIP <= 1) return;
+    // Tripled from original values: native 3→9, desktop 1→3
+    var SKIP = IS_NATIVE ? 6 : 2;  // desktop skip-2 smooth; native skip-6
+    // SKIP is always > 1 now so no early return needed
 
     var _n5    = 0;
     var _pollN5  = 0;
@@ -610,8 +689,9 @@ function _pb5_fishThrottle() {
 // Desktop: no throttle.
 // ────────────────────────────────────────────────────────────────────────
 function _pb6_seagullThrottle() {
-    var SKIP = 1;
-    if (SKIP <= 1) return;
+    // Tripled from original values: native 3→9, desktop 1→3
+    var SKIP = IS_NATIVE ? 6 : 2;  // desktop skip-2 smooth; native skip-6
+    // SKIP is always > 1 now so no early return needed
 
     var _n6      = 0;
     var _pollN6  = 0;
@@ -886,5 +966,3 @@ function _pb9_supplyLineReduction() {
 
 
 })(); // End OPTIMIZATION_BATTLES IIFE
-
- 

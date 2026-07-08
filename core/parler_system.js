@@ -5,6 +5,34 @@ let isDiplomacyProcessing = false; // NEW: Prevents button spamming
 
 window.addEventListener('DoG:gameStart', () => { inParleMode = false; });
 
+// ── RELATION RESOLVER ─────────────────────────────────────────────────────────
+// Returns a 4-state string describing how the player stands with an NPC faction:
+//   "same"  → NPC literally belongs to the player's own faction (commander/colleague)
+//   "ally"  → Different faction, but FACTION_RELATIONS marks them as "Ally"
+//   "peace" → Neutral: no formal alliance, no active war
+//   "war"   → At war (player.enemies array or FACTION_RELATIONS "War")
+//
+// Use this everywhere isAlly/isEnemy is computed — it's the single source of truth.
+function _npcRelation(npc) {
+    const pf = (player && player.faction) ? player.faction : "Player";
+    const nf = npc && npc.faction;
+    if (!nf) return "peace";
+    // Same faction check — uses PlayerFaction.is() for legacy name variants
+    const isSame = (nf === pf) ||
+                   (window.PlayerFaction && window.PlayerFaction.is(nf));
+    if (isSame) return "same";
+    // War check via player.enemies array (kept in sync by setRelation)
+    const isWar = Array.isArray(player.enemies) && player.enemies.includes(nf);
+    if (isWar) return "war";
+    // Formal relation from the diplomacy matrix
+    if (typeof getRelation === "function") {
+        const r = getRelation(pf, nf);
+        if (r === "Ally") return "ally";
+        if (r === "War")  return "war";   // matrix and array may be out of sync briefly
+    }
+    return "peace";
+}
+
 function getTopExpensiveNPCUnits(npc, count = 3) {
     if (!npc.roster || npc.roster.length === 0) return [];
 
@@ -49,9 +77,10 @@ function getTopExpensiveNPCUnits(npc, count = 3) {
  * Returns a tailored dialogue string for the 'Hello' choice based on the NPC role.
  */
 function generateNPCDialogue(npc, choice) {
-    // UPDATED: Dynamically check standings
-    const isEnemy = player.enemies && player.enemies.includes(npc.faction);
-    const isAlly = npc.faction === player.faction;
+    // UPDATED: Dynamically check standings via canonical _npcRelation()
+    const _rel    = _npcRelation(npc);
+    const isEnemy = _rel === "war";
+    const isAlly  = _rel === "same" || _rel === "ally";
 
     if (choice === "Hello") {
         if (npc.faction === "Bandits" || npc.role === "Bandit") {
@@ -59,17 +88,16 @@ function generateNPCDialogue(npc, choice) {
         } else if (npc.role === "Civilian" || npc.role === "Commerce") {
             return "We are simple folk, just passing through.";
         } else if (npc.role === "Patrol" || npc.role === "Military") {
-            if (isAlly) {
-                // Assumption: player.faction is defined in the global player object
+            if (_rel === "same") {
                 return "Commander! The region is stable. Our forces stand ready.";
+            } else if (_rel === "ally") {
+                return "Allied banner — well met, Commander. Safe passage on our watch.";
             } else if (isEnemy) {
                 return "You stand on hostile ground. Explain your presence, or we will remove you, dead or alive!";
             } else {
-                // Neutral military response
                 return `Halt. We represent the ${npc.faction}. We seek no quarrel, provided you keep your weapons sheathed.`;
             }
         } else {
-            // Neutral/Default response
             return `Hello there. Safe travels in these parts.`;
         }
     }
@@ -79,14 +107,16 @@ function generateNPCDialogue(npc, choice) {
 
 function generateNPCDialogue(npc, choice) { //new version
        if (choice !== "Hello") return "...";
-       const isEnemy = player.enemies && player.enemies.includes(npc.faction);
-       const isAlly  = npc.faction === player.faction;
+       const _rel    = _npcRelation(npc);
+       const isEnemy = _rel === "war";
+       const isAlly  = _rel === "same" || _rel === "ally";
        return RandomDialogue.generateHello({
            faction:       npc.faction,
            playerFaction: player.faction,
            playerNumbers: player.troops || 0,
            npcNumbers:    npc.count    || 0,
            npcType:       npc.role,
+           relation:      _rel,
            isEnemy,
            isAlly
       }, npc);
@@ -96,11 +126,12 @@ function handleDiplomacyAction(npc, actionType) {
 if (isDiplomacyProcessing) return; // EXIT if we are already transitioning
 
     if (typeof AudioManager !== 'undefined') AudioManager.playSound('ui_click');
-    // UPDATED: Define different scenarios based on dynamic faction standing
-    const isEnemy = player.enemies && player.enemies.includes(npc.faction);
-    const isAlly = npc.faction === player.faction;
-    const isNeutral = !isEnemy && !isAlly;
-    const isBandit = npc.faction === "Bandits" || npc.role === "Bandit";
+    // Canonical 4-state relation — single source of truth for all logic below
+    const _rel      = _npcRelation(npc);
+    const isEnemy   = _rel === "war";
+    const isAlly    = _rel === "same" || _rel === "ally";
+    const isNeutral = _rel === "peace";
+    const isBandit  = npc.faction === "Bandits" || npc.role === "Bandit";
 
     // NEW: Calculate Overwhelming Odds (3:1 ratio)
     const playerTroops = player.troops || 0;
@@ -119,13 +150,14 @@ case "RANDOM":
             if (typeof RandomDialogue !== 'undefined' && typeof RandomDialogue.generate === 'function') {
                 // Pass the npc object reference as the second argument to track spam/re-encounters
                 parleDialogue.innerText = RandomDialogue.generate({
-                    faction: npc.faction,
+                    faction:       npc.faction,
                     playerFaction: player.faction,
                     playerNumbers: playerTroops,
-                    npcNumbers: npcTroops,
-                    npcType: npc.role,
-                    isEnemy: isEnemy,
-                    isAlly: isAlly
+                    npcNumbers:    npcTroops,
+                    npcType:       npc.role,
+                    relation:      _rel,
+                    isEnemy:       isEnemy,
+                    isAlly:        isAlly
                 }, npc);
             } else {
                 parleDialogue.innerText = "There is much to discuss, but perhaps another time.";
@@ -189,19 +221,27 @@ function showPreBattleOptions(npc) {
     // Allow clicking again
     isDiplomacyProcessing = false; 
 
+    // ────────────────────────────────────────────────────────────────────────
+    // FIX: Lead Troops cooldown after a battle loss (overworld-tick-based)
+    // ────────────────────────────────────────────────────────────────────────
+    // __leadLockoutTicks is set to 900 (~30s at 30fps) on any loss by
+    // leave_battle_roster.js / startAutoresolve, and decremented ONLY inside
+    // sandboxmode_update's pure overworld branch.  Parle, city, and battle
+    // frames never decrement it, so waiting in this menu does NOT drain the
+    // cooldown — the player must actually roam the overworld.
+    const LEAD_LOCKOUT_TICKS = 900;
+    const lockoutTicks        = window.__leadLockoutTicks || 0;
+    const leadLockedOut       = lockoutTicks > 0;
+
     // Button 1: Send Troops (Autoresolve)
+    // FIX: removed the "player.troops < 1" gate that used to disable autoresolve
+    // with no troops — instead, the zero-troops overworld heartbeat permadeath
+    // (sandboxmode_update.js) handles the wipe state. Autoresolve is always
+    // available when the parler UI is up.
     const sendTroopsBtn = createDiplomacyButton("Send Troops (Autoresolve)", () => {
         if (isDiplomacyProcessing) return;
         startAutoresolve(npc);
     });
-	// THE FIX: Change or remove the troop count check
-// If you want to allow it even with 1 troop, use:
-if (player.troops < 1) { 
-    sendTroopsBtn.disabled = true;
-    sendTroopsBtn.style.opacity = "0.5";
-    sendTroopsBtn.title = "Cannot Autoresolve";
-}
-
     sendTroopsBtn.style.background = "linear-gradient(to bottom, #d4a373, #faedcd)";
     sendTroopsBtn.style.color = "#333";
     actionBox.appendChild(sendTroopsBtn);
@@ -209,6 +249,11 @@ if (player.troops < 1) {
     // Button 2: Lead Troops (Manual Battle)
     const leadTroopsBtn = createDiplomacyButton("Lead Troops (Take the field)", () => {
         if (isDiplomacyProcessing) return;
+        // Defensive re-check at click time in case ticks rolled over since the panel opened
+        if ((window.__leadLockoutTicks || 0) > 0) {
+            parleDialogue.innerText = "You just lost a battle and your troops are disorganised. You may only autoresolve right now.";
+            return;
+        }
         isDiplomacyProcessing = true;
         parleDialogue.innerText = "To battle!";
 
@@ -220,6 +265,19 @@ if (player.troops < 1) {
             executeAttackAction(npc);
         }, 200);
     }, true); // Red attack styling
+
+    // Apply the lockout visuals if we're inside the cooldown window
+    if (leadLockedOut) {
+        leadTroopsBtn.disabled = true;
+        leadTroopsBtn.style.opacity = "0.45";
+        leadTroopsBtn.style.cursor = "not-allowed";
+        const secondsLeft = Math.ceil(lockoutTicks / 30); // ~30fps overworld ticks
+        leadTroopsBtn.title = "Disorganised after your last defeat — try again in " + secondsLeft + "s (overworld time) or win an autoresolve.";
+        // Make the player aware up front in the dialogue area, too.
+        parleDialogue.innerText =
+            "You just lost a battle and your troops are disorganised. You may only autoresolve for the next "
+            + secondsLeft + "s of overworld movement (or win an autoresolve to recover).";
+    }
     actionBox.appendChild(leadTroopsBtn);
 }
 
@@ -408,13 +466,18 @@ if (typeof inBattleMode !== 'undefined' && inBattleMode) return;
     }
     document.getElementById('parle-npc-faction').innerText = factionName;
 
-    // Standing Indicator
-    const isEnemy = player.enemies && player.enemies.includes(npc.faction);
-    const isAlly = npc.faction === player.faction;
+    // Standing Indicator — uses _npcRelation() for the full 4-state picture
+    const _standRel = _npcRelation(npc);
+    const isEnemy = _standRel === "war";
+    const isAlly  = _standRel === "same" || _standRel === "ally";
 
-    if (isAlly) {
-        standingEl.innerText = "Ally";
-        standingEl.style.backgroundColor = "#2e7d32"; // Green
+    if (_standRel === "same") {
+        standingEl.innerText = "Same Faction";
+        standingEl.style.backgroundColor = "#1b5e20"; // Dark green — own troops
+        standingEl.style.color = "#fff";
+    } else if (_standRel === "ally") {
+        standingEl.innerText = "Allied";
+        standingEl.style.backgroundColor = "#2e7d32"; // Green — formal ally
         standingEl.style.color = "#fff";
     } else if (isEnemy) {
         standingEl.innerText = "Hostile";
@@ -479,11 +542,12 @@ function populateParleButtons(npc) {
     const actionBox = document.getElementById('parle-action-box');
     actionBox.innerHTML = ''; // Clear previous buttons
 
-    // UPDATED: Dynamic faction standings
-    const isEnemy = player.enemies && player.enemies.includes(npc.faction);
-    const isAlly = npc.faction === player.faction;
-    const isNeutral = !isEnemy && !isAlly;
-    const isBandit = npc.faction === "Bandits" || npc.role === "Bandit";
+    // Canonical 4-state relation
+    const _rel      = _npcRelation(npc);
+    const isEnemy   = _rel === "war";
+    const isAlly    = _rel === "same" || _rel === "ally";
+    const isNeutral = _rel === "peace";
+    const isBandit  = npc.faction === "Bandits" || npc.role === "Bandit";
 
     // NEW: Calculate Odds for button context
     const playerTroops = player.troops || 0;
@@ -760,6 +824,19 @@ playerEffectivePower *= 1.10;//10 percent bonus
     // Recalculate totals
     player.troops = getRosterTotal(player.roster);
     npc.count = getRosterTotal(npc.roster);
+
+    // ────────────────────────────────────────────────────────────────────────
+    // FIX: Lead Troops cooldown also responds to autoresolve outcomes
+    // ────────────────────────────────────────────────────────────────────────
+    // A successful autoresolve recovers the army's organisation (clears the
+    // lockout). An autoresolve LOSS re-arms it for another ~30s of overworld time.
+    if (!window.__IS_CUSTOM_BATTLE__) {
+        if (playerWon) {
+            window.__leadLockoutTicks = 0;
+        } else {
+            window.__leadLockoutTicks = 900; // 30 s × ~30fps overworld ticks
+        }
+    }
 
     displayAutoresolveResults(npc, playerWon, playerCasualties, npcCasualties);
 }

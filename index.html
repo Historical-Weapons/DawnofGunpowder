@@ -205,6 +205,30 @@ if (document.readyState === 'loading') {
             
             <button id="siege-button" class="menu-btn" style="background: linear-gradient(to bottom, #d32f2f, #b71c1c); border-color: #fff; color: #fff; padding: 10px 20px; font-size: 1rem; width: 90%;" onclick="
                 if(activeCity) {
+                    /* === FIX 3: Force-sync troop count vs roster before allowing siege === */
+                    /* Pulls the true roster length so the displayed 'YOU (N)' label matches */
+                    /* reality, then refuses to encamp if the player has <=2 troops left.    */
+                    if (typeof window.hardSyncPlayerRoster === 'function') {
+                        try { window.hardSyncPlayerRoster(); } catch(e) { console.warn('hardSyncPlayerRoster failed', e); }
+                    }
+                    let trueTroops = 0;
+                    if (player && Array.isArray(player.roster)) {
+                        trueTroops = player.roster.length;
+                    }
+                    /* Reconcile the cosmetic counter with the true roster length */
+                    if (player) player.troops = trueTroops;
+
+                    if (trueTroops <= 2) {
+                        if(typeof AudioManager !== 'undefined') AudioManager.playSound('error');
+                        /* Last-resort: if somehow permadeath wasn't already triggered, fire it now */
+                        if (trueTroops <= 0 && typeof window.triggerPermadeath === 'function') {
+                            window.triggerPermadeath();
+                            return;
+                        }
+                        alert('You have too few soldiers (' + trueTroops + ') to encamp. Recruit before attempting a siege.');
+                        return;
+                    }
+
                     if(typeof AudioManager !== 'undefined') AudioManager.playSound('ui_click');
                     if(typeof initiatePlayerSiege === 'function') {
                         initiatePlayerSiege(activeCity);
@@ -215,6 +239,16 @@ if (document.readyState === 'loading') {
             ">Camp beside Settlement</button>
 
             <button id="assault-button" class="menu-btn" style="background: linear-gradient(to bottom, #ff9800, #e65100); border-color: #fff; color: #fff; padding: 10px 20px; font-size: 1rem; width: 90%; display: none;" onclick="
+                /* === FIX 1: Parler and Siege Assault are mutually exclusive ===        */
+                /* Force-close the parle panel so a stale diplomacy UI can never sit on  */
+                /* top of (or be clicked through) the assault flow.                     */
+                if (typeof closeParleUI === 'function') {
+                    closeParleUI();
+                } else {
+                    const _p = document.getElementById('parle-panel');
+                    if (_p) _p.style.display = 'none';
+                    if (typeof inParleMode !== 'undefined') inParleMode = false;
+                }
                 if(typeof triggerSiegeAssault === 'function') {
                     triggerSiegeAssault();
                 } else {
@@ -257,7 +291,17 @@ if (document.readyState === 'loading') {
         </div>
 
         <button id="gui-continue-btn" class="menu-btn" style="display: none; width: 100%; margin-bottom: 10px; background: linear-gradient(to bottom, #2e7d32, #1b5e20);" onclick="if(typeof resumeSiege === 'function') resumeSiege();">Continue Siege</button>
-        <button id="gui-assault-btn" class="menu-btn" style="width: 100%; margin-bottom: 10px; background: linear-gradient(to bottom, #d32f2f, #b71c1c);" onclick="if(typeof triggerSiegeAssault === 'function') triggerSiegeAssault();">Siege (Assault)</button>
+        <button id="gui-assault-btn" class="menu-btn" style="width: 100%; margin-bottom: 10px; background: linear-gradient(to bottom, #d32f2f, #b71c1c);" onclick="
+            /* === FIX 1: Parler and Siege Assault are mutually exclusive ===        */
+            if (typeof closeParleUI === 'function') {
+                closeParleUI();
+            } else {
+                const _p = document.getElementById('parle-panel');
+                if (_p) _p.style.display = 'none';
+                if (typeof inParleMode !== 'undefined') inParleMode = false;
+            }
+            if(typeof triggerSiegeAssault === 'function') triggerSiegeAssault();
+        ">Siege (Assault)</button>
         <button id="gui-leave-btn" class="menu-btn" style="width: 100%; margin-bottom: 10px;" onclick="if(typeof endSiege === 'function') endSiege(false);">Leave</button>
     </div>
 
@@ -384,8 +428,11 @@ function toggleDipLog() {
     <script src="battle_engine/siegeEngineLogic.js"></script>
     <script src="battle_engine/drawSiegeEngines.js"></script>
     <script src="battle_engine/siege_function_helpers.js"></script>
+    <script src="battle_engine/battlefield_procedural_terrain.js"></script>
     <script src="battle_engine/battlefield_launch.js"></script>
     <script src="battle_engine/naval_battles.js"></script>
+	<script src="battle_engine/naval_sailing_cosmetics.js"></script>
+    <script src="battle_engine/Navalrowing.js"></script>
     <script src="battle_engine/drowning_detector.js"></script>
     <script src="battle_engine/drowning_visuals.js"></script>
     <script src="menu/custom_naval_launcher.js"></script>
@@ -456,6 +503,7 @@ function toggleDipLog() {
     <script src="story/story_quest_patch.js"></script>
 	<script src="story/npc_waypoint_runtime.js"></script>   	
     <script src="battle_engine/RTSControls.js"></script>
+    <script src="battle_engine/minimap.js"></script>
     <script src="battle_engine/autoAttack.js"></script>
     <script src="core/mobile_cleanup.js"></script>
 	

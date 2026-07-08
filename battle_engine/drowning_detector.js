@@ -1,4 +1,3 @@
-
 ;(function () {
     'use strict';
 
@@ -146,8 +145,16 @@ if (_tileSize && window.battleEnvironment && battleEnvironment.grid) {
 
         // Path2D Deck Check (Loops through ships if they exist)
         for (const s of env.ships) {
-            const lx = worldX - (s.x + swayX);
-            const ly = worldY - (s.y + swayY);
+            let _rawLx = worldX - (s.x + swayX);
+            let _rawLy = worldY - (s.y + swayY);
+
+            // Un-rotate into ship-local space (ship heading).
+            // Path2D paths are built in local space with bow at +X, no rotation.
+            const _heading = s.heading || 0;
+            const _c = Math.cos(-_heading);
+            const _s2 = Math.sin(-_heading);
+            const lx = _rawLx * _c - _rawLy * _s2;
+            const ly = _rawLx * _s2 + _rawLy * _c;
 
             // Optimization: Skip if way outside ship bounds
             if (Math.abs(lx) > s.width * 0.68 || Math.abs(ly) > s.height * 0.68) continue;

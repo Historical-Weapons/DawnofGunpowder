@@ -64,6 +64,21 @@
  *       with zero edits required.  If the battle is river/siege/naval, the
  *       call is forwarded to the legacy implementation.
  *
+ *  6. POST-CHARGE COHESION (regrouping during ongoing melee)
+ *       CHARGING is still a single irreversible commit -- every unit gets
+ *       one orderChase and the engine's own combat loop takes it from there.
+ *       What's NEW is that the strategy AI no longer tears itself down the
+ *       instant that happens. A slower "COHESION" heartbeat (~1 Hz instead
+ *       of the normal 2 Hz) keeps running for the rest of the battle. It
+ *       NEVER touches a unit that is currently fighting (engine state
+ *       "attacking", or already adjacent to a live target) -- it only acts
+ *       on units that have finished a fight or never found one and have
+ *       drifted away from every ally. Those get walked back toward the
+ *       nearest friendly cluster instead of wandering solo or freezing.
+ *       This is what actually produces visible "regrouping" once the lines
+ *       have crashed together, instead of every unit being on its own for
+ *       good the moment the charge begins.
+ *
  *  ENGINE SURFACE
  *  --------------
  *  Same as the legacy AI:
@@ -101,8 +116,12 @@
   const SPREAD_SHOOTER_BACK   = 80;    // shooter line behind front
   const SPREAD_HEAVYCAV_BACK  = 220;   // heavy cav held back this far
   const SPREAD_HEAVYCAV_FLANK = 280;   // heavy cav flank offset (perp)
-  const SPREAD_LIGHTCAV_KITE  = 320;   // ideal stand-off for light cav
-  const SPREAD_LIGHTCAV_MIN   = 200;   // light cav minimum kite range
+  const SPREAD_LIGHTCAV_KITE  = 320;   // ideal stand-off for light cav (px from nearest threat)
+  const SPREAD_LIGHTCAV_MIN   = 190;   // minimum gap: retreat if closer than this
+  const SPREAD_LIGHTCAV_MAX   = 420;   // maximum gap: close in if farther than this
+  const LIGHTCAV_ORBIT_STEP   = 260;   // px per kite-arc step (tangential movement)
+  const RANGED_INF_FLEE_TRIGGER_DIST = 110; // foot shooters retreat once a melee threat closes inside this
+  const RANGED_INF_FLEE_DIST         = 130; // distance covered per retreat step
   const ADVANCE_LOOK_AHEAD    = 480;
   const ADVANCE_STOP_BUFFER   = 95;
   const ADVANCE_SPEED_SCALE   = 0.65;
@@ -115,6 +134,21 @@
   const GENERAL_CRISIS_HP     = 0.50;
   const BODYGUARD_RING_RADIUS = 95;
   const BODYGUARD_RUSH_BONUS  = 1.25;
+
+  // ── POST-CHARGE COHESION (regrouping during ongoing melee) ───────────────
+  // CHARGING used to be terminal -- this AI tore itself down the instant the
+  // army committed, leaving every unit to fend for itself via the engine's
+  // dumb per-unit nearest-target scan for the rest of the battle (no
+  // coordination, no reaction to how the fight develops). COHESION keeps a
+  // much lighter heartbeat running afterward: it never interrupts a unit
+  // that's actually fighting, but it pulls back stragglers/lone units who
+  // have drifted away from any ally and aren't currently engaged, so the
+  // army keeps presenting *some* shape instead of fully dissolving.
+  const COHESION_TICK_MS       = 900;   // slower heartbeat once melee is general (less CPU, less micromanagement)
+  const COHESION_LONE_RADIUS   = 260;   // a unit with no ally within this radius is "isolated"
+  const COHESION_ENGAGED_DIST  = 70;    // unit within this of a live enemy target counts as "in combat" -- leave it alone
+  const COHESION_REGROUP_SPEED = 1.0;   // full speed home to the nearest cluster
+  const COHESION_MIN_GROUP     = 2;     // don't bother regrouping if fewer than this many strays exist
 
   // Personality modifiers (multipliers on base thresholds)
   const PERSONALITIES = {
@@ -129,10 +163,12 @@
   //  MODULE STATE
   // ════════════════════════════════════════════════════════════════════════
   let _tickInterval     = null;
-  let _phase            = 'IDLE';   // IDLE|FORMING|ADVANCING|SKIRMISHING|CHARGING
+  let _cohesionInterval = null;  // separate, slower heartbeat that runs DURING/after CHARGING
+  let _phase            = 'IDLE';   // IDLE|FORMING|ADVANCING|SKIRMISHING|CHARGING|COHESION
   let _formingTicks     = 0;
   let _skirmishTicks    = 0;
   let _doctrine         = 'COMBINED_ARMS';
+  let _formationShape   = 'LINE';   // LINE | BLOCK -- see pickFormationShape()
   let _personality      = 'BALANCED';
   let _personalityMod   = PERSONALITIES.BALANCED;
   let _crisisActive     = false;
@@ -379,6 +415,102 @@
   }
 
   // ════════════════════════════════════════════════════════════════════════
+  //  FORMATION SHAPE SELECTION
+  // ════════════════════════════════════════════════════════════════════════
+  /**
+   * Picks how the FRONT_LINE (shield/melee infantry) arranges itself:
+   *   LINE  -- a single wide rank (existing default). Needed whenever there
+   *            are ranged/gunpowder allies behind that need a wall to screen
+   *            them, or against a heavy-cavalry threat that a thin line is
+   *            actually better suited to spread out and absorb without
+   *            collapsing all at once.
+   *   BLOCK -- a tight, multi-rank grid. Realistic when the enemy force is
+   *            mostly a pure melee blob with little or no ranged of its own
+   *            to protect — a dense block hits harder per square foot of
+   *            frontage and isn't leaving a backline exposed for nothing.
+   * A personality-driven random nudge is layered on top of the composition
+   * threshold so two battles with near-identical compositions don't always
+   * resolve to the same shape — real opposing commanders wouldn't always
+   * make the identical call at the margin either.
+   */
+  function pickFormationShape (enemyComp, personality) {
+    const screenNeed = enemyComp.r_ranged_inf + enemyComp.r_gunpowder;
+    const heavyCavThreat = enemyComp.r_melee_cav; // own cav ratio isn't relevant here, kept simple/composition-only
+
+    // Strong signal either way: no ambiguity, no randomness needed.
+    if (screenNeed >= 0.30) return 'LINE';   // meaningful ranged backline to screen -> must use a wide wall
+    if (screenNeed <= 0.05 && enemyComp.r_total_mel >= 0.70) return 'BLOCK'; // near-pure melee blob -> go dense
+
+    // Marginal case: lean on personality + a random nudge instead of a hard
+    // deterministic cutoff, so otherwise-identical compositions can still
+    // produce different formations from battle to battle.
+    const aggressiveBias = (personality === 'AGGRESSIVE' || personality === 'OPPORTUNIST') ? 0.20 : 0;
+    const timidBias       = (personality === 'TIMID') ? -0.20 : 0;
+    const roll = Math.random() + aggressiveBias + timidBias;
+    return (roll >= 0.5) ? 'BLOCK' : 'LINE';
+  }
+
+  // ════════════════════════════════════════════════════════════════════════
+  //  CAVALRY PREY SCORING  (shared with the SKIRMISHING-phase approach maneuver)
+  // ════════════════════════════════════════════════════════════════════════
+  /**
+   * Mirrors the perpetual scoring bias added to ai_categories.js's enemy
+   * seek_engage handler (rout preference + anti-cavalry-stat avoidance), so
+   * the strategic layer's pre-charge MANEUVERING (safe, multi-tick, during
+   * SKIRMISHING) walks heavy cavalry toward the same kind of target the
+   * always-on low-level scan will keep preferring for the rest of the fight
+   * once CHARGING hands off combat entirely to that scan. Keeping both
+   * layers aligned on the same criteria means cavalry arrive ALREADY close
+   * to a good target instead of needing a second chance to correct course
+   * that — by design — they will never get (CHARGING only runs once).
+   *
+   * Returns the best available player unit to approach, or null if every
+   * candidate is either out of range entirely or this list is empty.
+   */
+  function scoreCavalryProspect (cavUnit, candidate) {
+    const d = dist(cavUnit, candidate);
+    let score = d;
+    if (candidate.state === 'FLEEING' || candidate.state === 'WAVERING') score -= 220;
+    const sub = resolveSubRole(candidate);
+    const antiCav = Math.max(
+      (candidate.stats && candidate.stats.bonusVsLarge) || 0,
+      (candidate.stats && candidate.stats.antiLargeDamage) || 0
+    );
+    score += antiCav * 14;
+    if ((sub === 'RANGED_INF' || sub === 'GUNPOWDER') && antiCav < 15) score -= 110;
+    return score;
+  }
+
+  function pickCavalryProspect (cavUnit, playerUnits) {
+    let best = null, bestScore = Infinity;
+    for (let i = 0; i < playerUnits.length; i++) {
+      const p = playerUnits[i];
+      if (p.hp <= 0 || p.isDummy) continue;
+      const s = scoreCavalryProspect(cavUnit, p);
+      if (s < bestScore) { bestScore = s; best = p; }
+    }
+    return best;
+  }
+
+  /**
+   * Computes a SKIRMISHING-phase (multi-tick-safe) approach waypoint that
+   * swings wide of the player's front-line mass instead of beelining
+   * straight through it to reach a backline prospect. Falls back to the
+   * supplied default (fx, fy) — the existing flank-the-centroid point — if
+   * no prospect can be identified, so behaviour degrades gracefully rather
+   * than producing a nonsensical waypoint.
+   */
+  function calcCavalryHuntWaypoint (cavUnit, prospect, frontCentroid, fallbackX, fallbackY) {
+    if (!prospect) return { x: fallbackX, y: fallbackY };
+    const fdx = prospect.x - frontCentroid.x;
+    const fdy = prospect.y - frontCentroid.y;
+    const L = Math.hypot(fdx, fdy) || 1;
+    const sideX = fdx / L, sideY = fdy / L;
+    const swingDist = 150; // how far past the prospect, continuing the same lateral direction, to swing wide
+    return { x: prospect.x + sideX * swingDist, y: prospect.y + sideY * swingDist };
+  }
+
+  // ════════════════════════════════════════════════════════════════════════
   //  SPEED MANAGEMENT  (kept compatible with legacy markers)
   // ════════════════════════════════════════════════════════════════════════
   function backupSpeed (u) {
@@ -468,7 +600,7 @@
   //  a unit can never be ordered backward (same anti-false-flee design as
   //  the legacy AI, retained intact).
   // ════════════════════════════════════════════════════════════════════════
-  function calcAdvanceTarget (unit, playerCentroid, subRole, idx, total, doctrine) {
+  function calcAdvanceTarget (unit, playerCentroid, subRole, idx, total, doctrine, formationShape) {
     const rawDx = playerCentroid.x - unit.x;
     const rawDy = playerCentroid.y - unit.y;
     const rawLen = Math.hypot(rawDx, rawDy) || 1;
@@ -478,6 +610,39 @@
     const half = (total - 1) / 2;
     const slot = idx - half;
     let spreadX = 0, behindY = 0;
+
+    // ── BLOCK FORMATION ─────────────────────────────────────────────────
+    // Only applies to front-line melee (SHIELD/MELEE_INF), and only outside
+    // ANTI_CAV_RING (which already has its own dedicated ring layout above)
+    // and DEFENSIVE_HOLD (intentionally a shallow, defensive crouch, not a
+    // deep push formation). A real multi-rank grid, not just tighter spacing
+    // within the same single-rank line: units behind the first rank are
+    // pulled forward as that rank advances, giving genuine depth.
+    const wantsBlock = formationShape === 'BLOCK' &&
+                        (subRole === 'SHIELD' || subRole === 'MELEE_INF') &&
+                        doctrine !== 'ANTI_CAV_RING' && doctrine !== 'DEFENSIVE_HOLD';
+    if (wantsBlock) {
+      const cols = Math.max(1, Math.round(Math.sqrt(total * 1.6))); // wider than tall -- still presents a frontage
+      const row = Math.floor(idx / cols);
+      const col = idx % cols;
+      const colsInThisRow = Math.min(cols, total - row * cols);
+      const rowHalf = (colsInThisRow - 1) / 2;
+      spreadX = (col - rowHalf) * (SPREAD_FRONT_X * 0.55); // tighter than a LINE's per-slot spacing
+      behindY = row * (SPREAD_FRONT_X * 0.5);              // each successive rank sits further back (depth)
+
+      const lookAhead = Math.max(0, ADVANCE_LOOK_AHEAD - ADVANCE_STOP_BUFFER);
+      let tx = unit.x + nx * lookAhead + px * spreadX - nx * behindY;
+      let ty = unit.y + ny * lookAhead + py * spreadX - ny * behindY;
+      const clampX = playerCentroid.x - nx * ADVANCE_STOP_BUFFER;
+      const clampY = playerCentroid.y - ny * ADVANCE_STOP_BUFFER;
+      const toClampDist = Math.hypot(clampX - unit.x, clampY - unit.y);
+      const toTgtDist   = Math.hypot(tx     - unit.x, ty     - unit.y);
+      if (toTgtDist > toClampDist) { tx = clampX + px * spreadX * 0.5; ty = clampY + py * spreadX * 0.5; }
+      const distNow = Math.hypot(unit.x - playerCentroid.x, unit.y - playerCentroid.y);
+      const distTgt = Math.hypot(tx     - playerCentroid.x, ty     - playerCentroid.y);
+      if (distTgt > distNow + 80) { tx = playerCentroid.x - nx * ADVANCE_STOP_BUFFER; ty = playerCentroid.y - ny * ADVANCE_STOP_BUFFER; }
+      return { x: tx, y: ty };
+    }
 
     if (doctrine === 'ANTI_CAV_RING') {
       // Ring: shooters cluster at center, melee form a perimeter ring
@@ -663,6 +828,10 @@
     }
     groups.FRONT_LINE = groups.SHIELD.concat(groups.MELEE_INF);
     groups.SHOOTERS   = groups.RANGED_INF.concat(groups.GUNPOWDER);
+    // Sub-split for microShooters: non-gunpowder ranged get full hit-and-run
+    // kiting (like horse archers); gunpowder stays behind the front line.
+    groups.RANGED_INF_ONLY  = groups.RANGED_INF;
+    groups.GUNPOWDER_ONLY   = groups.GUNPOWDER;
     return groups;
   }
 
@@ -732,7 +901,7 @@
           const fy = sh.y + (dy / L) * 55;
           orderMove(u, fx, fy);
         } else {
-          const tgt = calcAdvanceTarget(u, playerCentroid, sub, i, front.length, doctrine);
+          const tgt = calcAdvanceTarget(u, playerCentroid, sub, i, front.length, doctrine, _formationShape);
           orderMove(u, tgt.x, tgt.y);
         }
       }
@@ -769,26 +938,129 @@
   }
 
   // ── SHOOTERS: ranged infantry + gunpowder ───────────────────────────────
+  // RANGED_INF (archers, crossbows, slingers) → full hit-and-run kiting.
+  // GUNPOWDER  (firelances, handgunners, bombards) → hold position behind
+  //   the front line and fire from a fixed anchor (slow reload, high damage,
+  //   no agility — kiting doesn't suit them).
   function microShooters (groups, playerCentroid, doctrine, avgSpeed, phase) {
     const shooters = groups.SHOOTERS;
     if (!shooters.length) return;
+
+    // ── Tune these to control ranged-inf hit-and-run aggressiveness ─────────
+    const RI_KITE_IDEAL   = 320;  // px: preferred engagement distance
+    const RI_KITE_TOO_CLOSE = 160; // px: emergency retreat trigger
+    const RI_KITE_TOO_FAR  = 500;  // px: close-in if further than this
+    const RI_FLEE_DIST     = 150;  // px: retreat step size
+    const RI_ORBIT_STEP    = 200;  // px: lateral arc step while firing
+    // ────────────────────────────────────────────────────────────────────────
 
     if (phase === 'ADVANCING') {
       for (let i = 0; i < shooters.length; i++) {
         const u = shooters[i];
         setSpeedScale(u, ADVANCE_SPEED_SCALE);
         const sub = resolveSubRole(u);
-        const tgt = calcAdvanceTarget(u, playerCentroid, sub, i, shooters.length, doctrine);
+        const tgt = calcAdvanceTarget(u, playerCentroid, sub, i, shooters.length, doctrine, _formationShape);
         orderMove(u, tgt.x, tgt.y);
       }
       return;
     }
 
     if (phase === 'SKIRMISHING') {
-      // Shooters free-fire in all doctrines (range > 0 -> the engine handles aiming)
-      for (let i = 0; i < shooters.length; i++) {
-        restoreSpeed(shooters[i]);
-        orderChase(shooters[i]);
+      const env = W.battleEnvironment;
+
+      // ── GUNPOWDER: hold-and-fire (unchanged) ──────────────────────────────
+      const gp = groups.GUNPOWDER_ONLY || [];
+      for (let i = 0; i < gp.length; i++) {
+        const u = gp[i];
+        restoreSpeed(u);
+        let nearestThreatDist = Infinity;
+        let nearestThreat = null;
+        if (env && env.units) {
+          for (let k = 0; k < env.units.length; k++) {
+            const p = env.units[k];
+            if (p.side !== 'player' || p.hp <= 0 || p.isDummy) continue;
+            const d = dist(u, p);
+            if (d < nearestThreatDist) { nearestThreatDist = d; nearestThreat = p; }
+          }
+        }
+        if (nearestThreat && nearestThreatDist <= RANGED_INF_FLEE_TRIGGER_DIST) {
+          const tdx = u.x - nearestThreat.x, tdy = u.y - nearestThreat.y;
+          const L = Math.hypot(tdx, tdy) || 1;
+          let awayX = tdx / L, awayY = tdy / L;
+          if (groups.FRONT_LINE.length) {
+            const fc = centroid(groups.FRONT_LINE);
+            const bdx = fc.x - u.x, bdy = fc.y - u.y;
+            const bL = Math.hypot(bdx, bdy) || 1;
+            awayX = awayX * 0.70 + (bdx / bL) * 0.30;
+            awayY = awayY * 0.70 + (bdy / bL) * 0.30;
+            const nrm = Math.hypot(awayX, awayY) || 1;
+            awayX /= nrm; awayY /= nrm;
+          }
+          orderMove(u, u.x + awayX * RANGED_INF_FLEE_DIST, u.y + awayY * RANGED_INF_FLEE_DIST);
+        } else if (nearestThreat && nearestThreatDist <= RANGED_INF_FLEE_TRIGGER_DIST * 1.8) {
+          orderShootInPlace(u);
+        } else {
+          orderChase(u);
+        }
+      }
+
+      // ── RANGED_INF: hit-and-run kiting (mirrors microLightCav) ────────────
+      const ri = groups.RANGED_INF_ONLY || [];
+      for (let i = 0; i < ri.length; i++) {
+        const u = ri[i];
+        restoreSpeed(u);
+
+        // No ammo → commit to melee like light cav does
+        const ammoLeft = Math.max((u.ammo || 0), (u.stats && u.stats.ammo) || 0);
+        if (ammoLeft <= 0) { orderChase(u); continue; }
+
+        // Find closest player threat
+        let closestThreat = null, closestThreatDist = Infinity;
+        if (env && env.units) {
+          for (let k = 0; k < env.units.length; k++) {
+            const p = env.units[k];
+            if (p.side !== 'player' || p.hp <= 0 || p.isDummy) continue;
+            const d = dist(u, p);
+            if (d < closestThreatDist) { closestThreatDist = d; closestThreat = p; }
+          }
+        }
+        if (!closestThreat) { orderChase(u); continue; }
+
+        const dx = closestThreat.x - u.x;
+        const dy = closestThreat.y - u.y;
+        const L  = Math.hypot(dx, dy) || 1;
+        const nx = dx / L, ny = dy / L;   // toward threat
+        const px = -ny,    py =  nx;       // perpendicular (CCW)
+
+        // Stable per-unit orbit direction (same pattern as horse archers)
+        if (u._kiteSign === undefined) u._kiteSign = (i % 2 === 0) ? 1 : -1;
+
+        if (closestThreatDist < RI_KITE_TOO_CLOSE) {
+          // Emergency retreat — diagonal arc away, same as light cav
+          const escX = u.x + (-nx * 0.6 + px * u._kiteSign * 0.80) * RI_FLEE_DIST * 1.4;
+          const escY = u.y + (-ny * 0.6 + py * u._kiteSign * 0.80) * RI_FLEE_DIST * 1.4;
+          orderMove(u, escX, escY);
+          u._kiteSign *= -1;
+
+        } else if (closestThreatDist > RI_KITE_TOO_FAR) {
+          // Too far — close in at an angle
+          const closeX = u.x + (nx * 0.85 + px * u._kiteSign * 0.20) * 180;
+          const closeY = u.y + (ny * 0.85 + py * u._kiteSign * 0.20) * 180;
+          orderMove(u, closeX, closeY);
+
+        } else {
+          // In ideal range — fire while strafing laterally
+          // Foot archers are slower than horse archers so orbit step is smaller.
+          if (_strategyTick % 2 === 0) {
+            // Strafe: mostly perpendicular, slight backward lean to hold range
+            const arcX = u.x + (px * u._kiteSign * 0.85 + (-nx) * 0.15) * RI_ORBIT_STEP;
+            const arcY = u.y + (py * u._kiteSign * 0.85 + (-ny) * 0.15) * RI_ORBIT_STEP;
+            orderMove(u, arcX, arcY);
+          } else {
+            // Alternate ticks: acquire target so engine fires projectile
+            orderChase(u);
+          }
+        }
       }
       return;
     }
@@ -818,7 +1090,7 @@
       for (let i = 0; i < cav.length; i++) {
         const u = cav[i];
         setSpeedScale(u, ADVANCE_SPEED_SCALE);
-        const tgt = calcAdvanceTarget(u, playerCentroid, 'MELEE_CAV', i, cav.length, doctrine);
+        const tgt = calcAdvanceTarget(u, playerCentroid, 'MELEE_CAV', i, cav.length, doctrine, _formationShape);
         orderMove(u, tgt.x, tgt.y);
       }
       return;
@@ -831,50 +1103,89 @@
         return;
       }
       if (doctrine === 'ANTI_CAV_RING') {
-        // Wait inside / near ring for a counter-charge opportunity
+        // Wait inside / near ring for a counter-charge opportunity -- this
+        // doctrine's purpose is defensive (counter-charge whoever attacks
+        // the ring), not hunting the backline, so it keeps its own behaviour.
         for (let i = 0; i < cav.length; i++) orderHold(cav[i]);
         return;
       }
       if (doctrine === 'SKIRMISH_HUNT') {
-        // Hunt player horse archers -- chase freely
+        // Hunt player horse archers -- chase freely. orderChase is always
+        // safe (self-correcting forever, unlike orderMove), and the
+        // perpetual smart-targeting scan in ai_categories.js now also
+        // biases this toward soft/fleeing/flankable targets automatically.
         for (let i = 0; i < cav.length; i++) {
           restoreSpeed(cav[i]);
           orderChase(cav[i]);
         }
         return;
       }
-      // Other doctrines: hold behind/flank, wait for commit
-      for (let i = 0; i < cav.length; i++) orderHold(cav[i]);
+      if (doctrine === 'DEFENSIVE_HOLD') {
+        // Intentionally passive -- wait for the player to overextend.
+        for (let i = 0; i < cav.length; i++) orderHold(cav[i]);
+        return;
+      }
+
+      // COMBINED_ARMS / SHIELD_PUSH / HAMMER_AND_ANVIL-once-anvil-engaged:
+      // actively maneuver toward a flanking approach on the best available
+      // soft/isolated/already-routing target, instead of just holding still
+      // until CHARGING. SKIRMISHING runs every tick for as long as the
+      // skirmish lasts, so this is the SAFE place to do this kind of
+      // multi-step positioning -- orderMove here gets re-evaluated and
+      // self-corrected continuously. (CHARGING, by contrast, only ever
+      // fires once before the whole strategy AI tears itself down, so any
+      // unit left walking toward an orderMove waypoint at that exact moment
+      // would freeze there forever with no future tick to switch it to
+      // combat -- see the CHARGING branch below for the fix to that
+      // specific, separate latent bug.)
+      const fc = front.length ? centroid(front) : playerCentroid;
+      for (let i = 0; i < cav.length; i++) {
+        const u = cav[i];
+        restoreSpeed(u);
+        const prospect = pickCavalryProspect(u, playerUnits);
+        const d = prospect ? dist(u, prospect) : Infinity;
+
+        if (prospect && d <= 260) {
+          // Already close enough to the chosen prey that orderChase's own
+          // nearest-enemy scan will correctly resolve to them (or something
+          // even better/closer/flanking, per the same scoring bias) -- safe
+          // to commit now rather than keep maneuvering.
+          orderChase(u);
+        } else {
+          // Still maneuvering into position. Swing wide of the front-line
+          // mass toward the prey's side rather than cutting straight through
+          // it. Falls back to the existing flank-the-centroid point used by
+          // HAMMER_AND_ANVIL if no prospect is identifiable yet.
+          const flank = (i % 2 === 0) ? 1 : -1;
+          const dx = playerCentroid.x - fc.x, dy = playerCentroid.y - fc.y;
+          const L = Math.hypot(dx, dy) || 1;
+          const fnx = dx / L, fny = dy / L;
+          const fpx = -fny, fpy = fnx;
+          const fallbackX = playerCentroid.x + fpx * flank * HAMMER_FLANK_LEAD;
+          const fallbackY = playerCentroid.y + fpy * flank * HAMMER_FLANK_LEAD;
+          const wp = calcCavalryHuntWaypoint(u, prospect, fc, fallbackX, fallbackY);
+          orderMove(u, wp.x, wp.y);
+        }
+      }
       return;
     }
 
     if (phase === 'CHARGING') {
-      // Aim each rider at a flank position past the player centroid, then chase
-      if (doctrine === 'HAMMER_AND_ANVIL') {
-        // Compute a left/right flank waypoint and issue move orders FIRST,
-        // then once they're close switch to chase. Approximate by issuing a
-        // "flank waypoint" that's past the player on the side opposite the front line.
-        const front = groups.FRONT_LINE;
-        const fc = front.length ? centroid(front) : playerCentroid;
-        const dx = playerCentroid.x - fc.x;
-        const dy = playerCentroid.y - fc.y;
-        const L = Math.hypot(dx, dy) || 1;
-        const nx = dx / L, ny = dy / L;
-        const px = -ny,    py = nx;
-        for (let i = 0; i < cav.length; i++) {
-          const u = cav[i];
-          restoreSpeed(u);
-          const flank = (i % 2 === 0) ? 1 : -1;
-          const fx = playerCentroid.x + nx * 60 + px * flank * HAMMER_FLANK_LEAD;
-          const fy = playerCentroid.y + ny * 60 + py * flank * HAMMER_FLANK_LEAD;
-          // Use chase once we're already near (so they actually fight); flank-waypoint when far.
-          const d = dist(u, playerCentroid);
-          if (d > 380) orderMove(u, fx, fy);
-          else         orderChase(u);
-        }
-        return;
-      }
-      // Default charge
+      // FINAL COMMIT. This branch only ever executes ONCE per battle --
+      // EnemyLandStrategyAI tears itself down immediately afterward, so
+      // there is no future tick to correct a bad order here. orderChase is
+      // the only safe choice (self-sufficient and self-correcting forever
+      // via the engine's own targeting loop); orderMove is NOT, since a
+      // unit that hasn't arrived by the time this single tick ends would
+      // hover at its waypoint, indefinitely, for the rest of the battle.
+      //
+      // (Previously HAMMER_AND_ANVIL used "if far: orderMove toward a flank
+      // waypoint, else: orderChase" -- exactly the unsafe one-shot pattern
+      // above. Any rider further than 380px from playerCentroid at this
+      // exact instant would have been permanently stranded mid-flank. The
+      // flank positioning now happens safely above, during SKIRMISHING;
+      // by the time CHARGING fires, riders should already be close to a
+      // good target, so a plain orderChase is both safe AND well-aimed.)
       for (let i = 0; i < cav.length; i++) {
         restoreSpeed(cav[i]);
         orderChase(cav[i]);
@@ -887,54 +1198,107 @@
     const lcav = groups.RANGED_CAV;
     if (!lcav.length) return;
 
-    const kiteMin = SPREAD_LIGHTCAV_MIN * _personalityMod.kiteRange;
-    const kiteIdeal = SPREAD_LIGHTCAV_KITE * _personalityMod.kiteRange;
+    const kiteMin   = SPREAD_LIGHTCAV_MIN   * _personalityMod.kiteRange;
+    const kiteIdeal = SPREAD_LIGHTCAV_KITE  * _personalityMod.kiteRange;
+    const kiteMax   = SPREAD_LIGHTCAV_MAX   * _personalityMod.kiteRange;
 
     if (phase === 'ADVANCING' || phase === 'SKIRMISHING') {
-      // Kite logic: maintain ideal range from nearest player threat.
-      // If too close: back off (perpendicular preferred = "circle the prey").
-      // If too far: close.
       for (let i = 0; i < lcav.length; i++) {
         const u = lcav[i];
-        restoreSpeed(u); // light cav always at full speed (kiting needs it)
-        // Find nearest player
-        let nearest = null, nd2 = Infinity;
-        for (let j = 0; j < playerUnits.length; j++) {
-          const d2 = dist2(u, playerUnits[j]);
-          if (d2 < nd2) { nd2 = d2; nearest = playerUnits[j]; }
-        }
-        if (!nearest) { orderChase(u); continue; }
+        restoreSpeed(u); // light cav always at full speed — kiting requires it
 
-        const d = Math.sqrt(nd2);
-        const dx = nearest.x - u.x, dy = nearest.y - u.y;
-        const L = Math.hypot(dx, dy) || 1;
-        const nx = dx / L, ny = dy / L;
-        const px = -ny,    py = nx;
-
-        if (d < kiteMin) {
-          // Too close -- arc away (perpendicular + away) at speed
-          const sign = ((i + _strategyTick) % 2 === 0) ? 1 : -1; // alternate direction per tick
-          const escapeX = u.x + (-nx * 0.6 + px * sign * 0.8) * 220;
-          const escapeY = u.y + (-ny * 0.6 + py * sign * 0.8) * 220;
-          orderMove(u, escapeX, escapeY);
-        } else if (d > kiteIdeal + 80) {
-          // Too far -- close to ideal range
-          const closeX = u.x + nx * 180;
-          const closeY = u.y + ny * 180;
-          orderMove(u, closeX, closeY);
-        } else {
-          // In ideal range -- shoot. seek_engage lets them fire while moving.
+        // ── AMMO CHECK: no ammo → stop kiting, commit to melee ────────────
+        const ammoLeft = Math.max((u.ammo || 0), (u.stats && u.stats.ammo) || 0);
+        if (ammoLeft <= 0) {
           orderChase(u);
+          continue;
+        }
+
+        // ── Find closest threat among ALL player units (not just current target) ──
+        // This is critical — a unit that switched target or has stale target
+        // data will otherwise never detect a melee threat closing from the side.
+        let closestThreat = null, closestThreatDist = Infinity;
+        for (let j = 0; j < playerUnits.length; j++) {
+          const p = playerUnits[j];
+          const d = Math.hypot(u.x - p.x, u.y - p.y);
+          if (d < closestThreatDist) { closestThreatDist = d; closestThreat = p; }
+        }
+        if (!closestThreat) { orderChase(u); continue; }
+
+        const dx = closestThreat.x - u.x;
+        const dy = closestThreat.y - u.y;
+        const L  = Math.hypot(dx, dy) || 1;
+        const nx = dx / L, ny = dy / L;   // toward threat
+        const px = -ny,    py =  nx;       // perpendicular (CCW)
+
+        // ── Persistent orbit direction per unit ────────────────────────────
+        // Each unit gets a stable _kiteSign that flips only when it's forced
+        // to retreat directly (to avoid ping-pong oscillation). Without this
+        // every alternate tick was reversing the arc making horse archers
+        // visibly jitter left-right instead of orbiting.
+        if (u._kiteSign === undefined) u._kiteSign = (i % 2 === 0) ? 1 : -1;
+
+        if (closestThreatDist < kiteMin) {
+          // ── TOO CLOSE: emergency retreat ──────────────────────────────────
+          // Diagonal escape: primarily away, with a strong perpendicular arc
+          // component so we circle rather than flee in a straight line (a
+          // straight retreat lets faster melee cavalry simply follow and
+          // outrun us over distance; the arc keeps them working harder).
+          const escX = u.x + (-nx * 0.55 + px * u._kiteSign * 0.85) * 280;
+          const escY = u.y + (-ny * 0.55 + py * u._kiteSign * 0.85) * 280;
+          orderMove(u, escX, escY);
+          // Flip orbit direction after each panic retreat so patterns don't
+          // become predictable (alternating arcs is harder to intercept).
+          u._kiteSign *= -1;
+
+        } else if (closestThreatDist > kiteMax) {
+          // ── TOO FAR: close to ideal range ─────────────────────────────────
+          // Move directly toward the threat but with a slight lateral bias
+          // so we approach on an angle (less telegraphed, harder to block).
+          const closeX = u.x + (nx * 0.9 + px * u._kiteSign * 0.15) * 200;
+          const closeY = u.y + (ny * 0.9 + py * u._kiteSign * 0.15) * 200;
+          orderMove(u, closeX, closeY);
+
+        } else {
+          // ── IN IDEAL RANGE: fire while orbiting ───────────────────────────
+          // The unit IS in range and HAS ammo. We want it to fire (handled by
+          // the engine's _handleCombatExecution when it has a valid target)
+          // but also to keep moving in its orbit so it doesn't stop dead.
+          // orderChase sets target for shooting; the processAction isRangedCav
+          // fix in ai_categories.js then lets it keep its orbit velocity.
+          // We additionally issue a short arc waypoint on every other tick so
+          // the unit physically moves while shooting instead of hovering.
+          if (_strategyTick % 2 === 0) {
+            // Arc movement: mostly perpendicular, slight backward lean to
+            // maintain or slightly increase gap (don't drift into melee range
+            // just because we're orbiting).
+            const arcX = u.x + (px * u._kiteSign * 0.80 + (-nx) * 0.20) * LIGHTCAV_ORBIT_STEP;
+            const arcY = u.y + (py * u._kiteSign * 0.80 + (-ny) * 0.20) * LIGHTCAV_ORBIT_STEP;
+            orderMove(u, arcX, arcY);
+          } else {
+            // Alternate ticks: orderChase so the engine assigns a real target
+            // and the combat execution fires an arrow.
+            orderChase(u);
+          }
         }
       }
       return;
     }
 
     if (phase === 'CHARGING') {
-      // Final commit -- light cav still tries to stay ranged but chases.
+      // Final commit. Check ammo: if any ammo left, keep kiting (post-charge
+      // cohesion heartbeat will maintain this); if dry, melee charge.
       for (let i = 0; i < lcav.length; i++) {
-        restoreSpeed(lcav[i]);
-        orderChase(lcav[i]);
+        const u = lcav[i];
+        restoreSpeed(u);
+        const ammoLeft = Math.max((u.ammo || 0), (u.stats && u.stats.ammo) || 0);
+        if (ammoLeft > 0) {
+          // Stay ranged — orderChase so they keep finding targets.
+          // cohesionTick will re-issue kite orders on the COHESION heartbeat.
+          orderChase(u);
+        } else {
+          orderChase(u); // Out of ammo: fight in melee like everyone else
+        }
       }
     }
   }
@@ -964,6 +1328,7 @@
   // ════════════════════════════════════════════════════════════════════════
   function teardown () {
     if (_tickInterval) { clearInterval(_tickInterval); _tickInterval = null; }
+    if (_cohesionInterval) { clearInterval(_cohesionInterval); _cohesionInterval = null; }
     _phase           = 'IDLE';
     _formingTicks    = 0;
     _skirmishTicks   = 0;
@@ -990,14 +1355,44 @@
     const isBattle = (typeof W.MobileControls !== 'undefined' && W.MobileControls.G && typeof W.MobileControls.G.isBattle === 'function')
       ? W.MobileControls.G.isBattle()
       : (W.battleEnvironment && W.battleEnvironment.isActive !== false);
-    if (!isBattle || !isLandBattle()) { teardown(); return; }
+    if (!isBattle || !isLandBattle()) {
+      if (W.__ELSAI_DEBUG__) {
+        console.log('[EnemyLandStrategyAI] tick() teardown — isBattle=' + isBattle +
+          ' isLandBattle=' + isLandBattle() +
+          ' (siege=' + isSiegeBattle() + ' naval=' + isNavalBattle() + ' river=' + isRiverBattle() + ')');
+      }
+      teardown();
+      return;
+    }
 
     const enemyUnits  = getEnemyUnits();
     const playerUnits = getPlayerUnits();
-    if (!enemyUnits.length || !playerUnits.length) { teardown(); return; }
+    if (!enemyUnits.length || !playerUnits.length) {
+      if (W.__ELSAI_DEBUG__) {
+        console.log('[EnemyLandStrategyAI] tick() teardown — enemyUnits=' + enemyUnits.length +
+          ' playerUnits=' + playerUnits.length +
+          ' (raw env.units=' + ((W.battleEnvironment && W.battleEnvironment.units) ? W.battleEnvironment.units.length : 'NO ENV') + ')');
+      }
+      teardown();
+      return;
+    }
 
     _strategyTick++;
     const playerCentroid = centroid(playerUnits);
+
+    if (W.__ELSAI_DEBUG__ && _strategyTick % 6 === 0) {
+      // Heartbeat every ~3s (6 ticks @ 500ms) -- shows phase/doctrine/group
+      // sizes without spamming the console every 500ms forever.
+      const _g = groupUnits(enemyUnits);
+      console.log('[EnemyLandStrategyAI] HEARTBEAT tick=' + _strategyTick +
+        ' phase=' + _phase + ' doctrine=' + _doctrine + ' personality=' + _personality +
+        ' | FRONT_LINE=' + _g.FRONT_LINE.length +
+        ' SHOOTERS=' + _g.SHOOTERS.length +
+        ' MELEE_CAV=' + _g.MELEE_CAV.length +
+        ' RANGED_CAV=' + _g.RANGED_CAV.length +
+        ' | enemyUnits=' + enemyUnits.length + ' playerUnits=' + playerUnits.length +
+        ' | minGap=' + Math.round(minGap(enemyUnits, playerUnits)));
+    }
 
     // Crisis: bodyguards rush the general; the rest follow their normal phase.
     const crisisNow = detectCrisis();
@@ -1032,9 +1427,13 @@
       if (_formingTicks >= FORMING_TICKS) {
         const playerComp = analyseComposition(playerUnits);
         const enemyComp  = analyseComposition(enemyUnits);
-        _doctrine    = pickDoctrine(playerComp, enemyComp);
+        _doctrine      = pickDoctrine(playerComp, enemyComp);
+        _formationShape = pickFormationShape(enemyComp, _personality);
         _phase       = 'ADVANCING';
         _formingTicks = 0;
+        if (W.__ELSAI_DEBUG__) {
+          console.log('[EnemyLandStrategyAI] FORMING -> ADVANCING | doctrine=' + _doctrine + ' formation=' + _formationShape);
+        }
       }
       return;
     }
@@ -1066,8 +1465,28 @@
       // Trigger skirmish when minimum gap drops below threshold
       const skirmDist = DIST_SKIRMISH * _personalityMod.commitDist;
       if (minGap(enemyUnits, playerUnits) <= skirmDist) {
+        // MID-BATTLE RE-EVALUATION: re-run doctrine/formation selection with
+        // CURRENT compositions rather than the stale snapshot taken back at
+        // FORMING. Casualties from an early ranged exchange during the
+        // advance, or simply the player's own losses, can meaningfully
+        // change which doctrine is actually the right call by the time
+        // skirmishing starts -- a doctrine picked once at the very start and
+        // never revisited can't adapt to any of that. This mirrors the
+        // existing FORMING->ADVANCING precedent (which already re-picks
+        // once); this just adds one more honest re-check at the next safe
+        // transition boundary, not a per-tick re-roll that would risk
+        // flip-flopping orders constantly.
+        const curPlayerComp = analyseComposition(playerUnits);
+        const curEnemyComp  = analyseComposition(enemyUnits);
+        _doctrine       = pickDoctrine(curPlayerComp, curEnemyComp);
+        _formationShape = pickFormationShape(curEnemyComp, _personality);
+
         _phase = 'SKIRMISHING';
         _skirmishTicks = 0;
+        if (W.__ELSAI_DEBUG__) {
+          console.log('[EnemyLandStrategyAI] ADVANCING -> SKIRMISHING | gap=' + Math.round(minGap(enemyUnits, playerUnits)) +
+            ' threshold=' + Math.round(skirmDist) + ' doctrine=' + _doctrine);
+        }
         executePhase('SKIRMISHING', groups, playerUnits, playerCentroid);
       }
       return;
@@ -1103,15 +1522,156 @@
       }
 
       if (timerDone || meleeClose || cavBreaks || ringCloses || opportunistFire) {
+        if (W.__ELSAI_DEBUG__) {
+          const reason = timerDone ? 'timerDone' : meleeClose ? 'meleeClose' : cavBreaks ? 'cavBreaks' : ringCloses ? 'ringCloses' : 'opportunistFire';
+          console.log('[EnemyLandStrategyAI] SKIRMISHING -> CHARGING | reason=' + reason +
+            ' skirmishTicks=' + _skirmishTicks + '/' + maxTicks +
+            ' meleeGap=' + Math.round(meleeGap) + '/' + Math.round(meleeCommit) +
+            ' cavGap=' + Math.round(cavGap) + '/' + Math.round(cavCommit) +
+            ' doctrine=' + _doctrine + ' personality=' + _personality);
+        }
         _phase = 'CHARGING';
         executePhase('CHARGING', groups, playerUnits, playerCentroid);
         if (W.AudioManager && typeof W.AudioManager.playSound === 'function') {
           W.AudioManager.playSound('enemy_charge');
         }
-        teardown(); // CHARGING is terminal; engine drives combat from here
+        // CHARGING itself is still a single irreversible commit (every unit
+        // gets one orderChase and the engine drives combat from here) -- but
+        // unlike before, we no longer kill the AI entirely. Stop the normal
+        // 2 Hz strategy heartbeat (its formation/doctrine logic has nothing
+        // left to do once everyone's in open combat) and hand off to the
+        // slower COHESION heartbeat, which only ever touches units that
+        // AREN'T currently fighting -- see cohesionTick() for why this is
+        // safe to leave running for the rest of the battle.
+        if (_tickInterval) { clearInterval(_tickInterval); _tickInterval = null; }
+        _phase = 'COHESION';
+        if (!_cohesionInterval) {
+          _cohesionInterval = setInterval(cohesionTick, COHESION_TICK_MS);
+        }
       }
       return;
     }
+  }
+
+  // ════════════════════════════════════════════════════════════════════════
+  //  COHESION  (post-charge regrouping -- replaces the old hard teardown)
+  // ════════════════════════════════════════════════════════════════════════
+  // CHARGING is still the single irreversible commit -- every unit gets one
+  // orderChase and the engine's own combat/targeting loop takes over moment
+  // to moment, exactly as before. The difference is this file no longer
+  // calls teardown() right after. Instead it keeps a slower, lighter
+  // heartbeat (COHESION_TICK_MS, ~1 Hz vs the normal 2 Hz) alive that only
+  // ever touches units which are CURRENTLY NOT FIGHTING -- anyone mid-combat
+  // (engine state "attacking", or close enough to a live target to be about
+  // to be) is left completely alone, so this never interrupts a swing or
+  // yanks a unit out of melee. What it DOES do: any unit who has finished a
+  // fight (target dead) or never found one and has drifted away from every
+  // ally beyond COHESION_LONE_RADIUS gets walked back toward the nearest
+  // friendly cluster instead of wandering off alone or freezing in place --
+  // the closest this architecture can safely get to "reform after the
+  // charge" without re-introducing the one-shot-orderMove stranding bug
+  // that CHARGING's own comments already warned about.
+  function isUnitCurrentlyFighting (u) {
+    if (u.state === 'attacking') return true;
+    if (u.target && u.target.hp > 0 && !u.target.isDummy) {
+      if (dist(u, u.target) <= COHESION_ENGAGED_DIST) return true;
+    }
+    return false;
+  }
+
+  function cohesionTick () {
+    const isBattle = (typeof W.MobileControls !== 'undefined' && W.MobileControls.G && typeof W.MobileControls.G.isBattle === 'function')
+      ? W.MobileControls.G.isBattle()
+      : (W.battleEnvironment && W.battleEnvironment.isActive !== false);
+    if (!isBattle || !isLandBattle()) { teardownCohesion(); return; }
+
+    const enemyUnits = getEnemyUnits();
+    if (enemyUnits.length < COHESION_MIN_GROUP) { teardownCohesion(); return; }
+    const playerUnits = getPlayerUnits();
+    if (!playerUnits.length) { teardownCohesion(); return; } // battle's basically over
+
+    // Bodyguard/crisis behaviour still takes priority even post-charge.
+    if (detectCrisis()) {
+      const bodyguards = [];
+      for (let i = 0; i < enemyUnits.length; i++) {
+        if (isBodyguardType(enemyUnits[i]) && !isUnitCurrentlyFighting(enemyUnits[i])) bodyguards.push(enemyUnits[i]);
+      }
+      if (bodyguards.length) executeCrisis(bodyguards);
+    }
+
+    // Split into idle (not fighting) vs engaged. Engaged units are never touched.
+    const idle = [];
+    for (let i = 0; i < enemyUnits.length; i++) {
+      if (!isUnitCurrentlyFighting(enemyUnits[i])) idle.push(enemyUnits[i]);
+    }
+    if (!idle.length) return; // everyone's busy -- nothing to regroup
+
+    for (let i = 0; i < idle.length; i++) {
+      const u = idle[i];
+      // Distance to the nearest ally (any enemy unit, fighting or not --
+      // an ally mid-fight is still a valid anchor point to rally toward).
+      let nearestAllyD = Infinity, nearestAlly = null;
+      for (let j = 0; j < enemyUnits.length; j++) {
+        const other = enemyUnits[j];
+        if (other === u) continue;
+        const d = dist(u, other);
+        if (d < nearestAllyD) { nearestAllyD = d; nearestAlly = other; }
+      }
+
+      if (nearestAllyD <= COHESION_LONE_RADIUS || !nearestAlly) {
+        // Close enough to the army (or alone in the world).
+        // RANGED_CAV with ammo: re-issue a kite orbit order rather than
+        // a plain orderChase — processAction's stop-dead block is bypassed
+        // for them, but we still want them actively circling, not hovering.
+        const sub = resolveSubRole(u);
+        const ammoLeft = Math.max((u.ammo || 0), (u.stats && u.stats.ammo) || 0);
+        if (sub === 'RANGED_CAV' && ammoLeft > 0) {
+          // Find nearest player threat
+          const playerUnits = getPlayerUnits();
+          let closestThreat = null, closestD = Infinity;
+          for (let k = 0; k < playerUnits.length; k++) {
+            const d = dist(u, playerUnits[k]);
+            if (d < closestD) { closestD = d; closestThreat = playerUnits[k]; }
+          }
+          if (closestThreat) {
+            const dx = closestThreat.x - u.x, dy = closestThreat.y - u.y;
+            const L  = Math.hypot(dx, dy) || 1;
+            const nx = dx / L, ny = dy / L;
+            const px = -ny, py = nx;
+            const kiteSign = (u._kiteSign !== undefined) ? u._kiteSign : 1;
+            if (closestD < SPREAD_LIGHTCAV_MIN) {
+              // Emergency retreat
+              orderMove(u, u.x + (-nx * 0.55 + px * kiteSign * 0.85) * 280,
+                           u.y + (-ny * 0.55 + py * kiteSign * 0.85) * 280);
+            } else {
+              // Orbit arc
+              orderMove(u, u.x + (px * kiteSign * 0.80 + (-nx) * 0.20) * LIGHTCAV_ORBIT_STEP,
+                           u.y + (py * kiteSign * 0.80 + (-ny) * 0.20) * LIGHTCAV_ORBIT_STEP);
+            }
+            continue;
+          }
+        }
+        orderChase(u);
+        continue;
+      }
+
+      // Isolated: walk back toward the ally cluster rather than the
+      // player's general direction, so strays rejoin a friendly group
+      // instead of soloing into the enemy. orderMove is safe here (unlike
+      // inside the single-shot CHARGING branch) because this heartbeat
+      // keeps re-running and will re-issue/correct the order every tick
+      // for as long as the unit stays idle.
+      backupSpeed(u);
+      if (u.stats && u._elsai_origSpeed !== undefined) {
+        u.stats.speed = u._elsai_origSpeed * COHESION_REGROUP_SPEED;
+      }
+      orderMove(u, nearestAlly.x, nearestAlly.y);
+    }
+  }
+
+  function teardownCohesion () {
+    if (_cohesionInterval) { clearInterval(_cohesionInterval); _cohesionInterval = null; }
+    if (_phase === 'COHESION') _phase = 'IDLE';
   }
 
   // ════════════════════════════════════════════════════════════════════════
@@ -1163,6 +1723,12 @@
     if (!isLandBattle()) {
       // River / siege / naval -> hand off to the legacy AI if it's available.
       _routedToLegacy = true;
+      if (typeof console !== 'undefined' && console.log) {
+        console.log('[EnemyLandStrategyAI] start() ROUTED TO LEGACY — isLandBattle()=false ' +
+          '(siege=' + isSiegeBattle() + ' naval=' + isNavalBattle() + ' river=' + isRiverBattle() +
+          ' battleType=' + (W.battleEnvironment ? W.battleEnvironment.battleType : 'NO ENV') + '). ' +
+          'The advanced AI (doctrine/formations/hit-and-run) will NOT run for this battle.');
+      }
       if (W._EnemyTacticalAILegacy && typeof W._EnemyTacticalAILegacy.start === 'function') {
         return W._EnemyTacticalAILegacy.start(opts);
       }
@@ -1189,9 +1755,11 @@
     if (playerUnits.length) {
       const playerComp = analyseComposition(playerUnits);
       const enemyComp  = analyseComposition(enemyUnits);
-      _doctrine = pickDoctrine(playerComp, enemyComp);
+      _doctrine       = pickDoctrine(playerComp, enemyComp);
+      _formationShape = pickFormationShape(enemyComp, _personality);
     } else {
-      _doctrine = 'COMBINED_ARMS';
+      _doctrine       = 'COMBINED_ARMS';
+      _formationShape = 'LINE';
     }
 
     if (skipForming) {
@@ -1215,11 +1783,23 @@
     _tickInterval = setInterval(tick, STRAT_TICK_MS);
 
     if (typeof console !== 'undefined' && console.log) {
-      console.log('[EnemyLandStrategyAI] start -> doctrine=' + _doctrine + ' personality=' + _personality);
+      console.log('[EnemyLandStrategyAI] start() OK -> doctrine=' + _doctrine +
+        ' personality=' + _personality + ' formation=' + _formationShape +
+        ' phase=' + _phase + ' skipForming=' + skipForming +
+        ' | enemyUnits=' + enemyUnits.length + ' playerUnits=' + playerUnits.length);
+      if (!enemyUnits.length || !playerUnits.length) {
+        console.warn('[EnemyLandStrategyAI] WARNING: started with ' + enemyUnits.length +
+          ' enemy / ' + playerUnits.length + ' player units. The tick() function will ' +
+          'teardown() on its first run if either is still 0 once it fires — set ' +
+          'window.__ELSAI_DEBUG__ = true and watch for "tick() teardown" logs.');
+      }
     }
   }
 
   function stop () {
+    if (typeof console !== 'undefined' && console.log) {
+      console.log('[EnemyLandStrategyAI] stop() called' + (_routedToLegacy ? ' (was routed to legacy)' : ''));
+    }
     if (_routedToLegacy && W._EnemyTacticalAILegacy && typeof W._EnemyTacticalAILegacy.stop === 'function') {
       W._EnemyTacticalAILegacy.stop();
       _routedToLegacy = false;
@@ -1231,6 +1811,7 @@
   function getPhase () { return _phase; }
   function getDoctrine () { return _doctrine; }
   function getPersonality () { return _personality; }
+  function isRoutedToLegacy () { return _routedToLegacy; }
 
   // ════════════════════════════════════════════════════════════════════════
   //  INSTALL  --  patch EnemyTacticalAI so existing callers route through us
@@ -1240,7 +1821,7 @@
     W._EnemyTacticalAILegacy = W.EnemyTacticalAI;
   }
 
-  W.EnemyLandStrategyAI = { start, stop, getPhase, getDoctrine, getPersonality };
+  W.EnemyLandStrategyAI = { start, stop, getPhase, getDoctrine, getPersonality, isRoutedToLegacy };
 
   // Override the public surface used by battlefield_launch.js / battlefield_logic.js.
   // For LAND battles, our advanced AI runs.  For river/naval/siege, we forward
@@ -1251,7 +1832,17 @@
     getPhase:        getPhase,
     getDoctrine:     getDoctrine,
     getPersonality:  getPersonality,
+    isRoutedToLegacy: isRoutedToLegacy,
   };
+
+  // DEBUG: set window.__ELSAI_DEBUG__ = true in the browser console (before
+  // or during a battle) to turn on verbose phase-transition / heartbeat
+  // logging. Leave it false/unset for normal play -- it's silent by default.
+  // Useful console commands while debugging:
+  //   window.__ELSAI_DEBUG__ = true
+  //   window.EnemyLandStrategyAI.getPhase()        -> 'FORMING'/'ADVANCING'/'SKIRMISHING'/'CHARGING'/'COHESION'/'IDLE'
+  //   window.EnemyLandStrategyAI.getDoctrine()     -> e.g. 'HAMMER_AND_ANVIL'
+  //   window.EnemyLandStrategyAI.isRoutedToLegacy() -> true means the OLD AI is running, not this file
 
 })(window);
 
@@ -1289,7 +1880,10 @@
  *    sandbox battles use.  No mode-specific code paths.
  *
  * 6. MOBILE PERFORMANCE
- *      - One strategy tick = 500 ms (2 Hz).
+ *      - One strategy tick = 500 ms (2 Hz) up through CHARGING.
+ *      - After CHARGING, a separate COHESION heartbeat runs at ~900 ms
+ *        (slower; only scans idle units, see section below) instead of the
+ *        AI shutting down entirely -- still cheap (skips anyone fighting).
  *      - Squared-distance comparisons used wherever distances are only sorted.
  *      - Group arrays are rebuilt per tick (cheap; typical N<60) instead of
  *        kept in cross-tick state, which would race against unit deaths.
@@ -1307,6 +1901,13 @@
  *      Picked at random at start().  Each modulates skirmish duration, commit
  *      distances, retreat instinct, hammer-hold timing, and kite range.  This
  *      makes back-to-back battles with the same army feel different.
+ *
+ * 8b. PHASES
+ *      IDLE -> FORMING -> ADVANCING -> SKIRMISHING -> CHARGING -> COHESION
+ *      COHESION is NOT terminal -- it runs for the rest of the battle (or
+ *      until stop()/teardown() is called), continuously pulling isolated,
+ *      not-currently-fighting units back toward the nearest ally cluster.
+ *      Tune via COHESION_TICK_MS / COHESION_LONE_RADIUS / COHESION_ENGAGED_DIST.
  *
  * 9. EXTENDING
  *      To add a new doctrine: add a branch in pickDoctrine(), add positioning

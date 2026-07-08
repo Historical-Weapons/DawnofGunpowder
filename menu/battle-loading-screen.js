@@ -153,6 +153,19 @@ window.__chosenEnemyFormation = null;
 // during the brief window between the first card render and the refresh tick).
 let _lastPendingPlayer = null;
 
+// ── FIX: STABLE SCOUT REVEAL ────────────────────────────────────────────────
+// _scoutRoster()/_scoutCount() are randomized (random shuffle + random reveal
+// fraction / ±10% count noise) to simulate scouts only partially identifying
+// the enemy force. _refreshLoadingScreenData() calls them on EVERY 80ms gate
+// tick though, so a fresh random subset/order/count was being rolled ~12x/sec
+// — cards appearing, disappearing, and reordering every tick. That's the
+// "barely show up while flickering" enemy-side symptom (the player side has
+// no scouting fog, so it was never affected). Fix: roll the reveal ONCE per
+// loading screen and cache it; every subsequent tick reuses the same result
+// until the screen is reset for the next battle.
+let _scoutRevealCache = null; // { rosterKey, roster, count }
+function _resetScoutReveal() { _scoutRevealCache = null; }
+
 // ── Terrain labels ──────────────────────────────────────────────────────────
 const TERRAIN_LABELS = {
     "Plains": "Open Plains",  "Forest": "Forested Hills",
@@ -259,15 +272,15 @@ function _makeEl(tag, styles, text) {
 }
 
 const DEPLOY_MSGS = [
-    "Assembling formations…",
-    "Reading the terrain…",
-    "Positioning artillery…",
-    "Cavalry taking flanks…",
-    "Archers nocking arrows…",
-    "Scouts reporting in…",
-    "Drummers at the ready…",
-    "Standards raised…",
-    "Awaiting your command…"
+    "Compiling unit AI…",
+    "Resolving asset dependencies…",
+    "Seeding terrain RNG…",
+    "Sculpting battlefield terrain…",
+    "Patching entity transforms…",
+    "Allocating draw buffers…",
+    "Hydrating formation data…",
+    "Registering event listeners…",
+    "Awaiting render frame…"
 ];
 
 // ============================================================================
@@ -477,10 +490,13 @@ function _buildScreen() {
     playerHeader.appendChild(playerInfo);
     botSection.appendChild(playerHeader);
 
-    // Progress bar
+    // Progress circle
     const progSection = _makeEl("div", {
         width: "min(500px, 90vw)",
-        marginTop: "clamp(6px, 1.5vh, 14px)"
+        marginTop: "clamp(6px, 1.5vh, 14px)",
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center"
     });
     _statusEl = _makeEl("div", {
         fontSize:       "clamp(0.6rem, 1.5vw, 0.72rem)",
@@ -488,49 +504,98 @@ function _buildScreen() {
         letterSpacing:  "2px",
         textTransform:  "uppercase",
         textAlign:      "center",
-        marginBottom:   "6px",
+        marginBottom:   "10px",
         display:        "flex",
         alignItems:     "center",
         justifyContent: "center",
         gap:            "8px"
-    }, "Deploying troops…");
-    const barOuter = _makeEl("div", {
-        width:        "100%",
-        height:       "4px",
-        background:   "rgba(255,255,255,0.08)",
-        borderRadius: "4px",
-        overflow:     "hidden",
-        position:     "relative"
+    }, "Preparing battlefield — loading…");
+
+    // Circular progress ring, built from an SVG circle whose stroke-dasharray
+    // is driven by pct (replaces the old horizontal shimmer bar).
+    const RING_SIZE = 64;
+    const RING_R     = 27;
+    const RING_CIRC  = 2 * Math.PI * RING_R;
+    const ringWrap = _makeEl("div", {
+        position: "relative",
+        width:  RING_SIZE + "px",
+        height: RING_SIZE + "px"
     });
-    _progressFill = _makeEl("div", {
-        height:       "100%",
-        width:        "0%",
-        background:   "linear-gradient(90deg, #6b3a10, #c8910a, #f5d76e, #fff8c0)",
-        borderRadius: "4px",
-        transition:   "width 0.1s linear",
-        boxShadow:    "0 0 10px rgba(245,215,110,0.6)",
-        position:     "relative"
+    const svgNS = "http://www.w3.org/2000/svg";
+    const ringSvg = document.createElementNS(svgNS, "svg");
+    ringSvg.setAttribute("width", RING_SIZE);
+    ringSvg.setAttribute("height", RING_SIZE);
+    ringSvg.setAttribute("viewBox", `0 0 ${RING_SIZE} ${RING_SIZE}`);
+    ringSvg.style.transform = "rotate(-90deg)"; // start fill from the top
+    ringSvg.style.filter = "drop-shadow(0 0 6px rgba(245,215,110,0.55))";
+
+    const ringTrack = document.createElementNS(svgNS, "circle");
+    ringTrack.setAttribute("cx", RING_SIZE / 2);
+    ringTrack.setAttribute("cy", RING_SIZE / 2);
+    ringTrack.setAttribute("r", RING_R);
+    ringTrack.setAttribute("fill", "none");
+    ringTrack.setAttribute("stroke", "rgba(255,255,255,0.08)");
+    ringTrack.setAttribute("stroke-width", "6");
+
+    _progressFill = document.createElementNS(svgNS, "circle");
+    _progressFill.setAttribute("cx", RING_SIZE / 2);
+    _progressFill.setAttribute("cy", RING_SIZE / 2);
+    _progressFill.setAttribute("r", RING_R);
+    _progressFill.setAttribute("fill", "none");
+    _progressFill.setAttribute("stroke", "url(#bls-ring-gradient)");
+    _progressFill.setAttribute("stroke-width", "6");
+    _progressFill.setAttribute("stroke-linecap", "round");
+    _progressFill.setAttribute("stroke-dasharray", RING_CIRC.toFixed(2));
+    _progressFill.setAttribute("stroke-dashoffset", RING_CIRC.toFixed(2));
+    _progressFill.style.transition = "stroke-dashoffset 0.1s linear";
+    // Stash geometry constant on the element itself so update sites (which
+    // only know a 0-100 pct) can compute the correct dashoffset without
+    // duplicating RING_CIRC everywhere.
+    _progressFill.__circumference = RING_CIRC;
+
+    const defs = document.createElementNS(svgNS, "defs");
+    const grad = document.createElementNS(svgNS, "linearGradient");
+    grad.setAttribute("id", "bls-ring-gradient");
+    grad.setAttribute("x1", "0%"); grad.setAttribute("y1", "0%");
+    grad.setAttribute("x2", "100%"); grad.setAttribute("y2", "100%");
+    const stops = [
+        ["0%",   "#6b3a10"],
+        ["35%",  "#c8910a"],
+        ["70%",  "#f5d76e"],
+        ["100%", "#fff8c0"]
+    ];
+    stops.forEach(([off, col]) => {
+        const s = document.createElementNS(svgNS, "stop");
+        s.setAttribute("offset", off);
+        s.setAttribute("stop-color", col);
+        grad.appendChild(s);
     });
-    const shimmer = _makeEl("div", {
-        position:   "absolute",
-        top:        "0", left: "-60px",
-        width:      "60px", height: "100%",
-        background: "linear-gradient(90deg, transparent, rgba(255,255,255,0.5), transparent)",
-        animation:  "bls-shimmer 1.5s infinite"
-    });
-    _progressFill.appendChild(shimmer);
-    barOuter.appendChild(_progressFill);
+    defs.appendChild(grad);
+    ringSvg.appendChild(defs);
+    ringSvg.appendChild(ringTrack);
+    ringSvg.appendChild(_progressFill);
+    ringWrap.appendChild(ringSvg);
+
+    // Centered label inside the ring (kept as "Loading..." per existing design,
+    // not a numeric percentage).
     _progressPct = _makeEl("div", {
+        position:      "absolute",
+        top:           "50%",
+        left:          "50%",
+        transform:     "translate(-50%, -50%)",
         textAlign:     "center",
-        marginTop:     "6px",
-        fontSize:      "clamp(0.65rem, 1.8vw, 0.78rem)",
-        color:         "rgba(245,215,110,0.6)",
-        letterSpacing: "1px",
-        fontStyle:     "italic"
-    }, "0%");
+        fontSize:      "clamp(0.42rem, 1.1vw, 0.58rem)",
+        color:         "rgba(245,215,110,0.95)",
+        letterSpacing: "0.5px",
+        fontWeight:    "700",
+        fontFamily:    "monospace",
+        textShadow:    "0 0 8px rgba(245,215,110,0.5)",
+        whiteSpace:    "nowrap"
+    }, "Loading...");
+    ringWrap.appendChild(_progressPct);
+
     progSection.appendChild(_statusEl);
-    progSection.appendChild(barOuter);
-    progSection.appendChild(_progressPct);
+    progSection.appendChild(ringWrap);
     botSection.appendChild(progSection);
     layout.appendChild(botSection);
 
@@ -543,10 +608,6 @@ function _buildScreen() {
         const st = document.createElement("style");
         st.id = "bls-styles";
         st.textContent = `
-            @keyframes bls-shimmer {
-                0%   { left: -60px; }
-                100% { left: 110%; }
-            }
             @keyframes bls-pulse {
                 0%, 100% { opacity: 1; transform: scale(1); }
                 50%      { opacity: 0.85; transform: scale(1.03); }
@@ -593,8 +654,27 @@ function _unitIcon(type) {
 
 // ── Build unit card tiles (uses drawTroopCardToCanvas if available) ──────────
 // unknownCount: for enemy side only — how many units scouts didn't identify.
-// Appends foggy "?" cards after the known cards to show the intel gap.
-function buildCardTiles(roster, container, side, factionCol, unknownCount = 0) {
+// targetTotal:  when > 0, card ×counts are scaled proportionally to this
+//               deployed total (so initial render shows actual on-field counts,
+//               not the raw full-army roster size).
+function buildCardTiles(roster, container, side, factionCol, unknownCount = 0, targetTotal = 0) {
+    // ── FIX: FLICKER GUARD ──────────────────────────────────────────────────
+    // _runLoadingGate() polls every 80ms and calls _refreshLoadingScreenData()
+    // -> buildCardTiles() on EVERY tick once units exist (by design, to keep
+    // counts converging to the live deployed total). But this function used
+    // to unconditionally wipe (innerHTML = "") and rebuild every card on every
+    // call, restarting the bls-fadein CSS animation on every card ~12.5x/sec
+    // for the full ~2s loading window — that's the extremely-fast flicker.
+    // Fix: compute a cheap signature of what would actually be rendered and
+    // skip the rebuild entirely if it's identical to last time. The numbers
+    // still converge (each tick that actually changes something still
+    // rebuilds), but once the roster settles, the DOM is left alone and the
+    // fade-in plays once instead of restarting every 80ms.
+    const _sig = side + "|" + unknownCount + "|" + targetTotal + "|" +
+        (roster || []).map(u => (typeof u === "string" ? u : (u.type || u.name || u.unitType || "?"))).join(",");
+    if (container.__blsLastSig === _sig) return;
+    container.__blsLastSig = _sig;
+
     container.innerHTML = "";
     if (!roster || !roster.length) {
         const none = _makeEl("div", {
@@ -609,7 +689,29 @@ function buildCardTiles(roster, container, side, factionCol, unknownCount = 0) {
     // Cap unknown cards at 5 — if more remain, the last card shows ×overflow badge
     const MAX_UNKNOWN_CARDS = 5;
 
-    const items   = condenseRoster(roster, CFG.CARD_MAX);
+    let items   = condenseRoster(roster, CFG.CARD_MAX);
+
+    // ── Scale item counts to the actual deployed total ───────────────────────
+    // Without this, the initial render shows full-army numbers (e.g. ×200)
+    // while only ~100 troops will actually be on the field.  After the 110ms
+    // refresh, _refreshLoadingScreenData corrects via live battleEnvironment,
+    // but scaling here prevents any wrong-number flash on the first frame.
+    if (targetTotal > 0 && items.length > 0) {
+        const rawTotal = items.reduce((s, i) => s + i.count, 0);
+        if (rawTotal > 0 && rawTotal !== targetTotal) {
+            const ratio = targetTotal / rawTotal;
+            let remaining = targetTotal;
+            items.forEach((item, idx) => {
+                if (idx === items.length - 1) {
+                    // Last card absorbs rounding error; guarantee at least 1
+                    item.count = Math.max(1, remaining);
+                } else {
+                    item.count = Math.max(1, Math.round(item.count * ratio));
+                    remaining  = Math.max(0, remaining - item.count);
+                }
+            });
+        }
+    }
     const totalCardSlots = items.length + Math.min(unknownCount, MAX_UNKNOWN_CARDS);
     const W       = Math.min(CFG.CARD_W, Math.floor((window.innerWidth * 0.88) / Math.min(totalCardSlots, 8)) - 8);
     const H         = Math.round(W * 1.35);
@@ -669,18 +771,6 @@ function buildCardTiles(roster, container, side, factionCol, unknownCount = 0) {
             filter: "drop-shadow(0 2px 4px rgba(0,0,0,0.85))"
         }, _unitIcon(item.type));
         card.appendChild(iconArea);
-
-        // ×count badge top-right
-        const badge = _makeEl("div", {
-            position: "absolute",
-            top: "3px", right: "4px",
-            fontSize: Math.max(8, Math.round(W * 0.13)) + "px",
-            color: isEnemy ? "#ff9090" : "#90ccff",
-            fontWeight: "bold",
-            zIndex: "2",
-            textShadow: "0 1px 3px rgba(0,0,0,0.95)"
-        }, "×" + item.count);
-        card.appendChild(badge);
 
         // Unit name pinned to bottom, wraps for long names
         const nameLabel = _makeEl("div", {
@@ -756,31 +846,20 @@ function buildCardTiles(roster, container, side, factionCol, unknownCount = 0) {
 
             // badge: ×N if last card with overflow, otherwise nothing (each ? = 1 hidden unit)
             if (isLast && overflow > 0) {
-                const qBadge = _makeEl("div", {
-                    position:   "absolute",
-                    top: "3px", right: "4px",
-                    fontSize:   Math.max(8, Math.round(W * 0.13)) + "px",
-                    color:      "#cc6060",
-                    fontWeight: "bold",
-                    zIndex:     "2",
-                    textShadow: "0 1px 3px rgba(0,0,0,0.95)"
-                }, "×" + badgeNum);
-                qCard.appendChild(qBadge);
+                // "Unknown" label at bottom
+                const qLabel = _makeEl("div", {
+                    position:      "absolute",
+                    bottom: "3px", left: "2px", right: "2px",
+                    textAlign:     "center",
+                    fontSize:      Math.max(7, Math.round(W * 0.09)) + "px",
+                    color:         "rgba(200,100,100,0.65)",
+                    fontStyle:     "italic",
+                    lineHeight:    "1.15",
+                    zIndex:        "2",
+                    textShadow:    "0 1px 3px rgba(0,0,0,0.9)"
+                }, "Unknown");
+                qCard.appendChild(qLabel);
             }
-
-            // "Unknown" label at bottom
-            const qLabel = _makeEl("div", {
-                position:      "absolute",
-                bottom: "3px", left: "2px", right: "2px",
-                textAlign:     "center",
-                fontSize:      Math.max(7, Math.round(W * 0.09)) + "px",
-                color:         "rgba(200,100,100,0.65)",
-                fontStyle:     "italic",
-                lineHeight:    "1.15",
-                zIndex:        "2",
-                textShadow:    "0 1px 3px rgba(0,0,0,0.9)"
-            }, "Unknown");
-            qCard.appendChild(qLabel);
 
             // Subtle red top accent instead of gold
             const qAccent = _makeEl("div", {
@@ -800,25 +879,75 @@ function buildCardTiles(roster, container, side, factionCol, unknownCount = 0) {
 // ── Scout intel helpers (enemy side only) ────────────────────────────────────
 // Returns a fuzzy troop count: ±10% random noise, rounded to nearest 5.
 // Gives the player a rough sense of force size without exact numbers.
+
+// ── Scaled deploy count helpers ───────────────────────────────────────────────
+// Mirrors the GLOBAL_BATTLE_SCALE logic in battlefield_launch.js so the
+// loading screen shows the actual units that will appear on the field, not
+// the raw army size.  Same two-branch logic as the launch file:
+//   Sandbox/story : scale = largerSide / cap  (cap = maxSandboxBattleTroops)
+//   Custom battle : scale = ceil(total / 300) when total > 400, else 1
+//   deployed      = round( rawCount / scale )
+function _computeDeployedCounts(playerRaw, enemyRaw) {
+    let scale = 1;
+    if (window.__IS_CUSTOM_BATTLE__) {
+        const total = playerRaw + enemyRaw;
+        scale = total > 400 ? Math.ceil(total / 300) : 1;
+    } else {
+        const cap        = Math.max(20, Math.min(300, window.maxSandboxBattleTroops || 100));
+        const largerSide = Math.max(playerRaw, enemyRaw);
+        scale = largerSide > cap ? largerSide / cap : 1;
+    }
+    const pDeploy = scale > 1 ? Math.max(1, Math.round(playerRaw / scale)) : playerRaw;
+    const eDeploy = scale > 1 ? Math.max(1, Math.round(enemyRaw  / scale)) : enemyRaw;
+    return { pDeploy, eDeploy, scale, capped: scale > 1 };
+}
+
+// Cached per-call-session (see _scoutRevealCache) — same fuzz-once rationale
+// as _scoutRoster: _refreshLoadingScreenData() calls this every 80ms tick
+// with the same "exact" value while the troop count is stable, and a fresh
+// ±10% random roll each time made the displayed enemy count visibly jitter.
+let _scoutCountCache = null; // { exact, value }
 function _scoutCount(exact) {
     if (!exact || exact <= 0) return 0;
+    if (_scoutCountCache && _scoutCountCache.exact === exact) {
+        return _scoutCountCache.value;
+    }
     const noise  = exact * 0.10;                         // ±10% window
     const fuzzed = exact + (Math.random() * noise * 2) - noise;
-    return Math.max(5, Math.round(fuzzed / 5) * 5);      // nearest 5, min 5
+    const value  = Math.max(5, Math.round(fuzzed / 5) * 5);      // nearest 5, min 5
+    _scoutCountCache = { exact, value };
+    return value;
 }
 
 // Returns a partial enemy roster — 30-60% of cards, randomly sampled.
 // Simulates scouts only recognising some unit types from a distance.
+// Cached per-call-session (see _scoutRevealCache) so repeated calls with the
+// same underlying roster return the SAME subset/order instead of re-rolling.
 function _scoutRoster(roster) {
     if (!roster || !roster.length) return [];
+
+    const rosterKey = roster.map(u => (typeof u === "string" ? u : (u.type || u.name || u.unitType || "?"))).join(",");
+    if (_scoutRevealCache && _scoutRevealCache.rosterKey === rosterKey) {
+        return _scoutRevealCache.roster;
+    }
+
     const revealFraction = 0.30 + Math.random() * 0.30;   // 30-60%
     const revealCount    = Math.max(1, Math.round(roster.length * revealFraction));
     const shuffled = roster.slice().sort(() => Math.random() - 0.5);
-    return shuffled.slice(0, revealCount);
+    const result = shuffled.slice(0, revealCount);
+
+    _scoutRevealCache = { rosterKey, roster: result, count: _scoutRevealCache ? _scoutRevealCache.count : null };
+    return result;
 }
+
 function showBattleLoadingScreen(npc, tile, nearestCity, pendingPlayerOverride) {
     if (!_screen) _buildScreen();
     if (!_screen) return;
+
+    // New battle session — clear stale scout caches so this battle's fog-of-war
+    // reveal rolls fresh rather than reusing whatever the last battle showed.
+    _resetScoutReveal();
+    _scoutCountCache = null;
 
     const tileName = (tile && tile.name) ? tile.name : "Plains";
     const cityName = nearestCity ? (nearestCity.name || nearestCity.id) : null;
@@ -843,8 +972,25 @@ function showBattleLoadingScreen(npc, tile, nearestCity, pendingPlayerOverride) 
         && window.battleEnvironment.units.some(u => u.side === "enemy" && u.isCommander));
     const _addGeneral = window.__blsFromCustom || _enemyCmdrSpawned;
     const _exactCount  = ((npc && (npc.count || npc.troops)) || 0) + (_addGeneral ? 1 : 0);
-    const enemyCountN  = _scoutCount(_exactCount);        // fuzzy ±10%, nearest 5
- 
+
+    // --- Compute actual deployed counts after cap/ratio scaling ---
+    // playerCount already has +1 for the commander; strip it back so inputs
+    // match what battlefield_launch.js receives (player.troops / npc.count).
+    const _playerRaw = playerCount - 1;
+    const _enemyRaw  = _exactCount;
+    const _scaled    = _computeDeployedCounts(_playerRaw, _enemyRaw);
+
+    // Fuzz the DEPLOYED enemy count (not the full army) for the scout report
+    const enemyCountN = _scoutCount(_scaled.eDeploy);
+    // Player sees their exact deployed count (+1 for their own commander)
+    const playerDeployedDisplay = _scaled.pDeploy + 1;
+
+    // Cap reminder: visible in sandbox/story only, never for custom battles
+    const _cap = Math.max(20, Math.min(300, window.maxSandboxBattleTroops || 100));
+    const _capReminderText = (!window.__IS_CUSTOM_BATTLE__ && _scaled.capped)
+        ? "  •  Max set at " + _cap + " per side"
+        : "";
+
     const _fullEnemyRosterLen = (npc && npc.roster) ? npc.roster.length : 0;
     const enemyRoster  = _scoutRoster((npc && npc.roster) || []);  // partial scout reveal
     // How many enemy units scouts didn't identify — shown as "?" cards
@@ -860,11 +1006,11 @@ function showBattleLoadingScreen(npc, tile, nearestCity, pendingPlayerOverride) 
 
     document.getElementById("bls-enemy-name").textContent  = enemyFac.toUpperCase();
     document.getElementById("bls-enemy-name").style.color  = enemyCol;
-    document.getElementById("bls-enemy-count").textContent = "Scout report: ~" + enemyCountN + " troops";
+    document.getElementById("bls-enemy-count").textContent = "";
 
     document.getElementById("bls-player-name").textContent  = playerFac.toUpperCase();
     document.getElementById("bls-player-name").style.color  = playerCol;
-    document.getElementById("bls-player-count").textContent = playerCount + " troops";
+    document.getElementById("bls-player-count").textContent = "";
 
     // Background image preload + apply (tries .png → .jpg → .jpeg for index 1-12)
     _loadBgWithFallback(pickBgIndex(), (resolvedUrl) => {
@@ -880,21 +1026,27 @@ function showBattleLoadingScreen(npc, tile, nearestCity, pendingPlayerOverride) 
 
     // Build cards after layout tick (so canvases get proper width)
     setTimeout(() => {
-        buildCardTiles(enemyRoster,  _enemyCardsRow,  "enemy",  enemyCol, unknownEnemyCount);
-        buildCardTiles(playerRoster, _playerCardsRow, "player", playerCol);
+        // Pass the deployed counts so card ×badges show on-field numbers, not raw army size
+        buildCardTiles(enemyRoster,  _enemyCardsRow,  "enemy",  enemyCol, unknownEnemyCount, _scaled.eDeploy);
+        buildCardTiles(playerRoster, _playerCardsRow, "player", playerCol, 0, _scaled.pDeploy);
     }, 80);
 
     // Progress animation
-    _progressFill.style.width = "0%";
-    _progressPct.textContent  = "0%";
+    _progressFill.setAttribute("stroke-dashoffset", _progressFill.__circumference.toFixed(2));
+    _progressFill.dataset.pct = "0";
+    _progressPct.textContent  = "Loading...";
     let tick = 0, msgIdx = 0;
     if (_progressInterval) clearInterval(_progressInterval);
     const tickInterval = CFG.LOAD_MIN_MS / CFG.PROGRESS_TICKS;
     _progressInterval = setInterval(() => {
         tick++;
         const pct = Math.min(Math.round((tick / CFG.PROGRESS_TICKS) * 100), 100);
-        _progressFill.style.width = pct + "%";
-        _progressPct.textContent  = pct + "%";
+        const circ = _progressFill.__circumference;
+        _progressFill.setAttribute("stroke-dashoffset", (circ * (1 - pct / 100)).toFixed(2));
+        _progressFill.dataset.pct = String(pct);
+        // Ring fill still animates by real pct above; the label itself
+        // just reads "Loading..." instead of a numeric percentage.
+        _progressPct.textContent  = "Loading...";
         const newMsg = Math.floor((tick / CFG.PROGRESS_TICKS) * DEPLOY_MSGS.length);
         if (newMsg !== msgIdx && newMsg < DEPLOY_MSGS.length) {
             msgIdx = newMsg;
@@ -957,17 +1109,40 @@ function _refreshLoadingScreenData() {
     }
     const enemyCol = factionColor(enemyFac) || "#c0392b";
 
+    // ═════════════════════════════════════════════════════════════════════════
+    // SCALED COUNT FROM LIVE BATTLEFIELD (TRUTHIEST SOURCE)
+    // ══════════════════════════════════════════════════════════════════════════
+    // The counts shown to the player MUST be what actually deployed on the
+    // battlefield, NOT the raw army size. Once the launch function has spawned
+    // units (which happens before this 110ms refresh fires), the live counts
+    // in battleEnvironment.units are the authoritative deployed totals.
+    //
+    // Old code mistakenly used playerRoster.length (the full unscaled roster)
+    // and window.player.troops (raw army size) as a fallback, which caused the
+    // screen to display the pre-cap numbers instead of the actual deployed ones.
+    let _playerOnFieldCount = 0;
+    let _enemyOnFieldCount  = 0;
+    if (window.battleEnvironment && Array.isArray(window.battleEnvironment.units)) {
+        for (const u of window.battleEnvironment.units) {
+            if (!u || u.hp == null) continue;
+            if (u.side === "player") _playerOnFieldCount++;
+            else if (u.side === "enemy") _enemyOnFieldCount++;
+        }
+    }
+
+    // Fuzz the live enemy count for the scout-report display
+    if (_enemyOnFieldCount > 0) enemyCountN = _scoutCount(_enemyOnFieldCount);
+
+    // Cap reminder: visible in sandbox/story only, hidden for custom battles.
+    const _refreshCap = Math.max(20, Math.min(300, window.maxSandboxBattleTroops || 100));
+    const _refreshCapText = (!window.__IS_CUSTOM_BATTLE__ && (window.GLOBAL_BATTLE_SCALE || 1) > 1)
+        ? "  •  Max set at " + _refreshCap + " per side"
+        : "";
+
     document.getElementById("bls-enemy-name").textContent  = enemyFac.toUpperCase();
     document.getElementById("bls-enemy-name").style.color  = enemyCol;
-    // FIX: Only update count if we actually found enemy units — don't overwrite the
-    // initial npc.count (set from __blsPendingEnemy) with 0 when battleEnvironment.units
-    // hasn't populated yet or GLOBAL_BATTLE_SCALE has reduced the count.
-    if (enemyCountN > 0) {
-        document.getElementById("bls-enemy-count").textContent = "Scout report: ~" + enemyCountN + " troops";
-    }
     document.getElementById("bls-player-name").textContent = playerFac.toUpperCase();
     document.getElementById("bls-player-name").style.color = playerCol;
-    document.getElementById("bls-player-count").textContent = (playerRoster.length || (window.player && window.player.troops) || 0) + 1 + " troops";
 
     _subEl.textContent = terrainLabel("");
 
@@ -975,8 +1150,9 @@ function _refreshLoadingScreenData() {
     // If enemies aren't spawned yet (110ms refresh fires before spawn loop finishes),
     // enemyRoster is [] and calling buildCardTiles would wipe the correct cards that
     // showBattleLoadingScreen already built from __blsPendingEnemy at t=80ms.
-    if (enemyRoster.length)  buildCardTiles(enemyRoster,  _enemyCardsRow,  "enemy",  enemyCol, unknownEnemyCount);
-    if (playerRoster.length) buildCardTiles(playerRoster, _playerCardsRow, "player", playerCol);
+    // Pass live on-field counts as targetTotal so card ×badges reflect deployed troops.
+    if (enemyRoster.length)  buildCardTiles(enemyRoster,  _enemyCardsRow,  "enemy",  enemyCol, unknownEnemyCount, _enemyOnFieldCount || 0);
+    if (playerRoster.length) buildCardTiles(playerRoster, _playerCardsRow, "player", playerCol, 0, _playerOnFieldCount || 0);
 }
 
 function hideBattleLoadingScreen() {
@@ -1000,6 +1176,29 @@ function _launchDirectly() {
 
     window.__preDeploymentActive  = false;
     window.__battleCullingEnabled = true;
+    // Lift the draw/update gate here (not in the loading gate) so that the
+    // 520ms fade-out keeps loading, but the moment _launchDirectly
+    // fires (after the screen is gone) the canvas and updateBattleUnits are
+    // immediately unblocked.
+    window.__battleLoadingActive  = false;
+
+    // ── CRITICAL: set inBattleMode BEFORE anything that starts a setInterval ──
+    // EnemyTacticalAI.start() fires a setInterval(tick, 500ms). tick() guards
+    // itself with MobileControls.G.isBattle() / !isBattle → teardown(). On
+    // mobile MobileControls.G.isBattle() reads window.inBattleMode. If that
+    // flag is still false when the first tick fires (~500ms from now), tick()
+    // calls teardown() immediately — the AI stops, enemy units receive no further
+    // advance orders, and they stand frozen until the player moves the camera
+    // (which triggers processAction independently via other paths).
+    // Fix: mirror what enterBattlefield does — set BOTH the local var (scoped to
+    // battlefield_launch.js) via its window export AND window.inBattleMode so
+    // every reader agrees before the first AI tick fires.
+    if (typeof window.inBattleMode !== 'undefined') window.inBattleMode = true;
+    // The local `inBattleMode` in battlefield_launch.js is not directly settable
+    // from here, but battlefield_launch.js already exposed it via window at line
+    // 707. Setting window.inBattleMode here covers MobileControls, BLS checks,
+    // and EnemyTacticalAI.tick()'s isBattle() guard simultaneously.
+    // ──────────────────────────────────────────────────────────────────────────
 
     // Flush ghost keys
     if (window.keys) for (const k in window.keys) window.keys[k] = false;
@@ -1046,7 +1245,9 @@ function _launchDirectly() {
 
     // Start enemy tactical AI — same call as enterBattlefield line 871
     if (typeof window.EnemyTacticalAI !== "undefined" && window.EnemyTacticalAI.start) {
-        try { window.EnemyTacticalAI.start(); } catch (e) {}
+        try { window.EnemyTacticalAI.start(); } catch (e) { console.error('[BLS] EnemyTacticalAI.start() threw in _launchDirectly():', e); }
+    } else {
+        console.warn('[BLS] window.EnemyTacticalAI missing or has no start() at _launchDirectly() time!');
     }
 
     if (typeof window.triggerEpicZoom === "function") {
@@ -1930,9 +2131,16 @@ function _commenceBattle() {
             }
             if (u.isCommander || u.disableAICombat) continue;
 
-            const allowed = ["move_to_point", "hold_position", "follow"];
-            if (u.hasOrders && allowed.indexOf(u.orderType) !== -1 && u.orderType !== "hold_position") {
-                // Preserve user-issued movement order
+            const allowed = ["move_to_point", "hold_position", "follow", "siege_assault"];
+            if (u.hasOrders && allowed.indexOf(u.orderType) !== -1) {
+                // Preserve user-issued movement order, and siege roles assigned
+                // by executeSiegeAssaultAI during deployment (ram_pusher /
+                // ladder_carrier / trebuchet_crew / etc). Without this branch,
+                // every siege unit fell into the "no explicit order" else-case
+                // below and got force-reassigned to seek_engage the instant
+                // COMMENCE ran — wiping siegeRole/siegeTarget and making units
+                // charge the nearest enemy like a land battle instead of
+                // walking to their ram/ladder.
                 u.formationTimer = 120;
             } else {
                 // No explicit order → auto-engage
@@ -1951,31 +2159,35 @@ function _commenceBattle() {
     _enableAutoAttackAfterDeploy();
 
     if (typeof window.EnemyTacticalAI !== "undefined" && window.EnemyTacticalAI.start) {
-        // ★ v4.2.6: DO NOT call EnemyTacticalAI.start() anymore.
-        // EnemyTacticalAI.start({skipForming:true}) immediately runs
-        // executeAdvancing, which calls orderMove on every enemy and sets
-        // orderType="move_to_point" + a dummy target.  That orderType is in
-        // processTargeting's SKIP LIST (ai_categories.js line 186), so enemy
-        // units never scan for real targets, never engage at melee range, and
-        // their only motion driver is the AI's 500ms tick re-issuing waypoints.
-        // If that tick hiccups for any reason (it has multiple guards that can
-        // teardown() the interval), enemies freeze permanently — even with the
-        // player commander standing right next to them.
+        // ★ v4.3: RESTART the tactical AI instead of permanently disabling it.
         //
-        // SYMPTOM: "frozen, won't attack at 2px range, but retreats on morale
-        // drop" — because retreat bypasses the normal AI path.
+        // The v4.2.6 fix above (this function, top of the loop: orderType =
+        // "seek_engage" for every enemy) solved a real freeze bug, but the
+        // freeze was caused by the OLD enemyTacticalAI.js's executeAdvancing,
+        // which tagged enemies move_to_point + a dummy target with no ongoing
+        // re-acquisition. That code no longer runs: window.EnemyTacticalAI is
+        // now overridden by enemyLandStrategyAI.js, whose orderMove()/
+        // orderHold() were written specifically to avoid that freeze:
+        //   - orderMove() attaches a fresh dummy target every call so
+        //     processAction's move_to_point branch always has something to
+        //     walk toward.
+        //   - orderHold() clears any stale dummy target and relies on
+        //     ai_categories.js's hold_position 100%-range engage rule so held
+        //     units still fight back.
+        //   - units tagged "seek_engage" (skirmishing shooters/cav, or this
+        //     function's own fallback above) are handled every frame by
+        //     ai_categories.js's smart-targeting block, independent of the
+        //     AI's own 500ms heartbeat.
         //
-        // The fix issued earlier in this function (orderType="seek_engage" for
-        // every enemy unit) makes them behave like aggressive engine-driven AI:
-        // processTargeting scans for nearest player unit, processAction drives
-        // movement and combat, melee self-defence works at close range.  Same
-        // path used by player allies — proven reliable.
+        // Leaving EnemyTacticalAI stopped (the old fix) means the smart
+        // composition/doctrine/personality/group layer never runs at all —
+        // every enemy just keeps the plain seek_engage assigned above, which
+        // is why enemies were charging blindly with no tactical positioning.
         //
-        // We still call .stop() defensively in case it was previously started
-        // by the original enterBattlefield (which calls .start() at line 871
-        // of battlefield_launch.js).
-        if (window.EnemyTacticalAI.stop) {
-            try { window.EnemyTacticalAI.stop(); } catch (e) {}
+        // skipForming:true because units are already deployed and standing
+        // at COMMENCE — no need to wait through the FORMING phase delay.
+        try { window.EnemyTacticalAI.start({ skipForming: true }); } catch (e) {
+            console.error('[BLS] EnemyTacticalAI.start() threw in _commenceBattle():', e);
         }
     }
     if (typeof window.triggerEpicZoom === "function") {
@@ -2043,20 +2255,62 @@ function _installDrawPatch() {
             try {
                 const cv = document.getElementById("gameCanvas");
                 if (cv) {
-                    const ctx = cv.getContext("2d");
-                    ctx.fillStyle = "#000";
-                    ctx.fillRect(0, 0, cv.width, cv.height);
+                    const ctx2d = cv.getContext("2d");
+                    // Black fill
+                    ctx2d.fillStyle = "#000";
+                    ctx2d.fillRect(0, 0, cv.width, cv.height);
+                    // Paint a "Loading…" label directly on the canvas so it is
+                    // visible even if the BLS overlay div fails to composite.
+                    // Numeric percentage removed from display per design —
+                    // real progress (window.__blsCanvasLoadPct) still drives
+                    // the thin bar's fill width below, just isn't shown as text.
+                    const isReady = !!(window.__blsCanvasLoadReady);
+                    const label = isReady ? "FINALISING…" : "MAP LOADING";
+                    const loadingText = "Loading...";
+                    const fontSize = Math.max(18, Math.min(32, cv.width * 0.028));
+                    ctx2d.save();
+                    // Subtle vignette behind text
+                    ctx2d.fillStyle = "rgba(0,0,0,0.55)";
+                    ctx2d.fillRect(cv.width/2 - 120, cv.height/2 - 60, 240, 100);
+                    // Label (small, above "Loading...")
+                    ctx2d.font = "500 " + Math.round(fontSize*0.55) + "px monospace";
+                    ctx2d.fillStyle = "rgba(245,215,110,0.70)";
+                    ctx2d.textAlign = "center";
+                    ctx2d.textBaseline = "middle";
+                    ctx2d.letterSpacing = "3px";
+                    ctx2d.fillText(label, cv.width/2, cv.height/2 - 22);
+                    // "Loading..." in place of the numeric percentage
+                    ctx2d.font = "700 " + Math.round(fontSize) + "px monospace";
+                    ctx2d.fillStyle = "rgba(255,255,255,0.92)";
+                    ctx2d.shadowColor = "rgba(245,215,110,0.6)";
+                    ctx2d.shadowBlur = 12;
+                    ctx2d.fillText(loadingText, cv.width/2, cv.height/2 + 16);
+                    ctx2d.shadowBlur = 0;
+                    // Small progress ring under text — still driven by real pct
+                    // (replaces the old thin horizontal bar).
+                    const ringCX = cv.width/2;
+                    const ringCY = cv.height/2 + 54;
+                    const ringR  = Math.max(12, Math.min(18, cv.width * 0.014));
+                    const pctNum = parseFloat(window.__blsCanvasLoadPct) || 0;
+                    ctx2d.lineWidth = 4;
+                    ctx2d.lineCap = "round";
+                    // Track
+                    ctx2d.strokeStyle = "rgba(255,255,255,0.12)";
+                    ctx2d.beginPath();
+                    ctx2d.arc(ringCX, ringCY, ringR, 0, Math.PI * 2);
+                    ctx2d.stroke();
+                    // Fill arc, starting at 12 o'clock, clockwise by pct
+                    const startAngle = -Math.PI / 2;
+                    const endAngle   = startAngle + (Math.PI * 2) * (pctNum / 100);
+                    ctx2d.strokeStyle = "rgba(245,215,110,0.85)";
+                    ctx2d.beginPath();
+                    ctx2d.arc(ringCX, ringCY, ringR, startAngle, endAngle);
+                    ctx2d.stroke();
+                    ctx2d.restore();
                 }
             } catch (e) {}
-            // FIX v4.5.1 — ROOT-CAUSE BLACK SCREEN: The original draw() ends with
-            // requestAnimationFrame(() => { update(); draw(); }) which perpetuates the
-            // game loop.  By returning early we skipped that rAF call — the loop died
-            // permanently.  When __battleLoadingActive later flipped false, nothing
-            // called draw() again → canvas stayed black forever.
-            // Solution: fire our own rAF tick here (update + draw) to keep the loop
-            // alive while we show the loading screen.  All heavyweight battle updates
-            // (updateBattleUnits, projectiles, etc.) are already blocked by
-            // _installTickPatches, so update() is safe to call during loading.
+            // Keep the rAF loop alive (v4.5.1 fix — without this the game loop
+            // dies and the canvas stays black permanently after the overlay fades).
             requestAnimationFrame(function () {
                 if (typeof window.update === "function") {
                     try { window.update(); } catch (e) {}
@@ -2133,14 +2387,32 @@ function _battleIsReady() {
 function _runLoadingGate() {
     // FIX: No artificial timer.  Poll every 80 ms for real readiness (units
     // on both sides exist in battleEnvironment).  The progress bar advances
-    // with each passing tick so the player sees motion.  A 4-second safety
-    // cap prevents the screen from hanging if something goes wrong.
+    // with each passing tick so the player sees motion.  A safety cap
+    // prevents the screen from hanging if something goes wrong.
+    //
+    // v4.6.0: SHOW_MIN removed per design decision -- the screen now closes
+    // the instant _battleIsReady() is true, with zero artificial hold.
+    //
+    // v4.7.0: generateBattlefield now runs CHUNKED behind the loading screen
+    // (see battlefield_launch.js) and reports real progress via
+    // window.__gbfProgress = {pct, done} while it's still generating the
+    // grid -- i.e. BEFORE battleEnvironment.units exists, which is what
+    // _battleIsReady() checks. The bar below now prefers that real number
+    // when it's available, so what the player sees is tied to actual grid
+    // generation progress, not a synthetic elapsed-time creep. Once
+    // generation finishes and units start spawning, __gbfProgress is gone
+    // (cleared per-battle) and the bar falls back to the elapsed-time creep
+    // for the (much shorter) unit-spawn phase, same as before.
+    // Safety cap raised from 4000ms: chunked MAX-tier generation (the new
+    // finer sub-tile shading pass, see _bSubN) can legitimately take several
+    // seconds on slower devices, and the old 4s cap could force-proceed
+    // while generation was still validly in progress.
     const TICK        = 80;
-    const SAFETY_CAP  = 4000;   // ms — absolute ceiling before we force-proceed
-    const SHOW_MIN    = 600;    // ms — minimum visible time so it doesn't flash
+    const SAFETY_CAP  = 12000;   // ms — absolute ceiling before we force-proceed
     let   elapsed     = 0;
 
     if (_progressInterval) { clearInterval(_progressInterval); _progressInterval = null; }
+    if (_progressFill) _progressFill.dataset.pct = "0";
 
     const gate = setInterval(() => {
         elapsed += TICK;
@@ -2148,25 +2420,74 @@ function _runLoadingGate() {
         // Suppress stray keys each tick
         if (window.keys) for (const k in window.keys) window.keys[k] = false;
 
-        // Animate progress bar: fill quickly once ready, otherwise creep toward 90%
-        const ready     = _battleIsReady();
-        const targetPct = ready ? 100 : Math.min(90, Math.round((elapsed / SAFETY_CAP) * 90));
-        const curPct    = parseFloat(_progressFill.style.width) || 0;
+        // Animate progress bar: fill quickly once ready, otherwise prefer
+        // real chunked-generation progress when available, and fall back to
+        // a time-based creep toward 90% only when it isn't.
+        const ready = _battleIsReady();
+        const gbf   = window.__gbfProgress;
+        let targetPct;
+        if (ready) {
+            targetPct = 100;
+        } else if (gbf && !gbf.done && typeof gbf.pct === "number") {
+            // Real progress from generateBattlefield's chunked driver.
+            // Cap at 95 so the bar doesn't sit at 100 while unit spawning
+            // (which happens after generation completes) is still pending.
+            targetPct = Math.min(95, gbf.pct);
+        } else {
+            targetPct = Math.min(90, Math.round((elapsed / SAFETY_CAP) * 90));
+        }
+        const curPct    = parseFloat(_progressFill.dataset.pct) || 0;
         const newPct    = ready ? 100 : Math.max(curPct, targetPct); // never go backward
-        _progressFill.style.width = newPct + "%";
-        _progressPct.textContent  = newPct + "%";
+        const circ      = _progressFill.__circumference;
+        _progressFill.setAttribute("stroke-dashoffset", (circ * (1 - newPct / 100)).toFixed(2));
+        _progressFill.dataset.pct = String(newPct);
+        // Label reads "Loading..." instead of a numeric percentage; the ring
+        // fill above still tracks real progress.
+        _progressPct.textContent  = "Loading...";
+        // Keep canvas globals in sync — the draw() patch reads these to drive
+        // its own progress bar width behind the overlay (numeric text there
+        // was likewise replaced with a "Loading..." label).
+        window.__blsCanvasLoadPct   = newPct;
+        window.__blsCanvasLoadReady = ready;
 
-        // Update status message proportional to progress
-        const msgIdx = Math.min(
-            Math.floor((newPct / 100) * DEPLOY_MSGS.length),
-            DEPLOY_MSGS.length - 1
-        );
-        _statusEl.textContent = DEPLOY_MSGS[msgIdx];
+        // Update status message: show freeze notice until battle is ready,
+        // then cycle through DEPLOY_MSGS as progress reaches 100%.
+        if (!ready) {
+            // Still loading — show a rotating "frozen" status so the player
+            // knows movement is intentionally locked, not a game hang.
+            const freezeMsgs = [
+                "Loading terrain… loading",
+                "Deploying units… loading",
+                "Initialising AI… loading",
+                "Building formation data… loading",
+                "Allocating draw buffers… loading"
+            ];
+            const fi = Math.floor(elapsed / 600) % freezeMsgs.length;
+            _statusEl.textContent = freezeMsgs[fi];
+        } else {
+            const msgIdx = Math.min(
+                Math.floor((newPct / 100) * DEPLOY_MSGS.length),
+                DEPLOY_MSGS.length - 1
+            );
+            _statusEl.textContent = DEPLOY_MSGS[msgIdx];
+        }
 
-        const done = (ready && elapsed >= SHOW_MIN) || elapsed >= SAFETY_CAP;
+        // ── FIX: Re-sync the troop counts on every tick once units exist. ──
+        // The 110ms setTimeout in _wrapLaunchFn can fire before deployArmy()
+        // finishes spawning (especially for large sieges or naval battles).
+        // Refreshing each tick guarantees the displayed counts converge to the
+        // true scaled deployed totals before the screen fades out.
+        if (ready) {
+            try { _refreshLoadingScreenData(); } catch (e) {}
+        }
+
+        const done = ready || elapsed >= SAFETY_CAP;
         if (done) {
+            // One last refresh so the final visible numbers are guaranteed correct.
+            try { _refreshLoadingScreenData(); } catch (e) {}
             clearInterval(gate);
-            window.__battleLoadingActive = false;
+            window.__gbfProgress = null;
+            // __battleLoadingActive is cleared by _launchDirectly() after the 520ms fade completes.
             hideBattleLoadingScreen();
             if (window.keys) for (const k in window.keys) window.keys[k] = false;
         }
@@ -2188,7 +2509,44 @@ function _wrapLaunchFn(fnName, fallbackNpc, fallbackTile, npcArgIdx) {
             return orig.apply(this, arguments);
         }
 
-const _npcIdx = (typeof npcArgIdx === "number") ? npcArgIdx : 0;
+        // ────────────────────────────────────────────────────────────────
+        // v4.6.0 FIX — PAINT BEFORE WORK (root cause of the "delay then a
+        // 1-frame flash" bug):
+        //   Previously orig.apply(this, arguments) ran SYNCHRONOUSLY right
+        //   here, in the same tick as showBattleLoadingScreen().  orig is
+        //   generateBattlefield's caller (enterBattlefield /
+        //   launchCustomBattle / etc.) — it synchronously draws the entire
+        //   battlefield canvas grid (tens of thousands of tiles) AND spawns
+        //   every unit on both sides.  A browser never paints mid-tick, so
+        //   ALL of that work finished before the loading screen div (and its
+        //   percentage bar) ever reached the screen.  By the time the
+        //   _runLoadingGate() poller below got its first tick, the battle
+        //   was already fully generated and _battleIsReady() was instantly
+        //   true — so the "loading screen" the player saw was really just
+        //   SHOW_MIN's cosmetic hold, completely decoupled from the actual
+        //   (already-finished) work, which is why it felt like a pointless
+        //   flash after a multi-second unexplained delay.
+        //
+        //   FIX: snapshot the arguments, show the loading screen (flips
+        //   __battleLoadingActive = true, which makes the already-existing
+        //   draw() patch black-fill the canvas + paint the % text every
+        //   frame — see _installDrawPatch), then wait for two
+        //   requestAnimationFrame callbacks — the standard guarantee that at
+        //   least one real compositor paint has happened — before running
+        //   the heavy orig.apply().  The gate poller only starts once that
+        //   actually kicks off, so the progress bar's animation now overlaps
+        //   the real generation work instead of following it.
+        //
+        //   Return value: no caller anywhere in the codebase uses the return
+        //   value of enterBattlefield/executeAttackAction/launchCustomBattle/
+        //   launchCustomNavalBattle/launchCustomSiege (all are fire-and-forget
+        //   statements), so deferring orig.apply() and returning undefined
+        //   synchronously here is safe.
+        // ────────────────────────────────────────────────────────────────
+        const _capturedArgs = arguments;
+        const _capturedThis = this;
+
+        const _npcIdx = (typeof npcArgIdx === "number") ? npcArgIdx : 0;
         
         const _pendingEnemy = window.__blsPendingEnemy || null;
         const _pendingPlayer = window.__blsPendingPlayer || null; // 🔴 Catch it here
@@ -2197,8 +2555,8 @@ const _npcIdx = (typeof npcArgIdx === "number") ? npcArgIdx : 0;
 
         window.__blsFromCustom = !!_pendingEnemy;
         const npc  = _pendingEnemy
-            || ((arguments[_npcIdx] && typeof arguments[_npcIdx] === "object") ? arguments[_npcIdx] : fallbackNpc);
-        const tile = (arguments[2] && typeof arguments[2] === "object") ? arguments[2] : fallbackTile;
+            || ((_capturedArgs[_npcIdx] && typeof _capturedArgs[_npcIdx] === "object") ? _capturedArgs[_npcIdx] : fallbackNpc);
+        const tile = (_capturedArgs[2] && typeof _capturedArgs[2] === "object") ? _capturedArgs[2] : fallbackTile;
         const nearCity = findNearestCity(npc);
         
         // 🔴 Pass _pendingPlayer directly into the show screen function
@@ -2206,15 +2564,9 @@ const _npcIdx = (typeof npcArgIdx === "number") ? npcArgIdx : 0;
         catch (e) { console.error("[BLS] showLoading (" + fnName + ")", e); }
 		
         window.__battleLoadingActive  = true;
+        window.__blsCanvasLoadPct     = 0;
+        window.__blsCanvasLoadReady   = false;
         window.__battleCullingEnabled = false;
-
-        if (typeof window.EnemyTacticalAI !== "undefined" && window.EnemyTacticalAI.stop) {
-            try { window.EnemyTacticalAI.stop(); } catch (e) {}
-        }
-
-        const result = orig.apply(this, arguments);
-
-        setTimeout(_refreshLoadingScreenData, 110);
 
         if (typeof window.EnemyTacticalAI !== "undefined" && window.EnemyTacticalAI.stop) {
             try { window.EnemyTacticalAI.stop(); } catch (e) {}
@@ -2223,8 +2575,37 @@ const _npcIdx = (typeof npcArgIdx === "number") ? npcArgIdx : 0;
             try { window.stopLazyGeneral(); } catch (e) {}
         }
 
-        _runLoadingGate();
-        return result;
+        // Double-rAF: the first rAF fires before the NEXT paint is committed;
+        // the second rAF (scheduled from inside the first) fires after that
+        // paint has already been composited to the screen. This is the
+        // standard "wait for a real paint" pattern — a single rAF or a
+        // setTimeout(0) both risk running before the browser has actually
+        // shown anything, especially on a heavy synchronous call stack.
+        requestAnimationFrame(function () {
+            requestAnimationFrame(function () {
+                try {
+                    orig.apply(_capturedThis, _capturedArgs);
+                } catch (e) {
+                    console.error("[BLS] deferred orig.apply (" + fnName + ")", e);
+                }
+
+                setTimeout(_refreshLoadingScreenData, 110);
+
+                if (typeof window.EnemyTacticalAI !== "undefined" && window.EnemyTacticalAI.stop) {
+                    try { window.EnemyTacticalAI.stop(); } catch (e) {}
+                }
+                if (typeof window.stopLazyGeneral === "function") {
+                    try { window.stopLazyGeneral(); } catch (e) {}
+                }
+
+                _runLoadingGate();
+            });
+        });
+
+        // Nothing awaits this return value (see comment above) — undefined
+        // is correct and matches how every call site already treats these
+        // launchers (fire-and-forget statements, never assigned/chained).
+        return undefined;
     };
     window[fnName].__blsPatched = true;
 }

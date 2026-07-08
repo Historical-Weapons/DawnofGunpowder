@@ -78,10 +78,12 @@ function calculateMovement(speed, map, tileSize, cols, rows, isCity = false) {
         if (keys['a'] || keys['arrowleft']) {
             dx -= currentSpeed;
             player.isMoving = true;
+            player.facingDir = 1;   // facing left — horse art faces left natively, no flip needed
         }
         if (keys['d'] || keys['arrowright']) {
             dx += currentSpeed;
             player.isMoving = true;
+            player.facingDir = -1;  // facing right — flip the sprite so horse faces right
         }
         if (player.isMoving) player.anim++;
     }
@@ -241,6 +243,7 @@ var player = {
     stunTimer: 0,
     anim: 0,
     color: "#ffffff",
+    hairStyle: Math.floor(Math.random() * 5), // Song Dynasty hair — locked for this play session
 
     // --- RESOURCES ---
     gold: 500,
@@ -498,9 +501,15 @@ function update() {
 						disableAICombatDefeated = (pCmdr.hp <= 0); 
 						
 					if (!disableAICombatDefeated) {
+						// Commander position is always driven by player.x/y (WASD / joystick).
+						// During naval battles, ship sticking (in updateNavalPhysics) first
+						// moves BOTH unit.x/y AND window.player.x/y by the ship delta.
+						// Then WASD input adds on top of that. Net result: player can walk
+						// on deck freely while the ship carries everyone with it.
 						pCmdr.x = player.x; pCmdr.y = player.y;
 						pCmdr.isMoving = player.isMoving;
 						if (player.isMoving) pCmdr.state = "moving";
+
 						if (keys['a'] || keys['arrowleft']) {
 							pCmdr.direction = player.direction = -1;
 							// Set facingDir directly from input — more reliable than _prevX delta
@@ -919,6 +928,10 @@ window.draw = function draw() {
 				ctx.fillStyle = navalEnvironment.waterColor;
 				ctx.fillRect(0, 0, BATTLE_WORLD_WIDTH, BATTLE_WORLD_HEIGHT);
 
+				// 2b. Procedural water surface (depth mottling + moving swell
+				// at HIGH/MAX). LOW leaves the flat fill above untouched.
+				if (typeof drawProceduralOceanWater === 'function') drawProceduralOceanWater(ctx);
+
 				drawNavalBackground(ctx);
 				drawNavalShips(ctx);
 				drawCosmeticWaves(ctx);
@@ -938,7 +951,22 @@ window.draw = function draw() {
                 }
             }
 
-			// 3. Draw Units
+// 3. Draw Foreground Terrain (Trees/Canopy/Grass/Detail) - ONLY ON LAND - OPTIMIZED
+// FIX: this used to be drawn AFTER units/projectiles, which made ground-level
+// decoration (grass tufts, leaf litter, pebbles baked into fgCanvas) render
+// ON TOP of troops, mounts, and fire/projectile effects — terrain must always
+// sit beneath anything standing or flying over it. Moved before drawBattleUnits
+// so all terrain assets are strictly lower draw-order than units and projectiles.
+            if (!(typeof inNavalBattle !== 'undefined' && inNavalBattle) && battleEnvironment.fgCanvas) {
+                if (typeof drawOptimizedBattleCanvas === 'function') {
+                    let pad = -battleEnvironment.visualPadding;
+                    drawOptimizedBattleCanvas(ctx, battleEnvironment.fgCanvas, player.x, player.y, canvas.width, canvas.height, zoom, pad, pad);
+                } else {
+                    ctx.drawImage(battleEnvironment.fgCanvas, -battleEnvironment.visualPadding, -battleEnvironment.visualPadding);
+                }
+            }
+
+			// 4. Draw Units
 			ctx.save();
             
 			// --- FIX 2 & 3: CANVAS LEAK & SHIP SWAY ---
@@ -953,24 +981,26 @@ window.draw = function draw() {
 			drawBattleUnits(ctx);
 			ctx.restore();
 
-// 4. Draw Foreground Terrain (Trees/Canopy) - ONLY ON LAND - OPTIMIZED
-            if (!(typeof inNavalBattle !== 'undefined' && inNavalBattle) && battleEnvironment.fgCanvas) {
+// 4b. Draw Tree Canopy Front Layer (LAND only) - tall trees ONLY (~80% of
+// grid===3 canopy tiles, the larger ones — see battlefield_launch.js).
+// Drawn AFTER units on purpose: canopy should overhang troops standing
+// underneath, matching real top-down forest occlusion. The remaining ~20%
+// (smaller bush-sized canopies) live on fgCanvas above and stay under units.
+            if (!(typeof inNavalBattle !== 'undefined' && inNavalBattle) && battleEnvironment.treeFrontCanvas) {
                 if (typeof drawOptimizedBattleCanvas === 'function') {
                     let pad = -battleEnvironment.visualPadding;
-                    drawOptimizedBattleCanvas(ctx, battleEnvironment.fgCanvas, player.x, player.y, canvas.width, canvas.height, zoom, pad, pad);
+                    drawOptimizedBattleCanvas(ctx, battleEnvironment.treeFrontCanvas, player.x, player.y, canvas.width, canvas.height, zoom, pad, pad);
                 } else {
-                    ctx.drawImage(battleEnvironment.fgCanvas, -battleEnvironment.visualPadding, -battleEnvironment.visualPadding);
+                    ctx.drawImage(battleEnvironment.treeFrontCanvas, -battleEnvironment.visualPadding, -battleEnvironment.visualPadding);
                 }
             }
         
-// 5. Draw Dynamic Assets (Gates & Engines)
-        if (typeof inSiegeBattle !== 'undefined' && inSiegeBattle) {
-            if (typeof renderDynamicGates === 'function') renderDynamicGates(ctx);
-            if (typeof renderSiegeEngines === 'function') renderSiegeEngines(ctx);
-        }
-
-
 // 5. Draw Dynamic Assets (Gates, Engines, & Towers)
+// FIX: this used to be drawn TWICE per frame — an earlier "Gates & Engines"
+// block ran here, immediately followed by this comprehensive block, which
+// also draws gates + engines (plus towers). Same canvas, same frame, full
+// double cost on every siege/city render. Removed the redundant first call;
+// this block alone covers everything the deleted one did.
 // Logic: Draw if (Siege OR City) AND NOT Naval
 const canDrawForts = !(typeof inNavalBattle !== 'undefined' && inNavalBattle) && 
                      ((typeof inSiegeBattle !== 'undefined' && inSiegeBattle) || (typeof inCityMode !== 'undefined' && inCityMode));
@@ -1053,8 +1083,44 @@ if (canDrawForts) {
         let camTop = player.y - halfHeight - 150;
         let camBottom = player.y + halfHeight + 150;
 
+        // ── CITY SHAPE REFRESH (every 10 seconds) ────────────────────────────
+        // nSides encodes rough population for the player: triangle = tiny hamlet,
+        // octagon = major city.  Recomputed lazily rather than every frame.
+        //   3 = triangle  (pop < 2 000)
+        //   4 = square    (2 000 – 4 000)
+        //   5 = pentagon  (4 000 – 6 000)
+        //   6 = hexagon   (6 000 – 8 000)
+        //   7 = heptagon  (8 000 – 10 000)
+        //   8 = octagon   (pop >= 10 000)
+        if (!window._cityShapeLastUpdate) window._cityShapeLastUpdate = 0;
+        const _now = Date.now();
+        if (_now - window._cityShapeLastUpdate >= 10000) {
+            window._cityShapeLastUpdate = _now;
+            cities.forEach(c => {
+                const p = c.pop || 0;
+                c.nSides = p < 2000  ? 3
+                         : p < 4000  ? 4
+                         : p < 6000  ? 5
+                         : p < 8000  ? 6
+                         : p < 10000 ? 7
+                         :             8;
+            });
+        }
+        // ─────────────────────────────────────────────────────────────────────
+
         cities.forEach(c => {
             if (c.x < camLeft || c.x > camRight || c.y < camTop || c.y > camBottom) return;
+
+            // Ensure nSides is always set (first frame before the 10s timer fires)
+            if (!c.nSides) {
+                const p = c.pop || 0;
+                c.nSides = p < 2000  ? 3
+                         : p < 4000  ? 4
+                         : p < 6000  ? 5
+                         : p < 8000  ? 6
+                         : p < 10000 ? 7
+                         :             8;
+            }
 
             ctx.lineWidth = 3;
             ctx.fillStyle = c.color;
@@ -1062,8 +1128,8 @@ if (canDrawForts) {
 
             const r = 14;
             ctx.beginPath();
-            for (let i = 0; i < 6; i++) {
-                const angle = Math.PI / 3 * i;
+            for (let i = 0; i < c.nSides; i++) {
+                const angle = (Math.PI * 2 / c.nSides) * i - Math.PI / 2;
                 const px = c.x + r * Math.cos(angle);
                 const py = c.y + r * Math.sin(angle);
                 if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
@@ -1095,7 +1161,7 @@ if (canDrawForts) {
         if (currentTile.name === "Coastal" || currentTile.name === "River" || currentTile.name === "Ocean") {
             drawShip(player.x, player.y, player.isMoving, player.anim, player.color);
         } else {
-            drawCaravan(player.x, player.y, player.isMoving, player.anim, player.color);
+            drawCaravan(player.x, player.y, player.isMoving, player.anim, player.color, null, player.facingDir || 1, player.hairStyle || 0);
         }
 
         let nameFontSize = Math.max(10, 14 / zoom);

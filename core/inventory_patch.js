@@ -365,6 +365,15 @@
                         <span>⚔️ Enemy Loot</span>
                         <span style="color:#f5d76e;font-weight:bold">${totalLootItems} items</span>
                     </div>
+                    ${lootEntries.length > 0 ? `
+                    <div style="padding:6px 8px 5px;flex-shrink:0;border-bottom:1px solid #3e2723;">
+                        <button class="inv-btn inv-take"
+                            style="width:100%;font-size:13px;padding:9px 10px;font-weight:bold;letter-spacing:1px;text-align:center;"
+                            data-act="takeallpossible" data-rid="__all__" data-qty="0"
+                            ${(cMax - used) < 1 ? "disabled" : ""}>
+                            📦 Pick All Possible
+                        </button>
+                    </div>` : ""}
                     <div class="inv-col-scroll">${lootRows}</div>
                     <div class="inv-cap-strip" style="font-size:10px;color:#555">
                         Click items to claim. Unclaimed loot is left behind.
@@ -412,6 +421,18 @@
                 _state.pendingLoot[rid] -= take;
                 if (_state.pendingLoot[rid] <= 0) delete _state.pendingLoot[rid];
             }
+        } else if (act === "takeallpossible") {
+            // Grab as many items as possible from entire loot pool until cargo is full
+            const lootKeys = Object.keys(_state.pendingLoot).filter(r => (_state.pendingLoot[r] || 0) > 0);
+            lootKeys.forEach(r => {
+                const avail = _state.pendingLoot[r] || 0;
+                const free  = cMax - cargoUsed(p.inventory);
+                if (free <= 0 || avail <= 0) return;
+                const take = Math.min(avail, free);
+                p.inventory[r] = (p.inventory[r] || 0) + take;
+                _state.pendingLoot[r] -= take;
+                if (_state.pendingLoot[r] <= 0) delete _state.pendingLoot[r];
+            });
         } else if (act === "takeall") {
             const avail = _state.pendingLoot[rid] || 0;
             const free  = cMax - cargoUsed(p.inventory);

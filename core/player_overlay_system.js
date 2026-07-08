@@ -1,5 +1,5 @@
 // ============================================================================
-// EMPIRE OF THE 13TH CENTURY - PLAYER OVERLAY & BOUNDS SYSTEM
+// This appears to be an outdated js but i kept it here in case it still has functions we use
 // ============================================================================
 
 // 1. GLOBAL UI & MOUSE STATES

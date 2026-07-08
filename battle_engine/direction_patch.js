@@ -1,3 +1,30 @@
+// ═══════════════════════════════════════════════════════════════════════
+// SUPERSEDED — this file was a draft sketch and is NOT wired into the
+// game (nothing in troop_draw.js / infscript.js / cavscript.js calls
+// computeFacingDir, drawInfantryVertical, or drawCavalryTopDown).
+//
+// The vertical-facing hysteresis idea sketched below (H_THRESH=0.8 /
+// V_THRESH=0.4 / V_FRAMES=3) IS now implemented for real, directly
+// inline in troop_draw.js's existing direction-computation block
+// (search that file for "VERTICAL FACING"), matching its existing
+// _flipTick style rather than as a separate function.
+//
+// drawInfantryVertical/drawInfantryBackshot below assumed a "down =
+// trivial, up = the hard new function" split. That turned out to be
+// backwards: down needed real work too (melee weapons redirected to
+// point down-screen), which is now done for infscript.js's spearman
+// branch only (see that file's top-of-function notes for status of
+// every other unit type). drawCavalryTopDown below also assumed full
+// top-down mount bodies (horse/camel/elephant) — the user later
+// simplified this: mounts keep their current side-view art indefinitely,
+// only the RIDER's weapon needs redirecting. So this function's mount-
+// drawing content is no longer the intended approach; cavscript.js's
+// own top-of-function notes describe the current (rider-only) plan.
+//
+// Kept in the repo for historical reference only. Future sessions
+// should read infscript.js / cavscript.js / troop_draw.js's own inline
+// notes for current status, not this file.
+// ═══════════════════════════════════════════════════════════════════════
 function computeFacingDir(unit) {
     const _dx = (unit._prevX !== undefined) ? (unit.x - unit._prevX) : 0;
     const _dy = (unit._prevY !== undefined) ? (unit.y - unit._prevY) : 0;
@@ -218,5 +245,3 @@ function drawCavalryTopDown(ctx, unit, moving, frame, factionColor) {
 
     return true;
 }
-
- 

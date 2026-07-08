@@ -104,7 +104,7 @@ deployArmy = function(faction, totalTroops, side) {
     if (!currentBattleData.trueInitialCounts) currentBattleData.trueInitialCounts = { player: 0, enemy: 0 };
     currentBattleData.trueInitialCounts[side] = entity.roster.length;
 
-    // --- STEP 3: OPTIMIZATION (THE 150 CAP & RESERVES) ---
+    // --- STEP 3: OPTIMIZATION (DYNAMIC CAP & RESERVES) ---
     // 1. Shuffle the roster to ensure random troop selection
     for (let i = entity.roster.length - 1; i > 0; i--) {
         const j = Math.floor(Math.random() * (i + 1));
@@ -125,9 +125,45 @@ if (typeof inSiegeBattle !== 'undefined' && inSiegeBattle && side === "player") 
 }
 // >>>>>> END SURGERY
 
-    // 2. Slice the roster into Battle (Max 150) and Reserve (The Rest)
-    entity.battleRoster = entity.roster.slice(0, 150);
-    entity.reserveRoster = entity.roster.slice(150);
+    // 2. Slice the roster into Battle (capped by maxSandboxBattleTroops, ratio-preserving) and Reserve (the rest).
+    // ── FIX: respect the settings slider for FIELD battles ──────────────────────
+    // The slider (20–300, default 100) is the absolute per-side ceiling.
+    // "Max is king": the larger side hits the cap exactly.
+    // "Ratio is secondary": the smaller side scales down by the same factor so the
+    // original balance is preserved as closely as possible.
+    // Custom battles bypass this block entirely (they short-circuit above).
+    // ────────────────────────────────────────────────────────────────────────────
+    const _settingsCap  = Math.max(20, Math.min(300, window.maxSandboxBattleTroops || 100));
+    const _myCount      = entity.roster.length;
+    // Read the OTHER side's pre-battle true count so we can compute a shared scale.
+    // Player deploys first (roster already built); enemy count is known from .count.
+    // Enemy deploys second; player count is now player.roster.length.
+    const _otherCount   = (side === 'player')
+        ? (currentBattleData.enemyRef ? (currentBattleData.enemyRef.count || 0) : 0)
+        : (player.roster ? player.roster.length : (player.troops || 0));
+    const _largerSide   = Math.max(_myCount, _otherCount);
+    let _deployCount;
+    if (_largerSide > _settingsCap) {
+        // Scale both sides by the same factor so ratio is preserved.
+        // Larger side lands exactly at _settingsCap; smaller side scales proportionally.
+        const _scale = _largerSide / _settingsCap;
+        _deployCount = Math.max(1, Math.round(_myCount / _scale));
+    } else {
+        _deployCount = _myCount; // Both sides already fit under the cap; deploy all.
+    }
+    _deployCount = Math.min(_deployCount, 300); // Absolute ceiling matches slider max.
+
+    entity.battleRoster  = entity.roster.slice(0, _deployCount);
+    entity.reserveRoster = entity.roster.slice(_deployCount);
+
+    // --- STEP 2b: STORE DEPLOYED COUNT IN initialCounts ---
+    // trueInitialCounts = full pre-battle army size (set above).
+    // initialCounts     = units actually spawned on the field (≤ maxSandboxBattleTroops).
+    // updateCasualtyMoralePressure and leaveBattlefield (battlefield_logic.js)
+    // both compare live unit counts against initialCounts, so they MUST equal
+    // the deployed count — not the raw army size — or the loss% math blows up.
+    if (!currentBattleData.initialCounts) currentBattleData.initialCounts = { player: 0, enemy: 0 };
+    currentBattleData.initialCounts[side] = entity.battleRoster.length;
 
     // 3. Sort the battle roster by type so units clump together cleanly on the field
     entity.battleRoster.sort((a, b) => (a.type || "A").localeCompare(b.type || "A"));
@@ -166,7 +202,7 @@ if (typeof inSiegeBattle !== 'undefined' && inSiegeBattle && side === "player") 
     let currentType = null;
     let typeIndex = 0;
 
-    // Deploy ONLY the 150 units natively (1:1 ratio, no visual bloat)
+    // Deploy ONLY the capped units natively (1:1 ratio, no visual bloat; cap = maxSandboxBattleTroops)
     for (let i = 0; i < entity.battleRoster.length; i++) {
         let unitData = entity.battleRoster[i];
         let safeType = unitData.type || "Militia";
@@ -405,7 +441,17 @@ const originalLeaveBattlefield = leaveBattlefield;
 
 
 leaveBattlefield = function(playerObj) {
-    
+
+    // Always tear down the Lazy General AI heartbeat when leaving the battlefield.
+    // (Idempotent — safe even if the custom-battle branch below also runs the
+    // original leaveBattlefield, which stops it again via battlefield_logic.js.)
+    if (typeof stopLazyGeneral === 'function') stopLazyGeneral();
+    // Bonus fix: EnemyTacticalAI.stop() previously only ran for custom battles
+    // (via originalLeaveBattlefield below) because this override replaced the
+    // normal-battle leaveBattlefield entirely without calling it. Stopping it
+    // here too keeps "both sides" AI state clean between normal battles as well.
+    if (typeof EnemyTacticalAI !== 'undefined') EnemyTacticalAI.stop();
+
     // 1. CUSTOM BATTLE BYPASS
     if (window.__IS_CUSTOM_BATTLE__) {
         return originalLeaveBattlefield(playerObj);
@@ -511,6 +557,22 @@ if (enemyRef) {
     
     // <-- SURGERY: Remove 'let' so it assigns to the outer variable
     didPlayerWin = !isPlayerDead && (eSurvivors.length === 0 || isEnemyRouted); //[cite: 2]
+
+    // ────────────────────────────────────────────────────────────────────────
+    // FIX: Lead Troops cooldown after a loss (tick-based, not wall-clock)
+    // ────────────────────────────────────────────────────────────────────────
+    // On a loss, arm __leadLockoutTicks = 900 (~30s at 30fps).  sandboxmode_update
+    // decrements it only while the pure overworld is ticking — parler/city/battle
+    // frames are skipped, so the player cannot cheat the cooldown by sitting in a
+    // menu.  On a win, clear it so the player can lead again immediately.
+    // Custom battles are excluded so they don't pollute sandbox progression.
+    if (!window.__IS_CUSTOM_BATTLE__) {
+        if (didPlayerWin) {
+            window.__leadLockoutTicks = 0;
+        } else {
+            window.__leadLockoutTicks = 900; // 30 s × ~30 fps (overworld ticks only)
+        }
+    }
 
     // --- BATTLE LOGGING ---
     console.log(`[BATTLE END] --- LOOT SYSTEM TRIGGERED ---`); //[cite: 2]
@@ -662,13 +724,16 @@ if (enemyRef) {
        
     }
 
-    // --- SURGERY: STRICT < 3 PERMADEATH RULE ---
-    // Note: If you want the player to SURVIVE the 1% miracle, you must bypass this!
-    // We add a check for the miracle text so it doesn't kill them after saving them.
+    // --- SURGERY: STRICT < 2 PERMADEATH RULE ---
+    // FIX 2: This fires after ANY battle (win OR loss) when fewer than 2 troops remain
+    // (i.e. 0 or 1 soldier left — not 2).  At exactly 2 the player can limp on.
+    // The 1% "saved by villagers" miracle still bypasses this so the player isn't
+    // killed by the very mechanic that was supposed to save them.
+    // Custom battles are exempted via the earlier window.__IS_CUSTOM_BATTLE__ short-circuit.
     let savedByMiracle = currentBattleData && currentBattleData.playerDefeatedText;
-    
-    if (!didPlayerWin && playerObj.troops < 3 && !savedByMiracle) {
-        console.log("CRITICAL DEFEAT: Less than 3 troops remain. Permadeath triggered.");
+
+    if (playerObj.troops < 2 && !savedByMiracle) {
+        console.log("CRITICAL DEFEAT: " + playerObj.troops + " troops remain after battle. Permadeath triggered.");
         if (typeof window.triggerPermadeath === 'function') {
             window.triggerPermadeath();
         } else {

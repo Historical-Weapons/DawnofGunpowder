@@ -331,8 +331,6 @@ const startBtn = createCBBtn("Start Battle", () => {
             };
             
             (window.launchCustomBattle || launchCustomBattle)();
-			
-            (window.launchCustomBattle || launchCustomBattle)();
         });
         actionBox.appendChild(backBtn);
         actionBox.appendChild(randomBtn);
@@ -1049,10 +1047,24 @@ else {
             BATTLE_ROWS = Math.floor(BATTLE_WORLD_HEIGHT / (typeof BATTLE_TILE_SIZE !== 'undefined' ? BATTLE_TILE_SIZE : 8));
 
             // Generate the Map Canvas NOW, using the correct dimensions
+            // v4.7.0 CHUNKING: generateBattlefield now takes an optional
+            // onComplete callback so it can run chunked behind the loading
+            // screen instead of one uninterrupted synchronous block (see
+            // battlefield_launch.js for the full writeup). Everything that
+            // used to run immediately after this call — spawn loops, abyss
+            // check, lazy-general auto-charge, and everything after the
+            // enclosing if/else (camera anchor, zoom, audio, AI start) — is
+            // now the _afterCustomGenerate continuation below, unchanged
+            // code just moved so it runs once generation actually finishes.
             if (typeof generateBattlefield === 'function') {
-                generateBattlefield(selectedMap || "Plains");
+                generateBattlefield(selectedMap || "Plains", _afterCustomGenerate);
+            } else {
+                _afterCustomGenerate();
             }
-            
+            return; // tail now runs inside _afterCustomGenerate once generation completes
+        }
+
+        function _afterCustomGenerate() {
             zoom = 0.1;
 
             // Reset battle container
@@ -1094,7 +1106,6 @@ else {
                     u.formationTimer = 120;      
                 }
             });
-        }
 
 // Use the player commander as the battle anchor
         const playerCommander = battleEnvironment.units.find(
@@ -1110,7 +1121,8 @@ else {
         }
 
 
-        // 🔴 FIX 5: Canvas is already defined at the top, just assign properties here
+        // 🔴 FIX 5: Canvas already defined at the top of launchCustomBattle
+        // and captured by this closure — just assign properties here.
         if (canvas) {
             canvas.style.display = "block";
             canvas.style.visibility = "visible";
@@ -1153,6 +1165,7 @@ else {
 		
         startCustomBattleMonitor();
         console.log("Custom Battle Launched: Units Spawned =", battleEnvironment.units.length);
+        } // end _afterCustomGenerate
     }
 
     // FIX: Export to window so battle-loading-screen.js can wrap it.
@@ -1402,9 +1415,13 @@ selectedMap = "Siege City"; // <--- ADD THIS LINE
     originalLeaveBattlefield = null;
 
     inBattleMode = false;
+    window.inBattleMode  = false;   // sync window scope so _syncHelmVisibility latch clears
+    window.inNavalBattle = false;   // clear naval flag so helm poll doesn't re-latch
     inCityMode = false;
     if (typeof inSiegeBattle !== "undefined") inSiegeBattle = false;
     if (typeof currentBattleData !== "undefined") currentBattleData = null;
+    // Hide ship joysticks immediately — don't wait for the 250ms poll
+    if (window.NavalHelmUI) window.NavalHelmUI.clearNavalHelm();
 
     if (typeof battleEnvironment !== "undefined" && battleEnvironment) {
         battleEnvironment.units = [];
@@ -1414,6 +1431,7 @@ selectedMap = "Siege City"; // <--- ADD THIS LINE
         battleEnvironment.grid = null;
         battleEnvironment.bgCanvas = null;
         battleEnvironment.fgCanvas = null;
+        battleEnvironment.treeFrontCanvas = null;
     }
 
     zoom = 0.8;

@@ -113,11 +113,39 @@ window.launchCustomSiege = function(playerSetup, enemySetup, selectedMap) {
         initSiegeEquipment();
 
         let pUnits = battleEnvironment.units.filter(u => u.side === "player" && !u.isCommander);
-        if (typeof executeSiegeAssaultAI === 'function') {
-            executeSiegeAssaultAI(pUnits);
-        } else {
-            pUnits.forEach(u => { u.hasOrders = true; u.orderType = "siege_assault"; });
-        }
+        // SURGERY: Do NOT auto-assign siege roles at launch. Freeze every
+        // attacker unit completely instead — unselected, no orders, no
+        // target, no velocity. They stay frozen until the player manually
+        // presses the siege auto-attack (🏯) button, which calls
+        // executeSiegeAssaultAI itself and is untouched by this change.
+        pUnits.forEach(u => {
+            u.selected         = false;
+            // FIX: this was missing — disableAICombat is what siegebattle.js's
+            // equivalent freeze pass sets alongside _lazyManual. Without it:
+            //   1. battlefield_commands.js's keyboard handler builds its
+            //      selectable-unit list as `!u.disableAICombat`, so these units
+            //      were never excluded from group-select (pressing 5 swept them
+            //      up like normal units — the "selected" half of this bug).
+            //   2. processTacticalOrders' 100px emergency-survival override
+            //      only checks `!unit.disableAICombat` (not _lazyManual at all),
+            //      so it could still hand a frozen unit a live target and start
+            //      it moving — the "charging" half of this bug.
+            // processTargeting's very first line also bails on disableAICombat,
+            // same as it does in siegebattle.js. lazyTakeManualControl() already
+            // clears this back to false the instant the player actually selects
+            // a unit, so manual control is unaffected.
+            u.disableAICombat  = true;
+            u.hasOrders        = false;
+            u.orderType        = null;
+            u.orderTargetPoint = null;
+            u.target           = null;
+            u.siegeRole        = null;
+            u.siegeTarget      = null;
+            u.vx               = 0;
+            u.vy               = 0;
+            u.state            = "idle";
+            u._lazyManual      = true; // also excludes them from any robot/lazy-general tick
+        });
     };
 
     // --- BULLETPROOF CLEANUP HOOK ---

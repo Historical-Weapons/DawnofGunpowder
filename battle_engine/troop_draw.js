@@ -54,8 +54,21 @@ function drawBattleUnits(ctx) {
             ctx.translate(ge.x, ge.y);
             ctx.rotate(ge.angle);
 			
-const geSeed = (ge.x * 12.9898) + (ge.y * 78.233);
-        
+// FIX (ship flicker): use a seed that's frozen once and never recomputed.
+        // Land-stuck effects have static x/y so re-deriving the seed from x/y
+        // every frame was harmless there — but ship-stuck effects get x/y
+        // re-derived every frame from the ship's sway/rock wobble (so the
+        // decal can track the moving deck), and feeding that live, ever-so-
+        // slightly-changing position into the hash made drawStuckProjectileOrEffect
+        // pick a different sprite variant almost every frame = flicker.
+        // ai_categories.js now stamps a `seed` on ground effects at spawn time;
+        // this is just a defensive fallback + one-time cache for any effect
+        // that doesn't have one yet, so it self-heals rather than flickering.
+        if (typeof ge.seed !== 'number') {
+            ge.seed = (ge.x * 12.9898) + (ge.y * 78.233);
+        }
+        const geSeed = ge.seed;
+
         if (ge.stuckOnStructure) {
             ctx.globalAlpha = (ge.structureTile === 6 || ge.structureTile === 7) ? 0.78 : 0.92;
         }
@@ -213,12 +226,41 @@ if (isDead) {
 
 // =============================================================
 // DIRECTIONAL FACING — position-delta based (works regardless of
-// whether unit.vx/vy exist — uses actual x movement between frames)
+// whether unit.vx/vy exist — uses actual x/y movement between frames)
 //
-// dx > 0  → face RIGHT  (facingDir =  1, natural sprite)
-// dx < 0  → face LEFT   (facingDir = -1, ctx.scale(-1,1) flips it)
+// dx > 0  → face RIGHT  (facingDir  =  1, natural sprite)
+// dx < 0  → face LEFT   (facingDir  = -1, ctx.scale(-1,1) flips it)
 // dx = 0  → hold last facing — stationary units never snap back
-// dy used only for future UP/DOWN sprite phases (placeholders below)
+//
+// dy > 0  → face DOWN   (facingDirY =  1, toward the player/camera —
+//                         "front view", melee weapons point down-screen)
+// dy < 0  → face UP     (facingDirY = -1, into the canvas — "back view",
+//                         NOT YET IMPLEMENTED, see BACKSHOT TODO below)
+// facingDirY = 0 → not in vertical mode; renderer uses normal side view.
+//
+// ── VERTICAL FACING — v1 (this session) ─────────────────────────────
+// facingDirY is now a real, independently-hysteresis-gated axis, parallel
+// to the existing horizontal facingDir logic below. It is consumed today
+// ONLY by infscript.js's spearman/glaive branch (see "DOWNWARD FACING"
+// comment block there). Every other unit type (sword_shield, peasant,
+// shortsword-fallback, two_handed, javelinier, all of cavscript.js) still
+// ignores facingDirY and will render in normal side view regardless of
+// its value — that is safe (nothing throws, they just don't use it yet)
+// but means the visual payoff is spearman-only until those are ported.
+// See infscript.js's top-of-file session notes for the exact porting
+// pattern to copy for each remaining weapon type.
+//
+// BACKSHOT / UP (facingDirY = -1) — NOT IMPLEMENTED THIS SESSION.
+// The value IS computed below (so future sessions don't need to touch
+// this block again), but nothing currently reads it for the -1 case.
+// This was flagged by the user as the *most important* direction
+// long-term (units currently never show their back to the camera at
+// all), but downward was chosen as the easier first slice. When it's
+// implemented: a weapon held facing away from the viewer is FURTHER
+// from the camera than the body, so it must be drawn UNDERNEATH the
+// body layer (before it) — the opposite z-order from the downward
+// case (where the weapon is closer to the viewer than the body and
+// stays drawn on top, same as the existing side-view z-order).
 //
 // SIEGE CREW FAST-PATH
 // ─────────────────────────────────────────────────────────────
@@ -228,8 +270,11 @@ if (isDead) {
 // facingDir left-right at 60fps.  Fix: use a much larger threshold
 // (SIEGE_THRESH) so only real lateral repositioning flips their
 // sprite — the ±1-2px-per-frame jitter never reaches it.
+// DECIDED: siege crew are permanently excluded from vertical facing —
+// product decision, not a gap. They keep horizontal-only facingDir
+// forever; do not add facingDirY computation for isSiegeCrew below.
 //
-// HYSTERESIS FOR ALL OTHER UNITS
+// HYSTERESIS FOR ALL OTHER UNITS (horizontal — unchanged from before)
 // ─────────────────────────────────────────────────────────────
 // A unit can reverse X velocity for 1-2 frames during collision
 // resolution or path recalculation without actually changing
@@ -240,6 +285,25 @@ if (isDead) {
 // consistent frames.  Sub-threshold or reversed frames reset the
 // counter so snap-back can't happen unless the unit genuinely
 // changes course.
+//
+// HYSTERESIS FOR VERTICAL FACING (facingDirY — new this session)
+// ─────────────────────────────────────────────────────────────
+// Mirrors the horizontal _flipTick pattern exactly, using its own
+// signed counter (_vFlipTick) so it cannot interfere with the
+// horizontal counter. Uses a LOWER commit threshold (V_THRESH) than
+// the horizontal "dominant" threshold (H_DOMINANT_THRESH) deliberately:
+// movement in this game is almost always diagonal, so if vertical only
+// engaged once it was the LARGER of the two components, it would almost
+// never win and this whole feature would rarely be visible. Instead:
+//   - |dx| >= H_DOMINANT_THRESH (0.8)  → horizontal dominates outright,
+//     vertical mode is cancelled instantly (no hysteresis needed to
+//     turn OFF — a hard horizontal move is an unambiguous signal).
+//   - otherwise, if |dy| > V_THRESH (0.4) for V_FRAMES (3) consecutive
+//     frames → commit to that vertical facing, same debounce quality
+//     as the horizontal flip.
+// This lets a unit moving mostly-down-but-slightly-sideways (the common
+// case) correctly commit to the downward pose instead of horizontal
+// always winning by default.
 // =============================================================
 {
     const _dx = (unit._prevX !== undefined) ? (unit.x - unit._prevX) : 0;
@@ -261,9 +325,12 @@ if (isDead) {
         if      (_dx >  SIEGE_THRESH) { unit.facingDir = 1;  unit._flipTick = 0; }
         else if (_dx < -SIEGE_THRESH) { unit.facingDir = -1; unit._flipTick = 0; }
         // else: hold current direction — jitter / vertical movement ignored
+        // facingDirY intentionally never computed for siege crew — see
+        // "DECIDED" note above. It stays 0/undefined for them permanently,
+        // which infscript.js and cavscript.js treat as "no vertical mode".
 
     } else {
-        // ── STANDARD UNITS: hysteresis flip ──────────────────────
+        // ── STANDARD UNITS: horizontal hysteresis flip (unchanged) ──
         // Commit direction change only after FLIP_FRAMES consecutive
         // frames of movement in the new direction.
         const MOVE_THRESH = 0.4;
@@ -287,28 +354,61 @@ if (isDead) {
                 unit._flipTick = 0; // already facing left — reset
             }
 
-        } else if (_dy < -MOVE_THRESH) {
-            // ── MOVING UP ─────────────────────────────────────────
-            // Horizontal facing intentionally unchanged.
-            // UP placeholder: future phase — insert back-view sprite swap here
+        } else {
+            // Sub-threshold horizontal movement this frame — the unit
+            // MAY still be moving vertically; don't touch facingDir,
+            // just reset the horizontal candidate counter.
             unit._flipTick = 0;
+        }
 
-        } else if (_dy > MOVE_THRESH) {
-            // ── MOVING DOWN ───────────────────────────────────────
-            // Horizontal facing intentionally unchanged.
-            // DOWN placeholder: future phase — insert front-view sprite swap here
-            unit._flipTick = 0;
+        // ── STANDARD UNITS: vertical hysteresis flip (new) ──────────
+        // Independent of the horizontal block above — both run every
+        // frame off the same _dx/_dy so a diagonal move is evaluated
+        // on both axes, with H_DOMINANT_THRESH deciding who wins.
+        const H_DOMINANT_THRESH = 0.8; // |dx| at/above this always cancels vertical mode
+        const V_THRESH = 0.4;          // |dy| candidate threshold (same feel as horizontal)
+        const V_FRAMES = 3;            // consecutive frames required to commit (same as horizontal)
+
+        if (Math.abs(_dx) >= H_DOMINANT_THRESH) {
+            // Strong horizontal movement — snap back to normal side view instantly.
+            // No hysteresis needed here: unlike a *candidate* vertical flip
+            // (which needs debouncing so it doesn't flicker), a hard
+            // horizontal move is already an unambiguous, decisive signal.
+            unit.facingDirY = 0;
+            unit._vFlipTick = 0;
+
+        } else if (_dy > V_THRESH) {
+            // ── MOVING DOWN — candidate for facingDirY = 1 ──────────
+            if (unit.facingDirY !== 1) {
+                unit._vFlipTick = (unit._vFlipTick > 0) ? unit._vFlipTick + 1 : 1;
+                if (unit._vFlipTick >= V_FRAMES) { unit.facingDirY = 1; unit._vFlipTick = 0; }
+            } else {
+                unit._vFlipTick = 0; // already facing down — reset, no work needed
+            }
+
+        } else if (_dy < -V_THRESH) {
+            // ── MOVING UP — candidate for facingDirY = -1 ───────────
+            // (Computed for completeness/future use — see BACKSHOT TODO
+            // above. No renderer currently branches on this value.)
+            if (unit.facingDirY !== -1) {
+                unit._vFlipTick = (unit._vFlipTick < 0) ? unit._vFlipTick - 1 : -1;
+                if (unit._vFlipTick <= -V_FRAMES) { unit.facingDirY = -1; unit._vFlipTick = 0; }
+            } else {
+                unit._vFlipTick = 0; // already facing up — reset
+            }
 
         } else {
-            // Sub-threshold / truly stationary: reset counter, hold direction.
-            unit._flipTick = 0;
+            // Sub-threshold on both axes / truly stationary: reset the
+            // vertical candidate counter but HOLD whatever facingDirY
+            // currently is — a stationary unit keeps its last pose
+            // instead of snapping back to side view.
+            unit._vFlipTick = 0;
         }
     }
 
     // First-ever frame safety net (unit just spawned, _prevX not yet written):
-    if (unit.facingDir === undefined) {
-        unit.facingDir = 1;
-    }
+    if (unit.facingDir === undefined)  { unit.facingDir = 1; }
+    if (unit.facingDirY === undefined) { unit.facingDirY = 0; }
 
     // Stamp current position so next frame can compute the delta.
     unit._prevX = unit.x;
@@ -324,8 +424,15 @@ if (["cavalry", "elephant", "camel", "horse_archer"].includes(visType)) {
     // that ctx.scale inside cavscript produces the correct visual result.
     // Infantry is RIGHT-facing naturally, so infantry needs no change.
     //
-    // // UP placeholder   : future — negate will still apply; up/down sprite swap goes in cavscript
-    // // DOWN placeholder : future — same as above
+    // facingDirY needs NO sign flip here (unlike facingDir) — "down" means
+    // "toward the player/camera" regardless of the mount's natural L/R
+    // facing convention, so it passes through to cavscript.js unchanged.
+    // // UP placeholder   : facingDirY=-1 is computed but unread by cavscript.js — TODO next session
+    // // DOWN placeholder : facingDirY=1 is computed but unread by cavscript.js — TODO next session
+    //                       (see cavscript.js top-of-file notes: only the
+    //                       default lancer's couched-lance is scoped/ready
+    //                       to receive this; horse_archer + camel-cannon
+    //                       melee fallbacks are documented but not wired)
     unit.facingDir = -(unit.facingDir || 1);
     drawCavalryUnit(
         ctx, unit.x, unit.y, isMoving, frame, unit.color, 
@@ -336,8 +443,13 @@ if (["cavalry", "elephant", "camel", "horse_archer"].includes(visType)) {
     unit.facingDir = -(unit.facingDir);
 } else {
     // Infantry is naturally RIGHT-facing — facingDir passes through unchanged
-    // // UP placeholder   : future — visType swap to back-view sprite here
-    // // DOWN placeholder : future — visType swap to front-view sprite here
+    // // UP placeholder   : facingDirY=-1 (backshot) computed but NOT rendered — TODO
+    // // DOWN placeholder : facingDirY=1 is now LIVE for visType "spearman" only
+    //                       (spear/glaive point down-screen — see infscript.js).
+    //                       sword_shield / peasant / shortsword / two_handed /
+    //                       archer / javelinier / etc. still ignore it and will
+    //                       render normal side view even while facingDirY===1.
+    //                       See infscript.js top-of-file session notes.
     drawInfantryUnit(
         ctx, unit.x, unit.y, isMoving, frame, unit.color, 
         visType, isAttacking, unit.side, unit.unitType, 
@@ -470,7 +582,10 @@ let isBullet = p.attackerStats && (
     (p.attackerStats.name && p.attackerStats.name.toLowerCase().includes("camel"))
 );
 
-        let isBolt = p.attackerStats && p.attackerStats.name === "Crossbowman";
+        let isBolt = p.attackerStats && (
+            p.attackerStats.role === ROLES.CROSSBOW ||
+            (p.attackerStats.name && p.attackerStats.name.toLowerCase().includes("crossbow"))
+        );
         // Default to arrow if it's not any of the above but comes from an archer/horse archer
 		
 		
@@ -711,7 +826,7 @@ ctx.fill();
             // Needle-like arrowhead
             ctx.fillStyle = "#9e9e9e"; 
             ctx.beginPath();
-            ctx.moveTo(6, -1.5); ctx.lineTo(11, 0); ctx.lineTo(6, 1.5);
+            ctx.moveTo(6, -1); ctx.lineTo(11, 0); ctx.lineTo(6, 1);
             ctx.fill();
 
             // Green "Forest" Fletchings (To differ from Red Horse Archer feathers)

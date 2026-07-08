@@ -1862,128 +1862,707 @@ function drawSnowyPeak(ctx, x, y, width, height, isExtremePeak, tileSize) {
 
 
 
- function drawCaravan(x, y, moving, frame, factionColor = "#d4b886") {
-        ctx.save();
-        ctx.translate(x, y);
-        
-        let legSwing = moving ? Math.sin(frame * 0.2) * 8 : 0;
-        let bob = moving ? Math.sin(frame * 0.2) * 2 : 0;
-        let riderBob = moving ? Math.sin(frame * 0.2 + 0.5) * 1.5 : 0;
-
-        ctx.lineCap = "round";
-        ctx.lineJoin = "round";
-
-        // 1. BACK LEGS
-        ctx.strokeStyle = "#3e2723";
-        ctx.lineWidth = 1.8;
-        ctx.beginPath();
-        ctx.moveTo(-4, 2); ctx.lineTo(-6 - legSwing, 10);
-        ctx.moveTo(3, 2); ctx.lineTo(1 - legSwing, 10);
-        ctx.stroke();
-
-        // 2. HORSE BODY
-        ctx.fillStyle = "#795548";
-        ctx.strokeStyle = "#3e2723";
-        ctx.beginPath();
-        ctx.ellipse(0, bob, 11, 7, 0, 0, Math.PI * 2);
-        ctx.fill(); ctx.stroke();
-
-        // 3. RIDER
-        ctx.save();
-        ctx.translate(-1, -4 + bob + riderBob);
-        ctx.fillStyle = factionColor; 
-        ctx.strokeStyle = "#1a1a1a";
-        ctx.beginPath();
-        ctx.moveTo(-4, 0); ctx.lineTo(4, 0); ctx.lineTo(2, -9); ctx.lineTo(-2, -9);
-        ctx.closePath(); ctx.fill(); ctx.stroke();
-        ctx.fillStyle = "#d4b886";
-        ctx.beginPath(); ctx.arc(0, -11, 3, 0, Math.PI * 2); ctx.fill();
-        ctx.fillStyle = "#a1887f";
-        ctx.beginPath();
-        ctx.moveTo(-10, -11); ctx.lineTo(0, -17); ctx.lineTo(10, -11);
-        ctx.quadraticCurveTo(0, -10, -10, -11);
-        ctx.fill(); ctx.stroke();
-        ctx.restore();
-
-        // 4. FRONT LEGS
-        ctx.beginPath();
-        ctx.moveTo(-1, 2); ctx.lineTo(-1 + legSwing, 10);
-        ctx.moveTo(6, 2); ctx.lineTo(8 + legSwing, 10);
-        ctx.stroke();
-
-        // 5. HORSE HEAD (ELONGATED SNOUT)
-        ctx.save();
-        ctx.translate(8, -2 + bob);
-        ctx.fillStyle = "#795548";
-        ctx.beginPath();
-        ctx.moveTo(-2, 4);           // Neck connection
-        ctx.lineTo(8, -6);           // Bridge starts
-        ctx.lineTo(16, -11);         // Way longer nose tip
-        ctx.lineTo(14, -13);         // Muzzle
-        ctx.lineTo(6, -11);          // Forehead
-        ctx.lineTo(5, -14);          // Ear Front
-        ctx.lineTo(3, -14);          // Ear Back
-        ctx.lineTo(1, -10);          // Back of poll
-        ctx.lineTo(-4, -1);          // Neck back
-        ctx.closePath();
-        ctx.fill(); ctx.stroke();
-        
-        // Mane
-        ctx.fillStyle = "#3e2723";
-        ctx.beginPath();
-        ctx.moveTo(1, -10); ctx.quadraticCurveTo(-2, -9, -5, 0); ctx.lineTo(-2, -1);
-        ctx.fill();
-        ctx.restore();
-
-        // 6. TAIL
-        ctx.strokeStyle = "#3e2723";
-        ctx.lineWidth = 2.5;
-        ctx.beginPath();
-        ctx.moveTo(-10, -1 + bob);
-        ctx.quadraticCurveTo(-16, 1, -14, 10 + bob);
-        ctx.stroke();
-
-        ctx.restore();
-    }
- // Add factionColor to the parameters
-function drawShip(x, y, moving, frame, factionColor = "#ffffff") {
+ // Mounted heavy lancer — the overworld cavalry sprite.
+ // faction (optional) selects a cultural helmet style.
+ // Overworld military/patrol/bandit unit — heavy lancer with cultural helmet.
+// Horse animation is copied verbatim from cavscript.js's "REVISED FWD-WALKING
+// MUSCULAR HORSE" block (drawCavalryUnit). Rider armour matches cavscript's
+// HEAVY TIER (armorVal >= 25). Helmets dispatch on factionColor exactly like
+// cavscript's RIDER HEADGEAR switch — same hex keys, same per-culture shapes.
+function drawCaravan(x, y, moving, frame, factionColor = "#d4b886", faction = null, facingDir = 1, hairStyle = 0) {
     ctx.save();
     ctx.translate(x, y);
-    
-    // Swaying/Floating effect
-    let sway = Math.sin(frame * 0.08) * 0.1;
-    let bob = Math.cos(frame * 0.08) * 2;
+    // Flip the entire sprite horizontally when facing left (facingDir = -1)
+    if (facingDir === -1) ctx.scale(-1, 1);
+
+    ctx.lineCap  = "round";
+    ctx.lineJoin = "round";
+
+    // Use wall-clock time as the primary animation driver so all sprites
+    // animate smoothly at the same rate regardless of how slowly npc.anim
+    // increments.  `frame` is used as a per-sprite phase seed so each NPC
+    // looks different even when they spawn at the same moment.
+    let _t = Date.now() / 100;
+    let animFrame = _t + (frame || 0);
+    let isMoving  = !!moving;
+    let bob       = isMoving ? Math.sin(animFrame * 0.4) * 0.8   : 0;
+    let riderBob  = isMoving ? Math.sin(animFrame * 0.4 + 0.5) * 0.6 : 0;
+
+    // ── HORSE (copied from cavscript.js — REVISED FWD-WALKING MUSCULAR HORSE) ──
+    let hBob       = bob;
+    let walkSpeed  = isMoving ? animFrame * 0.15 : 0;
+    let headNod    = isMoving ? Math.sin(walkSpeed * 2) * 1.5 : 0;
+    let tailSwish  = isMoving ? Math.sin(walkSpeed) * 2.5     : 0;
+
+    const bodyColor     = "#795548";
+    const darkBodyColor = "#5D4037";
+    const farLegColor   = "#3e2723";
+    const lineColor     = "#3e2723";
+
+    // Muscular leg helper — verbatim from cavscript
+    const drawMuscularLeg = (isFront, isNear, phaseOffset) => {
+        let phase = walkSpeed + phaseOffset;
+        let swing = isMoving ? Math.sin(phase) : 0;
+        let lift  = isMoving ? Math.max(0, -Math.cos(phase)) : 0;
+
+        ctx.fillStyle = isNear ? darkBodyColor : farLegColor;
+        ctx.beginPath();
+
+        if (isFront) {
+            let startX = isNear ? -7 : -4;
+            let startY = hBob + 4;
+            let kneeX = startX - 1 + swing * 3;
+            let kneeY = startY + 6 - lift * 2;
+            let fetlockX = kneeX + swing * 1.5;
+            let fetlockY = kneeY + 5 - lift * 3.5;
+            let hoofX = fetlockX - (lift > 0.1 ? 1 : 0);
+            let hoofY = fetlockY + 2.5;
+
+            ctx.moveTo(startX + 2, startY);
+            ctx.quadraticCurveTo(startX - 2, startY + 2, kneeX - 1.5, kneeY);
+            ctx.lineTo(hoofX - 1.5, hoofY);
+            ctx.lineTo(hoofX + 1.5, hoofY);
+            ctx.lineTo(fetlockX + 1.2, fetlockY);
+            ctx.quadraticCurveTo(kneeX + 1.8, kneeY + 1, startX + 2.5, startY + 3);
+            ctx.closePath();
+        } else {
+            let startX = isNear ? 5 : 7;
+            let startY = hBob + 3;
+            let stifleX = startX - 2 + swing * 1.5;
+            let stifleY = startY + 4 - lift * 0.5;
+            let hockX = stifleX + 1.5 + swing * 2;
+            let hockY = stifleY + 4 - lift * 1.5;
+            let fetlockX = hockX - 1.5 + swing * 1.5;
+            let fetlockY = hockY + 4 - lift * 2.5;
+            let hoofX = fetlockX - (lift > 0.1 ? 1 : 0);
+            let hoofY = fetlockY + 2.5;
+
+            ctx.moveTo(startX + 3, startY);
+            ctx.quadraticCurveTo(startX + 4, startY + 5, hockX + 1.8, hockY);
+            ctx.lineTo(hoofX + 1.5, hoofY);
+            ctx.lineTo(hoofX - 1.5, hoofY);
+            ctx.lineTo(fetlockX - 1.2, fetlockY);
+            ctx.quadraticCurveTo(hockX - 2, hockY - 1, stifleX - 1, stifleY);
+            ctx.quadraticCurveTo(startX - 1, startY + 1, startX - 2, startY);
+            ctx.closePath();
+        }
+        ctx.fill();
+
+        // Hoof
+        ctx.fillStyle = "#212121";
+        let liftCalc = isMoving ? Math.max(0, -Math.cos(walkSpeed + phaseOffset)) : 0;
+        let swingCalc = isMoving ? Math.sin(walkSpeed + phaseOffset) : 0;
+        let hX, hY;
+        if (isFront) {
+            let kX = (isNear ? -7 : -4) - 1 + swingCalc * 3;
+            let kY = hBob + 4 + 6 - liftCalc * 2;
+            let fX = kX + swingCalc * 1.5;
+            let fY = kY + 5 - liftCalc * 3.5;
+            hX = fX - (liftCalc > 0.1 ? 1 : 0); hY = fY + 2.5;
+        } else {
+            let sX = (isNear ? 5 : 7) - 2 + swingCalc * 1.5;
+            let sY = hBob + 3 + 4 - liftCalc * 0.5;
+            let hoX = sX + 1.5 + swingCalc * 2.5;
+            let hoY = sY + 4 - liftCalc * 1.5;
+            let fX = hoX - 1.5 + swingCalc * 1.5;
+            let fY = hoY + 4 - liftCalc * 2.5;
+            hX = fX - (liftCalc > 0.1 ? 1 : 0); hY = fY + 2.5;
+        }
+        ctx.beginPath();
+        ctx.moveTo(hX - 1.8, hY + 1);
+        ctx.lineTo(hX + 1.8, hY + 1);
+        ctx.lineTo(hX + 1.2, hY - 1.5);
+        ctx.lineTo(hX - 1.2, hY - 1.5);
+        ctx.closePath();
+        ctx.fill();
+    };
+
+    // Z-ORDER 1: FAR legs + tail
+    drawMuscularLeg(false, false, Math.PI);
+    drawMuscularLeg(true,  false, Math.PI / 2);
+
+    ctx.strokeStyle = "#2d1c15"; ctx.lineWidth = 3.5;
+    ctx.beginPath();
+    ctx.moveTo(11, hBob - 2);
+    ctx.bezierCurveTo(15 + tailSwish, hBob - 2, 18 + tailSwish, hBob + 4, 14 + tailSwish * 0.5, hBob + 12);
+    ctx.stroke();
+
+    // Z-ORDER 2: BODY (muscular quad-curve silhouette)
+    ctx.fillStyle = bodyColor; ctx.strokeStyle = lineColor; ctx.lineWidth = 1.2;
+    let horseBody = new Path2D();
+    horseBody.moveTo(12, hBob + 2);
+    horseBody.quadraticCurveTo(12, hBob - 6, 5, hBob - 6);
+    horseBody.quadraticCurveTo(0, hBob - 4, -6, hBob - 5);
+    horseBody.quadraticCurveTo(-10, hBob - 10 + headNod, -13, hBob - 16 + headNod);
+    horseBody.lineTo(-15, hBob - 17 + headNod);
+    horseBody.lineTo(-24, hBob - 11 + headNod);
+    horseBody.quadraticCurveTo(-26, hBob - 8 + headNod, -24, hBob - 6 + headNod);
+    horseBody.lineTo(-18, hBob - 4 + headNod);
+    horseBody.quadraticCurveTo(-12, hBob - 2 + headNod, -9, hBob + 5);
+    horseBody.quadraticCurveTo(-8, hBob + 10, 0, hBob + 10);
+    horseBody.quadraticCurveTo(10, hBob + 10, 12, hBob + 2);
+    horseBody.closePath();
+    ctx.fill(horseBody);
+    ctx.stroke(horseBody);
+
+    // Mane & eye
+    ctx.strokeStyle = "#212121"; ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.moveTo(-8, hBob - 7 + (headNod * 0.5));
+    ctx.quadraticCurveTo(-11, hBob - 13 + headNod, -14, hBob - 16 + headNod);
+    ctx.stroke();
+    ctx.fillStyle = "#111";
+    ctx.beginPath(); ctx.arc(-19, hBob - 10 + headNod, 1.2, 0, Math.PI * 2); ctx.fill();
+
+    // Ears
+    ctx.fillStyle = bodyColor; ctx.strokeStyle = lineColor; ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.moveTo(-13, hBob - 16 + headNod);
+    ctx.lineTo(-13, hBob - 20 + headNod);
+    ctx.lineTo(-15, hBob - 17 + headNod);
+    ctx.fill(); ctx.stroke();
+
+    // Z-ORDER 4: NEAR legs
+    drawMuscularLeg(false, true, 0);
+    drawMuscularLeg(true,  true, -Math.PI / 2);
+
+    // ── RIDER (heavy tier — matches cavscript armorVal >= 25 path) ──────────
+    // The cavscript horse sits the rider at baseMountHeight (-4) + bob + riderBob.
+    let baseMountHeight = -4;
+    ctx.save();
+    ctx.translate(-1, baseMountHeight + bob + riderBob);
+
+    // Base faction tunic (drawn beneath armour, like cavscript)
+    ctx.fillStyle = factionColor; ctx.strokeStyle = "rgba(0,0,0,0.3)"; ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(-4, 0); ctx.lineTo(4, 0); ctx.lineTo(2, -9); ctx.lineTo(-2, -9);
+    ctx.closePath(); ctx.fill(); ctx.stroke();
+
+    // Steel vest with horizontal + vertical crosshatch (cavscript HEAVY TIER vest)
+    ctx.fillStyle = "#9e9e9e"; ctx.strokeStyle = "rgba(0,0,0,0.3)"; ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(-3, -1); ctx.lineTo(3, -1); ctx.lineTo(2, -8); ctx.lineTo(-2, -8);
+    ctx.closePath(); ctx.fill(); ctx.stroke();
+    ctx.strokeStyle = "rgba(0,0,0,0.5)"; ctx.lineWidth = 0.5;
+    for (let i = -7; i < -1; i += 2.5) {
+        ctx.beginPath(); ctx.moveTo(-3, i); ctx.lineTo(3, i); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(-1.5, i); ctx.lineTo(-1.5, i + 2); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo( 1.5, i); ctx.lineTo( 1.5, i + 2); ctx.stroke();
+    }
+
+    // Square pauldrons in faction colour (cavscript HEAVY TIER pauldrons)
+    ctx.fillStyle = factionColor; ctx.strokeStyle = "rgba(0,0,0,0.3)"; ctx.lineWidth = 1;
+    ctx.fillRect(-5.5, -8.5, 2.5, 3.5); ctx.strokeRect(-5.5, -8.5, 2.5, 3.5);
+    ctx.fillRect( 3,   -8.5, 2.5, 3.5); ctx.strokeRect( 3,   -8.5, 2.5, 3.5);
+    ctx.strokeStyle = "rgba(0,0,0,0.4)";
+    ctx.beginPath(); ctx.moveTo(-5.5, -6.5); ctx.lineTo(-3,   -6.5); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo( 3,   -6.5); ctx.lineTo( 5.5, -6.5); ctx.stroke();
+
+
+    // ── RIDER HEAD & FACTION HEADGEAR ──────────────────────────────────────
+    // Hat pools keyed by faction — picked via hairStyle (locked at NPC spawn,
+    // so the look never flickers). Military/patrol/bandit roles lean toward
+    // martial headgear; civilian roles use their own pool in drawFarmerNPC.
+    const _riderHatPools = {
+        "Hong Dynasty":           ["skullcap","topknot","tall_hat","scholar","bandana"],
+        "Dab Tribes":             ["turban","wrapped","bandana","hood","turban"],
+        "Great Khaganate":        ["fur_cap","pointed_fur","fur_cap","skullcap","topknot"],
+        "Jinlord Confederacy":    ["fur_cap","skullcap","hood","topknot","bandana"],
+        "Tran Realm":             ["topknot","bandana","skullcap","hood","topknot"],
+        "Goryun Kingdom":         ["tall_hat","skullcap","topknot","bandana","hood"],
+        "Xiaran Dominion":        ["turban","skullcap","wrapped","hood","bandana"],
+        "High Plateau Kingdoms":  ["fur_cap","pointed_fur","hood","wrapped","fur_cap"],
+        "Yamato Clans":           ["topknot","bandana","skullcap","topknot","hood"],
+        "Bandits":                ["bandana","hood","skullcap","bandana","topknot"],
+        "Yuan Dynasty Coalition": ["fur_cap","pointed_fur","skullcap","topknot","fur_cap"],
+    };
+    const _riderDefPool = ["skullcap","topknot","bandana","fur_cap","hood"];
+    const _rHatPool = (faction && _riderHatPools[faction]) ? _riderHatPools[faction] : _riderDefPool;
+    const _rHat    = _rHatPool[(typeof hairStyle === "number" && hairStyle >= 0) ? (hairStyle % _rHatPool.length) : 0];
+
+    // Head — softened outline
+    ctx.fillStyle = "#d4b886"; ctx.strokeStyle = "rgba(0,0,0,0.25)"; ctx.lineWidth = 0.8;
+    ctx.beginPath(); ctx.arc(0, -11, 3, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+
+    // Subtle hair-root arc (all styles)
+    ctx.strokeStyle = "#3a2008"; ctx.lineWidth = 1.1;
+    ctx.beginPath(); ctx.arc(0, -11, 3.1, -Math.PI * 0.72, Math.PI * 1.72, false); ctx.stroke();
+
+    // Headgear — scaled to rider head (centre 0,-11, radius ~3)
+    ctx.strokeStyle = "rgba(0,0,0,0.25)"; ctx.lineWidth = 0.8;
+    switch (_rHat) {
+        case "turban":
+            ctx.fillStyle = "#eeeeee";
+            ctx.beginPath(); ctx.arc(0, -13, 4.8, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+            ctx.beginPath(); ctx.arc(-1.5, -12, 3.4, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+            break;
+        case "fur_cap":
+            ctx.fillStyle = "#5c4033";
+            ctx.fillRect(-5, -14.5, 10, 4); ctx.strokeRect(-5, -14.5, 10, 4);
+            break;
+        case "pointed_fur":
+            ctx.fillStyle = "#4a3329";
+            ctx.beginPath(); ctx.moveTo(-5, -10); ctx.lineTo(0, -17); ctx.lineTo(5, -10);
+            ctx.fill(); ctx.stroke();
+            break;
+        case "skullcap":
+            ctx.fillStyle = "#333333";
+            ctx.beginPath(); ctx.arc(0, -11, 3.2, Math.PI, 0); ctx.fill(); ctx.stroke();
+            break;
+        case "topknot":
+            ctx.fillStyle = "#1a0e00";
+            ctx.fillRect(-1.5, -14, 3, 2.5);
+            ctx.beginPath(); ctx.arc(0, -15.8, 1.6, 0, Math.PI * 2); ctx.fill();
+            break;
+        case "hood":
+            ctx.fillStyle = factionColor;
+            ctx.beginPath(); ctx.arc(0, -11, 3.8, Math.PI, 0); ctx.fill(); ctx.stroke();
+            ctx.fillRect(-3.8, -11, 7.6, 2.5);
+            break;
+        case "wrapped":
+            ctx.fillStyle = "#8b7355";
+            ctx.fillRect(-4, -14, 8, 3.5); ctx.strokeRect(-4, -14, 8, 3.5);
+            break;
+        case "tall_hat":
+            ctx.fillStyle = "#111111";
+            ctx.beginPath(); ctx.moveTo(-5, -10); ctx.lineTo(-3.5, -17); ctx.lineTo(3.5, -17); ctx.lineTo(5, -10);
+            ctx.fill(); ctx.stroke();
+            break;
+        case "scholar":
+            ctx.fillStyle = "#222222";
+            ctx.fillRect(-5, -13, 10, 2.5);
+            ctx.fillRect(-1.5, -15.8, 3, 2.5);
+            break;
+        case "bandana":
+            ctx.fillStyle = "#8b0000";
+            ctx.beginPath(); ctx.arc(0, -11, 3.3, Math.PI, 0); ctx.fill(); ctx.stroke();
+            ctx.fillRect(-3.3, -11, 6.6, 1.8);
+            break;
+        case "bamboo_hat":
+        default:
+            ctx.fillStyle = "#a1887f";
+            ctx.beginPath(); ctx.moveTo(-7, -10); ctx.lineTo(0, -17); ctx.lineTo(7, -10);
+            ctx.quadraticCurveTo(0, -9, -7, -10); ctx.fill(); ctx.stroke();
+            break;
+    }
+    // ── END RIDER HEADGEAR ──────────────────────────────────────────────────
+
+    ctx.restore(); // rider sub-transform (translate to baseMountHeight)
+    ctx.restore(); // outer translate(x, y) / scale(facingDir)
+}
+
+// Overworld civilian — unarmed walking peasant, scaled to 80%.
+// Hoe and shoulder-bundle removed (per user request) so the figure reads
+// as a non-combatant alongside the heavy lancer NPCs. Whole sprite is
+// scaled by 0.8 so civilians appear roughly 20% smaller than military NPCs.
+function drawFarmerNPC(x, y, moving, frame, factionColor = "#8d6e63", faction = null, hairStyle = 0) {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.scale(0.8, 0.8);   // 20% smaller than military NPCs
+
+    let legSwing = moving ? Math.sin(frame * 0.18) * 7 : 0;
+    let bob      = moving ? Math.abs(Math.sin(frame * 0.18)) * 2 : 0;
+
+    ctx.lineCap  = "round";
+    ctx.lineJoin = "round";
+
+    // Legs (wide stride — working person's gait)
+    ctx.strokeStyle = "rgba(0,0,0,0.45)";
+    ctx.lineWidth   = 2.2;
+    ctx.beginPath(); ctx.moveTo(-2, 0); ctx.lineTo(-3.5 - legSwing, 11); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo( 2, 0); ctx.lineTo( 3.5 + legSwing, 11); ctx.stroke();
+
+    ctx.save();
+    ctx.translate(0, -bob);
+
+    // Simple peasant robe / tunic (neutral earthy tone)
+    ctx.fillStyle   = "#a1887f";
+    ctx.strokeStyle = "rgba(0,0,0,0.25)";
+    ctx.lineWidth   = 1;
+    ctx.beginPath();
+    ctx.moveTo(-5, 0); ctx.lineTo(5, 0); ctx.lineTo(3, -10); ctx.lineTo(-3, -10);
+    ctx.closePath(); ctx.fill(); ctx.stroke();
+    // Sash belt
+    ctx.strokeStyle = "rgba(0,0,0,0.2)"; ctx.lineWidth = 1.2;
+    ctx.beginPath(); ctx.moveTo(-5, -3); ctx.lineTo(5, -3); ctx.stroke();
+
+    // Head / skin — softened outline
+    ctx.fillStyle   = "#d4b886";
+    ctx.strokeStyle = "rgba(0,0,0,0.25)"; ctx.lineWidth = 0.8;
+    ctx.beginPath(); ctx.arc(0, -12, 3.5, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+
+    // Subtle hair-root arc
+    ctx.strokeStyle = "#3a2008"; ctx.lineWidth = 1.1;
+    ctx.beginPath(); ctx.arc(0, -12, 3.6, -Math.PI * 0.72, Math.PI * 1.72, false); ctx.stroke();
+
+    // Faction-appropriate civilian headgear
+    // Hat pools — civilian roles favour working-person and local cultural hats.
+    // hairStyle is locked at NPC spawn (lazy-assigned in drawAllNPCs) so the
+    // look never changes or flickers between frames.
+    const _civHatPools = {
+        "Hong Dynasty":           ["conical","topknot","bamboo_hat","scholar","skullcap"],
+        "Dab Tribes":             ["turban","wrapped","hood","bandana","turban"],
+        "Great Khaganate":        ["fur_cap","pointed_fur","hood","topknot","skullcap"],
+        "Jinlord Confederacy":    ["hood","fur_cap","skullcap","topknot","wrapped"],
+        "Tran Realm":             ["bamboo_hat","conical","topknot","bandana","bamboo_hat"],
+        "Goryun Kingdom":         ["topknot","skullcap","bamboo_hat","hood","conical"],
+        "Xiaran Dominion":        ["turban","wrapped","bamboo_hat","hood","skullcap"],
+        "High Plateau Kingdoms":  ["fur_cap","hood","pointed_fur","wrapped","fur_cap"],
+        "Yamato Clans":           ["topknot","bamboo_hat","conical","bandana","topknot"],
+        "Bandits":                ["hood","bandana","skullcap","wrapped","bandana"],
+        "Yuan Dynasty Coalition": ["fur_cap","pointed_fur","skullcap","topknot","fur_cap"],
+    };
+    const _civDefPool = ["conical","bamboo_hat","topknot","hood","skullcap"];
+    const _cHatPool = (faction && _civHatPools[faction]) ? _civHatPools[faction] : _civDefPool;
+    const _cHat     = _cHatPool[(typeof hairStyle === "number" && hairStyle >= 0) ? (hairStyle % _cHatPool.length) : 0];
+
+    // Headgear — calibrated to farmer head (centre 0,-12, radius 3.5)
+    ctx.strokeStyle = "rgba(0,0,0,0.25)"; ctx.lineWidth = 0.9;
+    switch (_cHat) {
+        case "turban":
+            ctx.fillStyle = "#eeeeee";
+            ctx.beginPath(); ctx.arc(0, -14, 5.5, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+            ctx.beginPath(); ctx.arc(-2, -13, 4, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+            break;
+        case "fur_cap":
+            ctx.fillStyle = "#5c4033";
+            ctx.fillRect(-6, -16, 12, 5); ctx.strokeRect(-6, -16, 12, 5);
+            break;
+        case "pointed_fur":
+            ctx.fillStyle = "#4a3329";
+            ctx.beginPath(); ctx.moveTo(-6, -12); ctx.lineTo(0, -20); ctx.lineTo(6, -12);
+            ctx.fill(); ctx.stroke();
+            break;
+        case "skullcap":
+            ctx.fillStyle = "#333333";
+            ctx.beginPath(); ctx.arc(0, -12, 4, Math.PI, 0); ctx.fill(); ctx.stroke();
+            break;
+        case "topknot":
+            ctx.fillStyle = "#1a0e00";
+            ctx.fillRect(-2, -16, 4, 3);
+            ctx.beginPath(); ctx.arc(0, -17.5, 1.9, 0, Math.PI * 2); ctx.fill();
+            break;
+        case "hood":
+            ctx.fillStyle = factionColor;
+            ctx.beginPath(); ctx.arc(0, -12, 4.5, Math.PI, 0); ctx.fill(); ctx.stroke();
+            ctx.fillRect(-4.5, -12, 9, 3);
+            break;
+        case "wrapped":
+            ctx.fillStyle = "#8b7355";
+            ctx.fillRect(-5, -15, 10, 4); ctx.strokeRect(-5, -15, 10, 4);
+            break;
+        case "bamboo_hat":
+            ctx.fillStyle = "#e8c37b"; ctx.strokeStyle = "rgba(0,0,0,0.2)";
+            ctx.beginPath();
+            ctx.moveTo(-10, -12); ctx.lineTo(0, -22); ctx.lineTo(10, -12);
+            ctx.quadraticCurveTo(0, -10.5, -10, -12);
+            ctx.fill(); ctx.stroke();
+            ctx.strokeStyle = "rgba(0,0,0,0.12)"; ctx.lineWidth = 1;
+            ctx.beginPath(); ctx.moveTo(-9, -12); ctx.lineTo(9, -12); ctx.stroke();
+            break;
+        case "scholar":
+            ctx.fillStyle = "#222222";
+            ctx.fillRect(-6, -14, 12, 3);
+            ctx.fillRect(-2, -17, 4, 3);
+            break;
+        case "bandana":
+            ctx.fillStyle = "#8b0000";
+            ctx.beginPath(); ctx.arc(0, -12, 4, Math.PI, 0); ctx.fill(); ctx.stroke();
+            ctx.fillRect(-4, -12, 8, 2);
+            break;
+        case "conical":
+        default:
+            ctx.fillStyle = "#a1887f";
+            ctx.beginPath(); ctx.moveTo(-9, -12); ctx.lineTo(0, -20); ctx.lineTo(9, -12);
+            ctx.quadraticCurveTo(0, -10.5, -9, -12); ctx.fill(); ctx.stroke();
+            break;
+    }
+
+    ctx.restore();
+    ctx.restore();
+}
+
+// Overworld commerce — merchant wagon only (horse and rider removed).
+// The wagon box is centred on (x, y) and mirrors horizontally with facingDir.
+function drawCommerceWagonNPC(x, y, moving, frame, factionColor = "#c4a95a", facingDir = 1) {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.lineCap  = "round";
+    ctx.lineJoin = "round";
+
+    // ── WAGON ONLY — horse and tongue/yoke removed ────────────────────────────
+    // Wagon box spans x=3..43 → visual centre at x=23.
+    // Scale first (around the NPC origin) so the flip mirrors correctly,
+    // then translate -23 to centre the wagon on (x, y).
+    ctx.save();
+    ctx.scale(facingDir, 1);   // flip around (x,y) — facingDir=-1 mirrors rightward travel
+    ctx.translate(-23, 0);     // centre wagon box so npc.x = visual wagon centre
+
+    const wheelY = 8;
+    const W_R    = 9;
+
+    function _drawWagonWheel(cx) {
+        ctx.fillStyle   = '#3e2723'; ctx.strokeStyle = '#1a1a1a'; ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.arc(cx, wheelY, W_R, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+        ctx.strokeStyle = '#616161'; ctx.lineWidth = 1.2;
+        ctx.beginPath(); ctx.arc(cx, wheelY, W_R - 1, 0, Math.PI * 2); ctx.stroke();
+        ctx.strokeStyle = '#5d4037'; ctx.lineWidth = 1.1;
+        for (let s = 0; s < 6; s++) {
+            let a = s * (Math.PI / 3); // fixed spokes — no rotation
+            ctx.beginPath();
+            ctx.moveTo(cx, wheelY);
+            ctx.lineTo(cx + Math.cos(a) * (W_R - 2), wheelY + Math.sin(a) * (W_R - 2));
+            ctx.stroke();
+        }
+        ctx.fillStyle = '#8d6e63';
+        ctx.beginPath(); ctx.arc(cx, wheelY, 2.2, 0, Math.PI * 2); ctx.fill();
+    }
+
+    _drawWagonWheel(8);
+    _drawWagonWheel(38);
+
+    // Axle beam
+    ctx.strokeStyle = '#4a3328'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(8, wheelY); ctx.lineTo(38, wheelY); ctx.stroke();
+
+    // Wagon bed platform
+    ctx.fillStyle   = '#8d6e4e'; ctx.strokeStyle = '#4a3328'; ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.moveTo(2, wheelY - W_R + 2); ctx.lineTo(44, wheelY - W_R + 2);
+    ctx.lineTo(44, wheelY - W_R - 2); ctx.lineTo(2, wheelY - W_R - 2);
+    ctx.closePath(); ctx.fill(); ctx.stroke();
+
+    // Cargo box
+    const boxTop   = wheelY - W_R - 2;
+    const boxLeft  = 3, boxRight = 43;
+    const boxH     = 14;
+
+    ctx.fillStyle   = '#7a5c40'; ctx.strokeStyle = '#3e2723'; ctx.lineWidth = 1;
+    ctx.fillRect(boxLeft, boxTop - boxH, boxRight - boxLeft, boxH);
+    ctx.strokeRect(boxLeft, boxTop - boxH, boxRight - boxLeft, boxH);
+
+    // Wood grain slats
+    ctx.strokeStyle = 'rgba(0,0,0,0.18)'; ctx.lineWidth = 0.8;
+    for (let s = boxLeft + 6; s < boxRight; s += 7) {
+        ctx.beginPath(); ctx.moveTo(s, boxTop - boxH); ctx.lineTo(s, boxTop); ctx.stroke();
+    }
+
+    // Metal corner reinforcements
+    ctx.strokeStyle = '#616161'; ctx.lineWidth = 1.5;
+    [[boxLeft, boxTop - boxH], [boxRight, boxTop - boxH],
+     [boxLeft, boxTop],        [boxRight, boxTop]].forEach(([bx, by]) => {
+        ctx.beginPath();
+        ctx.moveTo(bx - 1.5, by); ctx.lineTo(bx - 1.5, by - 4);
+        ctx.moveTo(bx - 1.5, by); ctx.lineTo(bx + 3, by);
+        ctx.stroke();
+    });
+
+    // Canvas arch (faction colour)
+    ctx.fillStyle   = factionColor; ctx.strokeStyle = '#9c7e38'; ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(boxLeft + 1, boxTop - boxH);
+    ctx.quadraticCurveTo((boxLeft + boxRight) / 2, boxTop - boxH - 10, boxRight - 1, boxTop - boxH);
+    ctx.lineTo(boxRight - 1, boxTop - boxH - 1);
+    ctx.quadraticCurveTo((boxLeft + boxRight) / 2, boxTop - boxH - 11, boxLeft + 1, boxTop - boxH - 1);
+    ctx.closePath(); ctx.fill(); ctx.stroke();
+
+    // Rope lashing over canvas
+    ctx.strokeStyle = '#7a5c30'; ctx.lineWidth = 0.8;
+    for (let r = boxLeft + 8; r < boxRight; r += 10) {
+        ctx.beginPath();
+        ctx.moveTo(r, boxTop - boxH + 1); ctx.lineTo(r - 2, boxTop - boxH - 9);
+        ctx.stroke();
+    }
+
+    // Tongue / draw beam — REMOVED (horse and handle stripped per request)
+
+    ctx.restore(); // end wagon centre-offset + flip
+
+    ctx.restore(); // end main translate
+}
+// 13th-century Chinese junk — size (npc.count) drives scale.
+// Small flotillas (~20) look like river boats; large fleets (~120) look like
+// ocean-going treasure-ship junks with multiple sails.
+function drawShip(x, y, moving, frame, factionColor = "#ffffff", size = 50) {
+    ctx.save();
+    ctx.translate(x, y);
+
+    // Scale: 0.65 (tiny) → 1.0 (standard) → 1.55 (great junk)
+    let scale = Math.max(0.65, Math.min(1.55, size / 65));
+    ctx.scale(scale, scale);
+
+    // Gentle ocean sway
+    let sway = Math.sin(frame * 0.06) * 0.06;
+    let bob  = Math.cos(frame * 0.07) * 2.5;
     ctx.rotate(sway);
 
-    // Hull
-    ctx.fillStyle = "#3e2723";
+    ctx.lineCap  = "round";
+    ctx.lineJoin = "round";
+
+    // ── HULL ──────────────────────────────────────────────────────────────
+    // Broad, flat-bottomed hull typical of Chinese river and sea junks
+    ctx.fillStyle   = "#4e342e";
+    ctx.strokeStyle = "#3e2723";
+    ctx.lineWidth   = 1.5;
     ctx.beginPath();
-    ctx.moveTo(-15, bob);
-    ctx.lineTo(15, bob);
-    ctx.lineTo(10, 10 + bob);
-    ctx.lineTo(-10, 10 + bob);
+    ctx.moveTo(-24, bob);
+    ctx.quadraticCurveTo(-28, bob + 5, -22, bob + 13);
+    ctx.lineTo( 20, bob + 13);
+    ctx.quadraticCurveTo( 26, bob + 9,  24, bob);
     ctx.closePath();
-    ctx.fill();
-    ctx.strokeStyle = "#fff";
-    ctx.lineWidth = 1;
+    ctx.fill(); ctx.stroke();
+
+    // Hull planking strakes
+    ctx.strokeStyle = "rgba(0,0,0,0.18)"; ctx.lineWidth = 0.9;
+    for (let py = bob + 5; py < bob + 13; py += 3) {
+        ctx.beginPath(); ctx.moveTo(-22, py); ctx.lineTo(22, py); ctx.stroke();
+    }
+
+    // Red waterline stripe (traditional Chinese warships often painted red)
+    ctx.strokeStyle = "#b71c1c"; ctx.lineWidth = 1.2;
+    ctx.beginPath(); ctx.moveTo(-23, bob + 1); ctx.lineTo(23, bob + 1); ctx.stroke();
+
+    // ── RAISED STERN CASTLE ───────────────────────────────────────────────
+    // Chinese junks have a high stern (艉) — characteristic silhouette
+    ctx.fillStyle   = "#5d4037";
+    ctx.strokeStyle = "#3e2723"; ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.moveTo(-24, bob);
+    ctx.lineTo(-24, bob - 11);
+    ctx.quadraticCurveTo(-19, bob - 15, -13, bob - 12);
+    ctx.lineTo(-13, bob);
+    ctx.closePath();
+    ctx.fill(); ctx.stroke();
+
+    // Stern lantern (red paper lantern)
+    ctx.fillStyle   = "#e53935";
+    ctx.strokeStyle = "#b71c1c"; ctx.lineWidth = 0.8;
+    ctx.beginPath(); ctx.ellipse(-19, bob - 15, 2.5, 3.5, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    ctx.strokeStyle = "#ffd54f"; ctx.lineWidth = 0.6;
+    ctx.beginPath(); ctx.moveTo(-19, bob - 11.5); ctx.lineTo(-19, bob - 19); ctx.stroke(); // hanging cord
+
+    // ── DECK ──────────────────────────────────────────────────────────────
+    ctx.fillStyle   = "#6d4c2e";
+    ctx.strokeStyle = "#4a3020"; ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(-24, bob); ctx.lineTo(24, bob);
+    ctx.lineTo(20, bob - 2); ctx.lineTo(-22, bob - 2);
+    ctx.closePath(); ctx.fill(); ctx.stroke();
+
+    // Deck planking
+    ctx.strokeStyle = "rgba(0,0,0,0.12)"; ctx.lineWidth = 0.6;
+    for (let px = -18; px < 18; px += 7) {
+        ctx.beginPath(); ctx.moveTo(px, bob); ctx.lineTo(px + 3, bob - 2); ctx.stroke();
+    }
+
+    // ── DECKHOUSE / CABIN ─────────────────────────────────────────────────
+    // Central cabin with curved roof — signature Song-dynasty junk feature
+    ctx.fillStyle   = "#8d6e4e";
+    ctx.strokeStyle = "#5d4037"; ctx.lineWidth = 1;
+    ctx.fillRect(-14, bob - 13, 16, 11);
+    ctx.strokeRect(-14, bob - 13, 16, 11);
+
+    // Curved cabin roof (upturned eaves — 飛簷)
+    ctx.fillStyle   = "#6d4837";
+    ctx.strokeStyle = "#4a3020"; ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(-16, bob - 13);
+    ctx.quadraticCurveTo(-6, bob - 21,  4, bob - 13);
+    ctx.lineTo( 4, bob - 12.5);
+    ctx.quadraticCurveTo(-6, bob - 20.5, -16, bob - 12.5);
+    ctx.closePath(); ctx.fill(); ctx.stroke();
+
+    // Eave tips (upturned — 翹角)
+    ctx.strokeStyle = "#4a3020"; ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.moveTo(-16, bob - 13); ctx.quadraticCurveTo(-19, bob - 14, -18, bob - 11);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo( 4, bob - 13); ctx.quadraticCurveTo( 7, bob - 14,  6, bob - 11);
     ctx.stroke();
 
-    // Sails - NOW USES DYNAMIC COLOR
-    ctx.fillStyle = factionColor; 
+    // Window on cabin
+    ctx.strokeStyle = "#3e2723"; ctx.lineWidth = 0.8;
+    ctx.strokeRect(-10, bob - 11, 4, 4);
+    ctx.beginPath(); ctx.moveTo(-8, bob - 11); ctx.lineTo(-8, bob - 7); ctx.stroke(); // lattice bar
+
+    // ── BOW PIECE ─────────────────────────────────────────────────────────
+    ctx.fillStyle   = "#5d4037";
+    ctx.strokeStyle = "#3e2723"; ctx.lineWidth = 1;
     ctx.beginPath();
-    ctx.moveTo(0, bob);
-    ctx.lineTo(0, -20 + bob);
-    ctx.lineTo(15, -5 + bob);
-    ctx.closePath();
-    ctx.fill();
-    
-    // Mast
-    ctx.strokeStyle = "#5d4037";
-    ctx.lineWidth = 3;
+    ctx.moveTo(20, bob); ctx.lineTo(20, bob - 5);
+    ctx.lineTo(24, bob - 3); ctx.lineTo(24, bob);
+    ctx.closePath(); ctx.fill(); ctx.stroke();
+    // Dragon-head bow prow decoration
+    ctx.fillStyle   = "#c62828";
+    ctx.strokeStyle = "#b71c1c"; ctx.lineWidth = 0.8;
     ctx.beginPath();
-    ctx.moveTo(0, bob);
-    ctx.lineTo(0, -22 + bob);
-    ctx.stroke();
+    ctx.moveTo(21, bob - 5);
+    ctx.quadraticCurveTo(27, bob - 9, 25, bob - 16);
+    ctx.quadraticCurveTo(23, bob - 11, 21, bob - 7);
+    ctx.fill(); ctx.stroke();
+    // Eye of the dragon
+    ctx.fillStyle = "#fdd835";
+    ctx.beginPath(); ctx.arc(24, bob - 13, 1.2, 0, Math.PI * 2); ctx.fill();
+
+    // ── MASTS ─────────────────────────────────────────────────────────────
+    // Main mast (centre)
+    ctx.strokeStyle = "#5d4037"; ctx.lineWidth = 3.5;
+    ctx.beginPath(); ctx.moveTo(-2, bob - 2); ctx.lineTo(-2, bob - 44); ctx.stroke();
+    // Crosstrees
+    ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(-10, bob - 30); ctx.lineTo(8, bob - 30); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(-8,  bob - 44); ctx.lineTo(6, bob - 44); ctx.stroke();
+
+    // Fore mast (angled slightly forward — typical of junks)
+    ctx.lineWidth = 2.5;
+    ctx.beginPath(); ctx.moveTo(9, bob - 2); ctx.lineTo(11, bob - 28); ctx.stroke();
+    // Fore crosstree
+    ctx.lineWidth = 1.2;
+    ctx.beginPath(); ctx.moveTo(5, bob - 20); ctx.lineTo(16, bob - 20); ctx.stroke();
+
+    // ── SAILS — batten sails (硬帆) ───────────────────────────────────────
+    // Battens (horizontal bamboo ribs) are THE signature of Chinese junks.
+    // They make the sail stiff, controllable in high winds, and distinctive.
+
+    function drawBattenSail(x0, yTop, yBot, xRight, sailFill, nBattens) {
+        // Sail body
+        ctx.fillStyle   = sailFill;
+        ctx.globalAlpha = 0.88;
+        ctx.beginPath();
+        ctx.moveTo(x0,      yTop);
+        ctx.lineTo(x0,      yBot);
+        ctx.lineTo(xRight,  yBot - (yBot - yTop) * 0.12);
+        ctx.lineTo(xRight,  yTop + (yBot - yTop) * 0.08);
+        ctx.closePath();
+        ctx.fill();
+        ctx.globalAlpha = 1.0;
+        ctx.strokeStyle = "#9c7e38"; ctx.lineWidth = 0.8; ctx.stroke();
+
+        // Batten lines — evenly spaced horizontal ribs
+        ctx.strokeStyle = "rgba(70,40,10,0.55)"; ctx.lineWidth = 1.1;
+        let span = yBot - yTop;
+        for (let b = 0; b <= nBattens; b++) {
+            let t   = b / nBattens;
+            let by  = yTop + t * span;
+            let bxR = x0 + (xRight - x0) * (0.08 + 0.84 * t);  // battens widen toward bottom
+            ctx.beginPath(); ctx.moveTo(x0, by); ctx.lineTo(bxR, by); ctx.stroke();
+        }
+    }
+
+    // Main sail (large)
+    drawBattenSail(-2, bob - 43, bob - 4, 18, factionColor, 7);
+
+    // Fore sail (smaller)
+    drawBattenSail(11, bob - 27, bob - 3, 22, factionColor, 4);
+
+    // ── FLAG / PENNANT ────────────────────────────────────────────────────
+    ctx.fillStyle   = factionColor;
+    ctx.strokeStyle = "#888"; ctx.lineWidth = 0.7;
+    ctx.beginPath();
+    ctx.moveTo(-2, bob - 44); ctx.lineTo(-2, bob - 51);
+    ctx.lineTo(-11, bob - 48); ctx.lineTo(-2, bob - 44);
+    ctx.closePath(); ctx.fill(); ctx.stroke();
 
     ctx.restore();
 }

@@ -430,6 +430,50 @@ function isFlanked(attacker, defender) {
             }
         });
 
+        // ── NAVAL DECK TEST ──────────────────────────────────────────────────
+        // Mirrors the helper of the same name in ai_categories.js (kept as a
+        // local copy here since this function is a full standalone duplicate,
+        // not a wrapper around the original). Returns the ship whose deck
+        // covers world point (x,y), or null if the point is over open water.
+        function _shipUnderPoint(x, y) {
+            if (!window.inNavalBattle || typeof navalEnvironment === 'undefined' || !navalEnvironment.ships) return null;
+            const swayX = navalEnvironment.shipSwayX || 0;
+            const swayY = navalEnvironment.shipSwayY || 0;
+            for (let k = 0; k < navalEnvironment.ships.length; k++) {
+                const s = navalEnvironment.ships[k];
+                const sx = s.x + swayX;
+                const sy = s.y + swayY;
+                const cosInv = Math.cos(-(s.heading || 0));
+                const sinInv = Math.sin(-(s.heading || 0));
+                const wx = x - sx;
+                const wy = y - sy;
+                const lx = wx * cosInv - wy * sinInv;
+                const ly = wx * sinInv + wy * cosInv;
+                const rx = s.width  * 0.55;
+                const ry = s.height * 0.55;
+                if ((Math.pow(Math.abs(lx) / rx, 2.5) + Math.pow(Math.abs(ly) / ry, 2.5)) <= 1.0) {
+                    return s;
+                }
+            }
+            return null;
+        }
+
+        // Tags a ground-effect object with parentShip + a ship-local offset
+        // (captured against current heading) so naval_battles.js's existing
+        // per-frame re-derivation pass (section 7b of updateNavalPhysics) can
+        // drag it along with the ship's translation, rotation, sway, and
+        // rock-wobble — exactly like it already does for units on deck.
+        function _tagGroundEffectToShip(ge, ship, landedX, landedY, landedAngle) {
+            const cosInv = Math.cos(-(ship.heading || 0));
+            const sinInv = Math.sin(-(ship.heading || 0));
+            const wx = landedX - ship.x;
+            const wy = landedY - ship.y;
+            ge.parentShip     = ship;
+            ge.shipLocalX     = wx * cosInv - wy * sinInv;
+            ge.shipLocalY     = wx * sinInv + wy * cosInv;
+            ge.shipLocalAngle = landedAngle - (ship.heading || 0);
+        }
+
         for (let i = battleEnvironment.projectiles.length - 1; i >= 0; i--) {
             const p = battleEnvironment.projectiles[i];
             let prevX = p.x, prevY = p.y;
@@ -454,19 +498,32 @@ function isFlanked(attacker, defender) {
                 p.x < -200 || p.x > wLimit + 200 ||
                 p.y < -200 || p.y > hLimit + 200) {
 
-                if (isJavelin || isBolt || isArrow || isSlinger || isRocket || isBomb) {
+                // ── NAVAL WATER vs DECK CHECK ──────────────────────────────
+                // Mirrors the fix in ai_categories.js: over open water in a
+                // naval battle, vanish instantly (nothing solid to stick to).
+                // Landed on a ship's deck instead → stick + tag with the ship
+                // so it can be dragged along every frame.
+                const landedOnShip = window.inNavalBattle ? _shipUnderPoint(p.x, p.y) : null;
+                const skipDecal    = window.inNavalBattle && !landedOnShip;
+
+                if (!skipDecal && (isJavelin || isBolt || isArrow || isSlinger || isRocket || isBomb)) {
                     if (!battleEnvironment.groundEffects) battleEnvironment.groundEffects = [];
                     if (battleEnvironment.groundEffects.length < 400) {
                         const effectType = isJavelin ? "javelin" : isBolt ? "bolt"
                             : isSlinger ? "stone" : isRocket ? "rocket"
                             : isBomb ? "bomb_crater" : "arrow";
-                        battleEnvironment.groundEffects.push({
+                        const landedX = p.x + (Math.random() - 0.5) * 18;
+                        const landedY = p.y + (Math.random() - 0.5) * 18;
+                        const landedAngle = Math.atan2(p.vy, p.vx) + (Math.random() - 0.5) * 0.9;
+                        const ge = {
                             type: effectType,
-                            x: p.x + (Math.random() - 0.5) * 18,
-                            y: p.y + (Math.random() - 0.5) * 18,
-                            angle: Math.atan2(p.vy, p.vx) + (Math.random() - 0.5) * 0.9,
+                            x: landedX,
+                            y: landedY,
+                            angle: landedAngle,
                             timestamp: Date.now()
-                        });
+                        };
+                        if (landedOnShip) _tagGroundEffectToShip(ge, landedOnShip, landedX, landedY, landedAngle);
+                        battleEnvironment.groundEffects.push(ge);
                     }
                 }
                 if (isBomb) BattleAudio.playBombChain(p.x, p.y, 1);
@@ -583,9 +640,14 @@ function isFlanked(attacker, defender) {
 
                 if (isBomb) {
                     if (!battleEnvironment.groundEffects) battleEnvironment.groundEffects = [];
-                    battleEnvironment.groundEffects.push({
+                    const craterGe = {
                         type: "bomb_crater", x: p.x, y: p.y, angle: 0, timestamp: Date.now()
-                    });
+                    };
+                    if (window.inNavalBattle) {
+                        const craterShip = _shipUnderPoint(p.x, p.y);
+                        if (craterShip) _tagGroundEffectToShip(craterGe, craterShip, p.x, p.y, 0);
+                    }
+                    battleEnvironment.groundEffects.push(craterGe);
                 }
 
                 // EXP
@@ -612,11 +674,18 @@ function isFlanked(attacker, defender) {
                 if (!doesPierce) break;
             }
 
-            // Structure collision — unchanged
+            // Structure collision — walls/walkways/siege engines don't exist
+            // in naval battles, and battleEnvironment.grid is reused there to
+            // hold purely cosmetic water terrain (generateNavalMap(): 12=reef,
+            // 13=rocks, 14=algae, 15=dark water). tile===12 collides with the
+            // hitsWalkway check below, so without this guard a projectile
+            // flying over a reef patch mid-flight (before reaching maxRange)
+            // could be misread as a walkway hit and stuck as an untagged
+            // static decal — same bug as ai_categories.js had.
             const minStickDist    = (isArrow || isBolt) ? 100 : 30;
             const canHitStructure = distFlown >= minStickDist;
 
-            if (!hitMade && canHitStructure &&
+            if (!hitMade && canHitStructure && !window.inNavalBattle &&
                 typeof BATTLE_TILE_SIZE !== 'undefined' && battleEnvironment.grid) {
 
                 const ptx  = Math.floor(p.x / BATTLE_TILE_SIZE);

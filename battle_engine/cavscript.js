@@ -14,9 +14,158 @@ function drawCavalryUnit(ctx, x, y, moving, frame, factionColor, isAttacking, ty
     // ctx.scale(-1,1) flips the entire sprite — no per-element changes needed
     ctx.scale(unit.facingDir || 1, 1);
 
-    // // UP placeholder   : future — ctx.rotate(-Math.PI/2) + back-view sprite
-    // // DOWN placeholder : future — ctx.rotate( Math.PI/2) + front-view sprite
+    // ═══════════════════════════════════════════════════════════════════
+    // VERTICAL FACING (bird's-eye up/down overhaul) — SESSION STATUS
+    // ═══════════════════════════════════════════════════════════════════
+    // unit.facingDirY is computed upstream in troop_draw.js's direction
+    // block (same hysteresis quality as the existing left/right
+    // facingDir). Meaning is identical to infscript.js: 1 = down-screen
+    // / toward the player camera (front view, melee weapons point
+    // down-screen), -1 = up-screen / into the canvas (back view — DONE
+    // for low-armor-tier riders, see BACKSHOT / UP below), 0 = normal
+    // side view.
+    //
+    // SCOPE PER THE USER: horse/elephant mount bodies still do NOT get
+    // an up/down pose — deferred to a later session ("mounts up and
+    // down animations if tokens allow"). The camel-cannon's wheeled gun
+    // carriage was ALSO originally filed under that same deferral (it's
+    // a vehicle, not a personal weapon), but the user explicitly asked
+    // for it anyway — see PORTED below, it's now done as a bespoke
+    // re-layout rather than a mount-body redesign, which sidesteps most
+    // of the original "does a wheel read correctly facing the viewer"
+    // concern by just re-drawing it deliberately instead of rotating it.
+    //
+    // PORTED (facingDirY===1 fully handled):
+    //   Melee — all three rider melee spots:
+    //   1. DEFAULT LANCER "MELEE LANCE" (search this file for that
+    //      comment). The regular mounted lancer's couched-lance 3-hit
+    //      combo — the main cavalry melee weapon. Redirected via a
+    //      +90° base rotation added to the existing lanceRot; the
+    //      thrust-phase reach (thrustX/thrustY) needed no separate axis
+    //      swap since it's baked into shape coordinates that already go
+    //      through that same rotation.
+    //   2. horse_archer's "OUT OF AMMO: Melee Lance Fallback" (search
+    //      "Melee Lance Fallback") — same +90° base-rotation trick, but
+    //      here the lunge (`thrust`) IS applied in the translate (before
+    //      the rotate), so it needed an explicit swap from the X to the
+    //      Y translate component to still reach toward the viewer.
+    //   3. camel-cannon / MOUNTED_GUNNER's "MODE A: SWORD COMBAT" (search
+    //      that comment) — shortsword swing, only visible once that
+    //      unit's ammo is depleted. Same pattern as #2: `lunge` (renamed
+    //      from the original inline `handX` mutation) swaps from the X
+    //      to the Y translate component for facingDown, plus the same
+    //      +90° base rotation added to swingAngle.
+    //   Ranged — bow-and-arrow, plus the camel-cannon:
+    //   4. horse_archer's "RANGED COMBAT: Has Ammo" full bow-draw cycle
+    //      (search "ACTIVE ARCHERY ANIMATION") — same two-technique
+    //      split as infscript.js's archer branch: the bowKhatra rotation
+    //      wrapper gets the same 45° base (DOWN_AIM_ANGLE, matching
+    //      infscript.js's archer after visual feedback — see that
+    //      file's archer branch for why 90°/straight-down looked wrong),
+    //      while the arrow+hand (drawn after that wrapper closes) use a
+    //      local rotateAroundPivot helper instead of an axis swap at the
+    //      source, to avoid double-rotating the string vertex that
+    //      already goes through the wrapper. The stowed lance prop
+    //      drawn just before this section is left untouched (static
+    //      accessory, same as every other stowed/strapped prop).
+    //   5. camel-cannon / MOUNTED_GUNNER's "MODE B: RANGED CANNON" —
+    //      DONE this session per direct user request (overriding the
+    //      earlier deferral — see SCOPE note above). Unlike every other
+    //      ranged weapon this session, this is a genuine RE-LAYOUT, not
+    //      a rotation: the wheelbarrow chassis, single wheel, and barrel
+    //      are individually repositioned with named constants
+    //      (CANNON_DOWN_Y / CANNON_WHEEL_Y / CANNON_BED_Y) so the wheel
+    //      and handle placement actually make sense facing the viewer,
+    //      rather than an automatic rotation of side-view art that
+    //      happened to carry a wheel along for the ride. Recoil (a
+    //      horizontal kick in the side view) becomes a vertical kick
+    //      here, matching "firing pushes the carriage away from the
+    //      target" now being up-screen instead of sideways. Muzzle
+    //      flash/smoke and the full swab/ball/ram/match-cord reload
+    //      sequence all reach down from the (now downward-pointing)
+    //      muzzle at the same relative depths/timings as the side view.
+    //      infscript.js's rocket cart (a pushed handcart, not mount-
+    //      integrated) got the same treatment and is a good side-by-
+    //      side reference if this needs revisiting.
+    //
+    // Every ported melee spot keeps its shaft/blade/limb/hilt/hand SHAPE
+    // code completely unchanged — only pivot/translate axes and base
+    // rotation offsets were redirected. The camel-cannon (#5) is the one
+    // exception that's a genuine re-layout rather than a redirect, since
+    // it's a vehicle rather than a held weapon. None of this has been
+    // visually tested (no way to render canvas output in this
+    // environment) — the camel-cannon re-layout in particular is a
+    // first-pass design following the reasoning in its own comments,
+    // not a verified result.
+    //
+    // NOT PORTED / OUT OF SCOPE FOR CAVALRY:
+    //   • Mount bodies (horse/camel/elephant) getting their own up/down
+    //     pose — explicitly deferred by the user to a later session.
+    //   • Backshot/up (facingDirY===-1) for all five ported spots above
+    //     — see BACKSHOT / UP below, now in progress.
     // ─────────────────────────────────────────────────────────────
+    //
+    // ═══════════════════════════════════════════════════════════════════
+    // BROADER ROADMAP NOTE (applies to both infscript.js and this file,
+    // recorded here since cavscript.js is the more recently-touched
+    // file as of this session — check infscript.js top-of-function
+    // block too, they should be kept in sync):
+    //
+    // RANGED WEAPONS DOWN-FACING — DONE. Bow-and-arrow (archer,
+    // horse_archer), infscript.js's "gun" hand cannon and "Firelance"
+    // unit, infscript.js's "crossbow" (both Repeater and foot-stirrup
+    // sub-mechanisms, once the user clarified reload always stays side-
+    // view — only the aim/fire bookends redirect), infscript.js's
+    // rocket cart, and this file's camel-cannon are all ported. Nothing
+    // known remaining in this category — see the completeness sweep
+    // noted in infscript.js's matching bullet before backshot work began.
+    //
+    // JAVELINIER — no longer excluded, REVISED per direct user follow-up
+    // after seeing the archer's downward aim in action. The active
+    // javelin (both its melee-stab and throwing sub-modes, which share
+    // one render block in infscript.js) now aims perpendicular to the X
+    // axis when facing down. Bomber and Slinger were NOT re-included in
+    // this revision — still excluded, see infscript.js's "throwing"
+    // branch notes for the precise split.
+    //
+    // BACKSHOT / UP (facingDirY===-1) — DONE for ALL rider armor tiers as
+    // of this session (previously done for low-armor-tier only). See the
+    // dedicated comment block right before `drawRiderBody` (search
+    // "BACKSHOT COVERAGE UPDATE" in this file) for the full writeup —
+    // short version: riders always get SOME headgear even at low tier
+    // (unlike infantry's bare-hair fallback); low-tier designs were
+    // mostly already symmetric front-to-back (one exception, Xiaran's
+    // nasal guard, already handled); medium/high/elite/commander tiers
+    // needed real new back-view helmet art (drawBackHeadgear, a parallel
+    // function mirroring the front switch/if-chain case-for-case) since
+    // those tiers have genuine front-only detail (visors, chin ties,
+    // nasal guards, forehead bands, face-covering bandanas) that a
+    // low-tier design never had. Body ARMOR (capes/shields/pauldrons/
+    // vests) needed NO back-view changes at any tier — checked and
+    // confirmed symmetric by construction (see "RIDER ARMOR LAYERS"
+    // comment for the full reasoning); two pieces (commander's cape,
+    // elite's shield-on-back) are in fact more natural from behind.
+    // IMPORTANT DIFFERENCE FROM infscript.js: this file's isElephant
+    // early-return had to stay OUTSIDE the drawRiderBody closure —
+    // wrapping it would have changed elephant behavior (a `return`
+    // inside a closure only exits the closure, not drawCavalryUnit),
+    // verified before wrapping anything by checking save/restore
+    // balance and every `return` in the section first. No early-return
+    // branches exist in this file's weapons logic the way infscript.js's
+    // archer/crossbow melee fallbacks did, so only ONE deferred
+    // drawRiderBody() call was needed (at the true end of the
+    // function), not several.
+    // NOT DONE (unchanged from before): MOUNT UP/DOWN POSES — still
+    // deferred, whole feature. Horse/elephant bodies stay side-view-only
+    // regardless of facingDirY, for both the down case and the eventual
+    // up case. The camel-cannon's wheeled gun carriage is the one
+    // exception — see PORTED #5 above, it got a bespoke down-facing
+    // re-layout instead of waiting for general mount-facing work, since
+    // a small cart is a much smaller problem than a horse/camel/
+    // elephant body silhouette. This is a SEPARATE feature from the
+    // rider backshot work above — mount bodies were out of scope for
+    // both this session and last, and remain so.
+    // ═══════════════════════════════════════════════════════════════════
     
 // --- DYNAMIC ARMOR RETRIEVAL ---
     let armorVal = 2; 
@@ -54,6 +203,23 @@ function drawCavalryUnit(ctx, x, y, moving, frame, factionColor, isAttacking, ty
     // dir is always 1 — ctx.scale(facingDir) above handles all mirroring.
     // Keeping dir so all mount/rider offset math below compiles unchanged.
     let dir = 1;
+
+    // Shared vertical-facing flag — see the VERTICAL FACING comment block
+    // above for full context. Read by all three ported rider melee/
+    // ranged spots (search "facingDown" to find them all).
+    const facingDown = (unit && unit.facingDirY === 1);
+
+    // QUADRANT-BASED AIM ANGLE — see infscript.js's matching constant
+    // (declared near its own facingUp/useBackView) for the full
+    // reasoning: a pure 90° rotation produces a dead-vertical aim with
+    // no lean left/right even when facingDir also indicates a diagonal
+    // heading. 45° instead, combined with the existing global
+    // ctx.scale(unit.facingDir,1) mirror at the top of this function,
+    // correctly lands in whichever of the 4 heading quadrants applies
+    // without needing separate per-quadrant code. Used by all three
+    // rider melee/ranged spots in place of the Math.PI/2 each
+    // originally used — search this file for DOWN_QUADRANT_ANGLE.
+    const DOWN_QUADRANT_ANGLE = Math.PI / 4;
  
 
     let isMoving = moving || (typeof vx !== 'undefined' && (Math.abs(vx) > 0.1 || Math.abs(vy) > 0.1));
@@ -588,6 +754,404 @@ if (isCommander) {
     return;
 }
 
+// ═══════════════════════════════════════════════════════════════════
+// BACKSHOT / UP (facingDirY===-1) — infrastructure, this session,
+// mirroring infscript.js's approach (see that file's big VERTICAL
+// FACING comment block for the full PROBLEM 1 / PROBLEM 2 writeup —
+// same reasoning applies here, not repeated in full).
+//
+// IMPORTANT: this must be declared AFTER the isElephant early-return
+// above, and the closure below (drawRiderBody) must NOT include that
+// early-return inside it — wrapping it would change behavior, since a
+// `return` inside a closure only exits the closure, not the outer
+// drawCavalryUnit call. Elephants would then fall through into the
+// weapons-logic section below, which never happens today and isn't
+// something this pass is set up to handle. Verified by checking
+// save/restore balance and every `return` in this section before
+// wrapping anything.
+//
+// useBackView mirrors infscript.js's armorVal<8 threshold, but the
+// justification is different here: cavalry riders ALWAYS get SOME
+// headgear even at low tier ("Every cavalry unit always gets SOME
+// headgear — light steppe/nomad gear appropriate to faction," see the
+// low-tier headgear dispatch below) — there's no bare-head fallback
+// the way infantry had. Most of those low-tier designs (Mongol felt
+// cap, Jurchen skullcap+ear-flaps, Yamato eboshi, Goryun cap, Dali
+// headwrap, the generic fallback) turned out to be reasonably
+// symmetric front-to-back already (domes, ear flaps, hanging tassels —
+// nothing anatomically front-only). ONE exception was found and
+// handled: the Xiaran turban's small nasal guard strip is a genuine
+// front-only detail, skipped specifically when facingUp — search
+// "nasal guard" in the low-tier headgear block below. The rider's
+// ARMOR layering has no low-tier case at all (isCommander/Elite/
+// >=25/>=8 dispatch, no final else) — low-tier riders get only the
+// base tunic, same triangle either way, no redesign needed.
+// ═══════════════════════════════════════════════════════════════════
+// BACKSHOT COVERAGE UPDATE (this session): the "NOT DONE" note above
+// (higher tiers / commander helmets) is now done. Real back-view art
+// exists for medium, high, elite, and commander tier HEADGEAR — see
+// drawBackHeadgear below, inserted right before drawRiderBody.
+// Body ARMOR (capes/shields/pauldrons/vests) needed no equivalent
+// function — it was checked and found to need no back-view changes at
+// all (torso/shoulder/leg wraps are symmetric by construction; see the
+// dedicated comment right above the armor chain itself, search "RIDER
+// ARMOR LAYERS", for the full reasoning). useBackView is now just
+// facingUp, same as infscript.js's equivalent update. Low-tier
+// headgear/armor logic (described in the block above) is unchanged —
+// it was already correct for both facings.
+const facingUp = (unit && unit.facingDirY === -1);
+const useBackView = facingUp;
+
+// ═══════════════════════════════════════════════════════════════
+// BACK-VIEW HEADGEAR (facingUp / useBackView) — full sweep, this
+// session, covering commander (10 faction cases), elite, high, and
+// medium tiers. Low-tier is untouched (already correct — see the
+// long comment above this block). Same design principle as
+// infscript.js: bowls/domes/cones are mostly symmetric and kept
+// as-is; anything anatomically FRONT-ONLY (nasal guards, chin ties,
+// visors/face-shields, forehead bands, face-covering bandanas) is
+// dropped and, where a faction had no rear element at all, replaced
+// with a genuine rear equivalent (neck guard flare). Several designs
+// needed NO change beyond dropping the shared face-oval below,
+// because their "guard" elements were already side/rear-mounted
+// (Player's Kingdom, Hong Dynasty, Great Khaganate's trailing
+// horsetail, Yamato's shikoro, Jinlord's ear flaps, Tran's flared
+// brim) — plumes and tassels that already trail backward off the
+// crown are correct for both facings and are kept unchanged.
+// ═══════════════════════════════════════════════════════════════
+const drawBackHeadgear = () => {
+    if (isCommander) {
+        let plumeBob = isMoving ? Math.sin(animFrame * 1.5) * 2.5 : Math.sin(animFrame * 0.5) * 0.5;
+        // NOTE: the shared "Exposed Hero Face" oval is deliberately
+        // NOT drawn here — a face on the back of a head is exactly
+        // the bug this pass exists to avoid. Everything else below
+        // mirrors the front switch case-for-case.
+        let cmdColor = (factionColor || "").toLowerCase();
+        if (isJapan) cmdColor = "#c2185b";
+        ctx.strokeStyle = "rgba(0,0,0,0.35)";
+        ctx.lineWidth = 0.5;
+
+        switch (cmdColor) {
+            case "#ffffff": // Player's Kingdom — already back-safe as-is
+                ctx.fillStyle = "#546e7a";
+                ctx.beginPath(); ctx.arc(0, -13, 4, Math.PI, 0); ctx.fill(); ctx.stroke();
+                ctx.fillStyle = "#37474f";
+                ctx.beginPath(); ctx.moveTo(-4, -13); ctx.lineTo(-5.5, -8); ctx.lineTo(5.5, -8); ctx.lineTo(4, -13); ctx.fill();
+                ctx.strokeStyle = "rgba(183, 28, 28, 0.9)";
+                ctx.lineWidth = 1;
+                ctx.beginPath(); ctx.moveTo(0, -17); ctx.quadraticCurveTo(3, -22 + plumeBob, 5, -16 + plumeBob); ctx.stroke();
+                ctx.fillStyle = "#263238"; ctx.fillRect(-0.5, -18, 1, 5);
+                break;
+
+            case "#d32f2f": // Hong Dynasty — already back-safe as-is
+                ctx.strokeStyle = "rgba(212, 175, 55, 0.8)";
+                ctx.lineWidth = 1;
+                ctx.beginPath(); ctx.moveTo(0, -18); ctx.quadraticCurveTo(15, -25 + plumeBob, 22, -8 + plumeBob); ctx.stroke();
+                ctx.strokeStyle = "rgba(183, 28, 28, 0.85)";
+                ctx.lineWidth = 0.8;
+                ctx.beginPath(); ctx.moveTo(0, -18); ctx.quadraticCurveTo(12, -22 + plumeBob, 18, -10 + plumeBob); ctx.stroke();
+                ctx.fillStyle = "#bfa15f";
+                ctx.beginPath(); ctx.arc(0, -13, 3.5, Math.PI, 0);
+                ctx.lineTo(4, -12); ctx.quadraticCurveTo(0, -11, -4, -12);
+                ctx.closePath(); ctx.fill(); ctx.stroke();
+                ctx.fillStyle = "#607d8b";
+                ctx.beginPath(); ctx.moveTo(-3.5, -13); ctx.lineTo(-6, -7); ctx.quadraticCurveTo(0, -5, 6, -7); ctx.lineTo(3.5, -13); ctx.fill();
+                ctx.strokeStyle = "rgba(0,0,0,0.2)";
+                for (let i = -11; i < -6; i += 1.5) { ctx.beginPath(); ctx.moveTo(-5, i); ctx.lineTo(5, i); ctx.stroke(); }
+                break;
+
+            case "#1976d2": // Great Khaganate — already back-safe as-is
+                ctx.fillStyle = "#455a64";
+                ctx.beginPath(); ctx.arc(0, -13, 4, Math.PI, 0); ctx.fill(); ctx.stroke();
+                ctx.fillStyle = "#3e2723";
+                ctx.beginPath(); ctx.ellipse(0, -12, 4.5, 1.5, 0, 0, Math.PI * 2); ctx.fill();
+                ctx.strokeStyle = "rgba(17, 17, 17, 0.9)";
+                ctx.lineWidth = 1.5;
+                ctx.beginPath(); ctx.moveTo(0, -17); ctx.quadraticCurveTo(-6, -14 + plumeBob, -8, -6 + (plumeBob * 1.5)); ctx.stroke();
+                ctx.fillStyle = "#a88e52";
+                ctx.beginPath(); ctx.moveTo(-1, -17); ctx.lineTo(0, -21); ctx.lineTo(1, -17); ctx.fill();
+                break;
+
+            case "#c2185b": // Yamato Clans — shikoro already wraps rear; drop the frontal maedate horns
+                ctx.fillStyle = "#1a1a1a";
+                ctx.beginPath(); ctx.arc(0, -12, 4.5, Math.PI, 0); ctx.fill();
+                ctx.fillStyle = "#8e0000";
+                ctx.fillRect(-5.5, -12, 11, 5);
+                ctx.fillStyle = "#111";
+                ctx.fillRect(-6, -10.5, 12, 0.8); ctx.fillRect(-6.5, -8.5, 13, 0.8);
+                // No maedate horns — those mount at the front brow of
+                // the bowl; from behind the shikoro is the whole story.
+                break;
+
+            case "#fbc02d": // Xiaran Dominion — drop the nasal guard (explicitly frontal)
+                ctx.fillStyle = "#78909c";
+                ctx.beginPath(); ctx.arc(0, -14, 3.5, Math.PI, 0); ctx.fill();
+                ctx.fillStyle = "#c59b27";
+                ctx.beginPath(); ctx.ellipse(0, -13, 4.5, 2.2, 0, 0, Math.PI * 2); ctx.fill();
+                ctx.strokeStyle = "rgba(0,0,0,0.2)";
+                ctx.beginPath(); ctx.moveTo(-3, -12); ctx.lineTo(3, -14); ctx.stroke();
+                // Nasal guard dropped — a nose guard only makes sense
+                // facing the wearer's own face.
+                ctx.fillStyle = "#a37a1c";
+                ctx.beginPath(); ctx.moveTo(4, -13); ctx.quadraticCurveTo(8, -8 + plumeBob, 6, -4); ctx.lineTo(3, -12); ctx.fill();
+                break;
+
+            case "#455a64": // Jinlord Confederacy — already back-safe as-is
+                ctx.fillStyle = "#37474f";
+                ctx.beginPath(); ctx.moveTo(-3.5, -12); ctx.lineTo(0, -21); ctx.lineTo(3.5, -12); ctx.fill(); ctx.stroke();
+                ctx.fillStyle = "#263238";
+                ctx.fillRect(-4.5, -12, 2.5, 5); ctx.fillRect(2, -12, 2.5, 5);
+                ctx.fillStyle = "#8e1e1e";
+                ctx.beginPath(); ctx.arc(0, -21, 1.5, 0, Math.PI * 2); ctx.fill();
+                break;
+
+            case "#388e3c": // Tran Realm — already back-safe as-is
+                ctx.fillStyle = "#795548";
+                ctx.beginPath(); ctx.arc(0, -11, 4.5, Math.PI, 0); ctx.fill(); ctx.stroke();
+                ctx.fillStyle = "#5d4037";
+                ctx.beginPath(); ctx.ellipse(0, -11, 6.5, 1.2, 0, 0, Math.PI * 2); ctx.fill();
+                ctx.fillStyle = "#2e7031";
+                ctx.fillRect(-3.5, -13.5, 7, 1.5);
+                break;
+
+            case "#7b1fa2": { // Goryun Kingdom — padded flaps already rear-appropriate; drop the frontal gold Mubis visor
+                ctx.fillStyle = "#b71c1c";
+                ctx.beginPath();
+                ctx.moveTo(-5, -13); ctx.quadraticCurveTo(-6.5, -9, -5.5, -5);
+                ctx.lineTo(-2.5, -5); ctx.lineTo(-2, -13); ctx.fill();
+                ctx.beginPath();
+                ctx.moveTo(2, -13); ctx.lineTo(2.5, -5); ctx.lineTo(5.5, -5);
+                ctx.quadraticCurveTo(7, -9, 5, -13); ctx.fill();
+                ctx.fillStyle = "#d4af37";
+                const backStuds = [
+                    [-5, -11], [-5.3, -9], [-5, -7],
+                    [2.5, -11], [3, -9], [3.5, -7],
+                    [4.5, -11], [5, -9], [5.5, -7]
+                ];
+                backStuds.forEach(s => { ctx.beginPath(); ctx.arc(s[0], s[1], 0.2, 0, Math.PI * 2); ctx.fill(); });
+                ctx.fillStyle = "#1a1a1a";
+                ctx.beginPath();
+                ctx.moveTo(-3.2, -13.8);
+                ctx.bezierCurveTo(-3.2, -19.4, -0.8, -21.8, 0, -22.2);
+                ctx.bezierCurveTo(0.8, -21.8, 3.2, -19.4, 3.6, -14.2);
+                ctx.lineTo(-3.2, -13.8); ctx.fill();
+                // Gold Mubis visor dropped — a face-shield is
+                // definitionally frontal.
+                ctx.strokeStyle = "#ffcc00"; ctx.lineWidth = 0.3;
+                ctx.beginPath(); ctx.moveTo(0, -14.2); ctx.lineTo(0, -22.2); ctx.stroke();
+                ctx.fillStyle = "#d32f2f";
+                ctx.beginPath(); ctx.moveTo(-1, -22.6); ctx.quadraticCurveTo(0, -25, 1, -22.6); ctx.fill();
+                ctx.fillStyle = "#d4af37"; ctx.fillRect(-0.5, -23, 1, 0.8);
+                ctx.strokeStyle = "#e0e0e0"; ctx.lineWidth = 0.25;
+                ctx.beginPath();
+                ctx.moveTo(0, -23); ctx.lineTo(0, -25.5);
+                ctx.moveTo(-0.3, -23.8); ctx.lineTo(-0.5, -24.6);
+                ctx.moveTo(0.3, -23.8); ctx.lineTo(0.5, -24.6);
+                ctx.stroke();
+                break;
+            }
+
+            case "#00838f": { // Dali Kingdom — drop the frontal red forehead band and chin tie
+                const yOff = -0.75;
+                ctx.fillStyle = "#8d6e63";
+                ctx.strokeStyle = "rgba(0,0,0,0.25)"; ctx.lineWidth = 0.15;
+                for (let i = 0; i < 3; i++) {
+                    let y = -12.8 + i * 1.4 + yOff;
+                    ctx.beginPath();
+                    ctx.moveTo(-3.2, y); ctx.lineTo(-4.4, y + 0.3); ctx.lineTo(-4.0, y + 1.2); ctx.lineTo(-2.8, y + 0.9);
+                    ctx.closePath(); ctx.fill(); ctx.stroke();
+                }
+                for (let i = 0; i < 3; i++) {
+                    let y = -12.8 + i * 1.4 + yOff;
+                    ctx.beginPath();
+                    ctx.moveTo(3.2, y); ctx.lineTo(4.4, y + 0.3); ctx.lineTo(4.0, y + 1.2); ctx.lineTo(2.8, y + 0.9);
+                    ctx.closePath(); ctx.fill(); ctx.stroke();
+                }
+                ctx.fillStyle = "#d4af37";
+                ctx.beginPath();
+                ctx.arc(0, -14.3 + yOff, 2.45, Math.PI, 0);
+                ctx.lineTo(2.45, -13.2 + yOff); ctx.lineTo(-2.45, -13.2 + yOff);
+                ctx.closePath(); ctx.fill();
+                ctx.strokeStyle = "rgba(0,0,0,0.3)"; ctx.lineWidth = 0.18;
+                for (let i = -1.8; i <= 1.8; i += 1.1) {
+                    ctx.beginPath(); ctx.moveTo(i, -17 + yOff); ctx.lineTo(i, -13.2 + yOff); ctx.stroke();
+                }
+                // Red forehead band dropped — explicitly a forehead
+                // (front) element.
+                ctx.fillStyle = "#1a1a1a";
+                ctx.beginPath();
+                ctx.moveTo(-0.4, -17 + yOff); ctx.lineTo(-0.9, -18.0 + yOff);
+                ctx.lineTo(0.2, -17.8 + yOff); ctx.lineTo(0.6, -18.3 + yOff); ctx.lineTo(0.4, -17 + yOff);
+                ctx.fill();
+                ctx.fillStyle = "#fbc02d";
+                ctx.beginPath();
+                ctx.moveTo(-0.6, -17 + yOff); ctx.quadraticCurveTo(0, -17.8 + yOff, 0.6, -17 + yOff);
+                ctx.lineTo(0.4, -16.2 + yOff); ctx.lineTo(-0.4, -16.2 + yOff);
+                ctx.closePath(); ctx.fill();
+                // Chin tie dropped entirely — a tie fastens under the
+                // chin, which does not exist on the back of the head.
+                break;
+            }
+
+            case "#8d6e63": // High Plateau Kingdoms — drop the centered forehead turquoise stone
+                ctx.fillStyle = "#424242";
+                ctx.beginPath(); ctx.arc(0, -13, 4, Math.PI, 0); ctx.fill();
+                ctx.strokeStyle = "rgba(255,255,255,0.1)"; ctx.lineWidth = 0.5;
+                ctx.beginPath(); ctx.moveTo(-1.5, -13); ctx.lineTo(-1.5, -17); ctx.stroke();
+                ctx.beginPath(); ctx.moveTo(1.5, -13); ctx.lineTo(1.5, -17); ctx.stroke();
+                ctx.fillStyle = "#8d6e63";
+                ctx.fillRect(-5, -13, 2, 6); ctx.fillRect(3, -13, 2, 6);
+                // Turquoise stone dropped — it's a centered forehead
+                // ornament in the source design, not a wraparound band.
+                ctx.fillStyle = "#9e2a2b";
+                ctx.beginPath(); ctx.arc(0, -17, 2.5, Math.PI, 0); ctx.fill();
+                break;
+
+            case "#222222": // Bandits — drop the face-covering bandana, keep cap+spikes
+                ctx.fillStyle = "#3e3a38";
+                ctx.beginPath(); ctx.arc(0, -13, 3.5, Math.PI, 0); ctx.fill();
+                ctx.fillStyle = "#545454";
+                ctx.beginPath(); ctx.moveTo(-2, -15); ctx.lineTo(-1, -17); ctx.lineTo(0, -15); ctx.fill();
+                ctx.beginPath(); ctx.moveTo(2, -15); ctx.lineTo(1, -17); ctx.lineTo(0, -15); ctx.fill();
+                // Bandana dropped — it's worn across the face; its
+                // trailing tail (originally drawn off to one side) is
+                // kept as a simple rear-hanging cloth strip instead.
+                ctx.fillStyle = "#7a2020";
+                ctx.fillRect(-3.5, -12, 7, 1.2);
+                break;
+
+            default:
+                ctx.fillStyle = "#455a64";
+                ctx.beginPath(); ctx.arc(0, -12, 4, Math.PI, 0); ctx.fill(); ctx.stroke();
+                ctx.fillStyle = "#263238"; ctx.fillRect(-0.5, -16, 1, 4);
+                break;
+        }
+        return;
+    }
+
+    if (unitName.includes("Elite") || armorVal >= 40) {
+        // Elite Cuman helmet — aventail neck guard already wraps rear
+        // (extend it to a full curtain since the face mask it used to
+        // pair with is gone); drop the steel face mask (explicitly
+        // frontal); dome + trim are symmetric, keep.
+        ctx.fillStyle = "#757575"; ctx.strokeStyle = "#1a1a1a"; ctx.lineWidth = 0.5;
+        ctx.beginPath(); ctx.moveTo(-4.5, -13); ctx.lineTo(-4, -8); ctx.lineTo(4, -8); ctx.lineTo(4.5, -13); ctx.closePath(); ctx.fill(); ctx.stroke();
+        ctx.strokeStyle = "rgba(0,0,0,0.4)";
+        for (let i = -12; i <= -9; i += 1.2) { ctx.beginPath(); ctx.moveTo(-4, i); ctx.lineTo(4, i); ctx.stroke(); }
+        // Face mask dropped entirely — a mask covers the face, which
+        // has no back-of-head counterpart.
+        ctx.fillStyle = "#9e9e9e"; ctx.strokeStyle = "#1a1a1a"; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(-3.5, -13); ctx.lineTo(3.5, -13);
+        ctx.quadraticCurveTo(0, -16, -1, -20);
+        ctx.closePath(); ctx.fill(); ctx.stroke();
+        ctx.strokeStyle = factionColor; ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.moveTo(-3.5, -13); ctx.lineTo(3.5, -13); ctx.stroke();
+        return;
+    }
+
+    if (armorVal >= 25) {
+        // High Tier — same faction split as front, only the frontal
+        // horns/tell are dropped where present.
+        if (factionColor === "#c2185b" || isJapan) {
+            ctx.fillStyle = "#212121"; ctx.beginPath(); ctx.arc(0, -12, 3.5, Math.PI, 0); ctx.fill();
+            ctx.fillRect(-4, -12, 8, 1.5);
+            // Gold horn accents dropped — frontal maedate, same
+            // reasoning as the commander Yamato case above.
+        } else if (factionColor === "#1976d2" || factionColor === "#455a64") {
+            ctx.fillStyle = "#9e9e9e"; ctx.strokeStyle = "#424242"; ctx.lineWidth = 0.8;
+            ctx.beginPath(); ctx.arc(0, -13, 4, Math.PI, 0); ctx.fill(); ctx.stroke();
+            ctx.fillStyle = "#616161"; ctx.beginPath(); ctx.moveTo(-1, -16); ctx.lineTo(1, -16); ctx.lineTo(0, -20); ctx.fill();
+            ctx.fillStyle = "#4e342e"; ctx.fillRect(-4, -13, 8, 4); // one rear curtain vs. two side flaps
+        } else if (factionColor === "#00838f") {
+            ctx.fillStyle = "#5d4037"; ctx.fillRect(-6, -14, 12, 3);
+            ctx.fillStyle = "#8d6e63";
+            ctx.beginPath(); ctx.moveTo(-5, -14); ctx.lineTo(-2, -22); ctx.lineTo(2, -22); ctx.lineTo(5, -14); ctx.fill();
+            ctx.fillStyle = "#e0e0e0";
+            ctx.fillRect(-3, -18, 6, 1.5);
+            ctx.beginPath(); ctx.moveTo(-1, -22); ctx.lineTo(0, -25); ctx.lineTo(1, -22); ctx.fill();
+            ctx.strokeStyle = "#e0e0e0"; ctx.lineWidth = 1;
+            ctx.beginPath(); ctx.moveTo(-6, -13); ctx.lineTo(-8, -15); ctx.moveTo(6, -13); ctx.lineTo(8, -15); ctx.stroke();
+        } else {
+            // Default heavy dome — plume trails backward already
+            // (keep); wrap-around face+neck guard is explicitly
+            // frontal (eye slit, jaw wrap), drop entirely and replace
+            // with a plain rear neck curtain in the same material.
+            ctx.fillStyle = "#d32f2f";
+            ctx.beginPath();
+            ctx.moveTo(0, -19.5);
+            ctx.quadraticCurveTo(-3, -25.5, -5, -23.5);
+            ctx.quadraticCurveTo(-1, -22.5, 0, -19.5);
+            ctx.quadraticCurveTo(3, -25.5, 5, -23.5);
+            ctx.quadraticCurveTo(1, -22.5, 0, -19.5);
+            ctx.fill();
+            ctx.fillStyle = "#9e9e9e"; ctx.strokeStyle = "#333333"; ctx.lineWidth = 0.8;
+            ctx.beginPath();
+            ctx.moveTo(-5, -13.5); ctx.quadraticCurveTo(0, -22.5, 5, -13.5);
+            ctx.lineTo(4.5, -12); ctx.quadraticCurveTo(0, -11, -4.5, -12);
+            ctx.closePath(); ctx.fill(); ctx.stroke();
+            ctx.fillStyle = "#ffd700";
+            ctx.beginPath();
+            ctx.moveTo(-1.2, -19); ctx.lineTo(1.2, -19); ctx.lineTo(0.8, -21); ctx.lineTo(-0.8, -21);
+            ctx.closePath(); ctx.fill(); ctx.stroke();
+            // Wrap-around face+neck guard replaced with a plain rear
+            // curtain (no eye slit — nothing to see through from here).
+            ctx.fillStyle = factionColor;
+            ctx.beginPath();
+            ctx.moveTo(-5, -13); ctx.lineTo(-5.5, -7);
+            ctx.quadraticCurveTo(0, -5.5, 5.5, -7); ctx.lineTo(5, -13);
+            ctx.closePath(); ctx.fill(); ctx.stroke();
+            ctx.strokeStyle = "rgba(0,0,0,0.4)"; ctx.lineWidth = 0.4;
+            for (let x = -4; x <= 4; x += 2) { ctx.beginPath(); ctx.moveTo(x, -12); ctx.lineTo(x, -7.5); ctx.stroke(); }
+            ctx.strokeStyle = "#b71c1c"; ctx.lineWidth = 0.8;
+            ctx.beginPath(); ctx.moveTo(-4.5, -11); ctx.lineTo(-6.5, -6); ctx.moveTo(4.5, -11); ctx.lineTo(6.5, -6); ctx.stroke();
+        }
+        return;
+    }
+
+    if (armorVal >= 8) {
+        // Medium Tier — Dali headwrap has one fold-detail line that's
+        // decorative and ambiguous either way, kept; everything else
+        // here had no front-only tell to begin with.
+        if (factionColor === "#c2185b") {
+            ctx.fillStyle = "#212121"; ctx.strokeStyle = "#fbc02d"; ctx.lineWidth = 0.5;
+            ctx.beginPath(); ctx.moveTo(-5, -10.5); ctx.lineTo(0, -13.5); ctx.lineTo(5, -10.5);
+            ctx.closePath(); ctx.fill(); ctx.stroke();
+        } else if (factionColor === "#1976d2" || factionColor === "#455a64") {
+            ctx.fillStyle = "#4e342e"; ctx.beginPath(); ctx.arc(0, -12, 3, Math.PI, 0); ctx.fill();
+            ctx.fillStyle = "#795548"; ctx.fillRect(-3.5, -12, 7, 1.5);
+        } else if (factionColor === "#00838f") {
+            ctx.fillStyle = "#1a237e"; ctx.strokeStyle = "#0d47a1"; ctx.lineWidth = 0.5;
+            ctx.fillRect(-3, -14, 6, 2);
+            ctx.beginPath(); ctx.arc(0, -14, 2.5, Math.PI, 0); ctx.fill(); ctx.stroke();
+        } else {
+            ctx.fillStyle = "#808080"; ctx.strokeStyle = "#333333"; ctx.lineWidth = 0.8;
+            ctx.beginPath();
+            ctx.arc(0, -13.5, 4.8, Math.PI, 0);
+            ctx.lineTo(4.8, -12.5); ctx.quadraticCurveTo(0, -12, -4.8, -12.5);
+            ctx.closePath(); ctx.fill(); ctx.stroke();
+            ctx.fillStyle = "#555555";
+            ctx.beginPath(); ctx.arc(0, -18.3, 1, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+            ctx.fillStyle = factionColor;
+            ctx.beginPath(); ctx.rect(-5.2, -12.5, 2.2, 3.5); ctx.fill(); ctx.stroke();
+            ctx.beginPath(); ctx.rect(3, -12.5, 2.2, 3.5); ctx.fill(); ctx.stroke();
+            // "MINIMAL BACK NECK GUARD" in the front version is
+            // already a rear guard by its own name — widen it slightly
+            // since it's now the main rear element rather than a minor
+            // addition to a mostly-front helmet.
+            ctx.beginPath();
+            ctx.moveTo(-3.5, -12.5); ctx.quadraticCurveTo(0, -11, 3.5, -12.5);
+            ctx.lineTo(3.5, -9.5); ctx.quadraticCurveTo(0, -9, -3.5, -9.5);
+            ctx.closePath(); ctx.fill(); ctx.stroke();
+        }
+        return;
+    }
+
+    // armorVal < 8 should never reach here — useBackView's low-tier
+    // headgear is handled inline in drawRiderBody itself (unchanged
+    // from before this session), not through this function.
+};
+
+const drawRiderBody = () => {
 ctx.save();
     let isCamelCannon = (type === "camel_cannon" || (unitName && unitName.toLowerCase().includes("camel cannon")));
 
@@ -604,7 +1168,24 @@ if (!isElephant && !isCamelCannon) {
 ctx.restore();
 
 // RIDER ARMOR LAYERS
-    
+    //
+    // BACKSHOT CHECK (this session): unlike headgear below, this whole
+    // armor chain (commander cape/vest/pauldrons, elite shield/chausses/
+    // vest/pauldrons, heavy vest/pauldrons, medium vest/pauldrons) needs
+    // NO back-view changes. Reasoning: every piece here is a torso-wrap
+    // polygon, shoulder-mounted pauldron, or leg-wrap — all symmetric
+    // front-to-back by construction, unlike a helmet's anatomically
+    // front-only chin strap or forehead band. Two pieces are in fact
+    // MORE appropriate from behind than in front: the commander's
+    // trailing cape (capes are worn ON the back) and the elite's
+    // shield-on-back (also genuinely worn on the back). The "Ruby eyes
+    // in the pauldrons" detail is a shoulder-mounted beast-head motif,
+    // not an anatomical face, so it's fine from either facing too.
+    // Checked line-by-line for any hidden front-only detail (visor,
+    // mask, chin-adjacent element) before concluding this — found none.
+    // drawBackArmor() was NOT created because there is nothing for it
+    // to override; the chain below runs unconditionally regardless of
+    // useBackView, same as before.
     // >>> BEGIN SURGERY: COMMANDER ARMOR OVERRIDE <<<
     if (isCommander && !isCamelCannon) {
         
@@ -729,6 +1310,27 @@ ctx.stroke();
 	  }
  
 // RIDER HEADGEAR// >>> BEGIN SURGERY: REALISTIC COMMANDER HELMETS <<<
+if (useBackView && (isCommander || (unitName && unitName.includes("Elite")) || armorVal >= 8)) {
+    // Back view for commander/elite/high/medium: dispatch to the
+    // dedicated back-headgear renderer above.
+    // IMPORTANT — this condition deliberately mirrors the ORIGINAL
+    // chain's actual routing, not just an armor-tier cutoff:
+    // `if (isCommander) {...} else if (isElite||armorVal>=40) {...}
+    // else if (armorVal>=25) {...} else if (armorVal>=8) {...} else
+    // { LOW ARMOR TIER }`. isCommander is checked FIRST and
+    // independent of armorVal — a commander named e.g. "General"
+    // (not literally "PLAYER"/"Commander") is not guaranteed
+    // armorVal>=8 by the armor-floor logic above (that floor only
+    // applies to unitName==="PLAYER"||"Commander"), so gating this
+    // dispatch on armorVal alone would have wrongly sent a low-armor
+    // commander into the low-tier else-branch instead of
+    // drawBackHeadgear()'s commander case. Checked and fixed before
+    // finalizing. Low-tier riders (isCommander false, not "Elite",
+    // armorVal<8) still fall through to the unchanged else-chain
+    // below, reaching their own already-facing-aware LOW ARMOR TIER
+    // branch exactly as before this session.
+    drawBackHeadgear();
+} else {
 if (isCommander) {
     // Shared animation logic for plumes/tassels
     let plumeBob = isMoving ? Math.sin(animFrame * 1.5) * 2.5 : Math.sin(animFrame * 0.5) * 0.5;
@@ -1457,9 +2059,15 @@ break;
             ctx.strokeStyle = 'rgba(0,0,0,0.2)'; ctx.lineWidth = 0.7;
             ctx.beginPath(); ctx.moveTo(-3, -12.2); ctx.bezierCurveTo(-1,-14, 1,-14, 3,-12.5); ctx.stroke();
 
-            // Small steel nasal guard
-            ctx.fillStyle = '#78909c';
-            ctx.fillRect(-0.5, -12, 1, 3.5);
+            // Small steel nasal guard — front-only detail (a nose
+            // guard, by definition, only makes sense on the front of
+            // the face), so it's skipped for the back view. Everything
+            // else in this turban (dome, wrap folds, trailing silk end)
+            // is reasonably symmetric front-to-back and stays as-is.
+            if (!facingUp) {
+                ctx.fillStyle = '#78909c';
+                ctx.fillRect(-0.5, -12, 1, 3.5);
+            }
 
             // Trailing silk end
             ctx.fillStyle = '#a37a1c';
@@ -1500,6 +2108,15 @@ break;
             ctx.fillRect(-3.5, -13, 7, 1.5);
         }
     }
+    } // end of outer useBackView-dispatch else (original headgear chain, low-tier included, unchanged)
+}; // end of drawRiderBody closure
+
+// Normal order: body first, then weapon on top (unchanged today for
+// every rider that isn't a facing-up, low-armor-tier rider).
+if (!useBackView) {
+    drawRiderBody();
+}
+
 // --- WEAPONS LOGIC ---
     let weaponBob = isAttacking ? Math.sin(frame * 0.8) * 4 : Math.sin(frame * 0.2) * 1;
 
@@ -1596,10 +2213,31 @@ if (isJapan) {
 ctx.restore();
 
 // 2. REVISED: Draw Melee Lance & Hand
+// ═══════════════════════════════════════════════════════════
+// DOWNWARD FACING (facingDirY===1) — ported this session.
+// Same rotation-offset trick as the default lancer's "MELEE LANCE"
+// branch: the shaft/tip/hand shapes below are drawn along local +X
+// and are left completely unchanged. For facingDown we always apply
+// a +90° base rotation (previously rotation only happened for the
+// ~33% of units on the "swing" style at all) so the shaft points
+// down-screen; the swing wobble (swingAngle) still layers on top for
+// swing-style units, same as before. The "thrust" lunge (used by the
+// other ~67%, non-swing units) moves from the X component of the
+// translate to the Y component, since translate happens BEFORE
+// rotate here and is therefore unaffected by the rotation — it must
+// be redirected explicitly rather than relying on the rotation to
+// carry it, unlike the default lancer's thrustX/thrustY which are
+// baked into the post-rotation shape coordinates instead.
+// ═══════════════════════════════════════════════════════════
 ctx.save();
 // Apply translation for the "snap" thrust and rotation for the "swing"
-ctx.translate(2 + thrust, -4 + b); 
-if (isSwing) ctx.rotate(swingAngle); 
+if (facingDown) {
+    ctx.translate(2, -4 + b + thrust);
+} else {
+    ctx.translate(2 + thrust, -4 + b);
+}
+const haLanceBaseRot = facingDown ? DOWN_QUADRANT_ANGLE : 0;
+ctx.rotate(haLanceBaseRot + (isSwing ? swingAngle : 0));
 
 // The Lance Shaft
 ctx.fillStyle = "#795548"; 
@@ -1635,9 +2273,13 @@ ctx.restore();
 // FIX: A unit is "Action Active" as long as the cooldown is counting.
 // This prevents the arm from snapping when you start moving.
 let isActionActive = (cd > 0); 
+if (isActionActive) unit._lastBowActiveMs = Date.now();
 
-// If the timer is running, use it. Otherwise, stay in "Ready" pose (0.9)
-let cycle = isActionActive ? Math.max(0, maxCd - cd) / maxCd : 0.9; 
+// Relaxed idle: 30% draw briefly post-shot, dropping to ~25% after 1.5s of no shooting.
+// cycle 0.565 = 30% drawProgress; cycle 0.5375 = 25% drawProgress (formula: (cycle-0.4)/0.55)
+let _msIdleHA = Date.now() - (unit._lastBowActiveMs || 0);
+let _idleCycleHA = (_msIdleHA < 1500) ? 0.565 : 0.5375;
+let cycle = isActionActive ? Math.max(0, maxCd - cd) / maxCd : _idleCycleHA;
 
 let bowKhatra = 0;
 let hasArrow = false;
@@ -1677,10 +2319,74 @@ if (cycle < 0.2) {
     stringX = handX - 4; 
 }
 // Draw Bow
+// ═══════════════════════════════════════════════════════════════
+// DOWNWARD FACING (facingDirY===1) — ranged aiming. Structurally
+// near-identical to infscript.js's archer branch (see that branch's
+// comments for the full reasoning) — same two-technique split applies
+// here for the same reason:
+//
+// (1) LIMBS + STRING are drawn inside this same bowKhatra rotation
+//     wrapper, so adding DOWN_AIM_ANGLE to bowKhatra redirects the
+//     whole bow shape for free. topTipY/botTipY/topDipY/botDipY and
+//     the string's inner vertex (stringX, rightHandY) below are all
+//     left completely unchanged.
+// (2) ARROW + RIGHT HAND are drawn in their own transform AFTER this
+//     wrapper's ctx.restore() (see below), so they need the SAME
+//     rotateAroundPivot manual point-rotation infscript.js's archer
+//     uses — redirecting the phase logic's rightHandX/rightHandY
+//     values at the source (like the melee weapons did) would double-
+//     rotate the string vertex above, which already gets the ambient
+//     wrapper rotation for free.
+//
+// UPDATED per visual feedback on the infantry archer (same fix applied
+// here): a full 90° straight-down rotation with no position change
+// looked disconnected — floating at chest height aiming at their own
+// feet. Fixed to 45° (DOWN_AIM_ANGLE) with the pivot lowered 30px
+// (DOWN_Y_OFFSET), same numbers as infscript.js's archer for visual
+// consistency between the two. No head-dip equivalent here — cavalry
+// riders don't have the same exposed head-bow read as standing
+// infantry, and mount-seated posture is a separate, deferred problem
+// (see this file's MOUNT UP/DOWN POSES notes) — left alone for now.
+//
+// NOT touched: the stowed lance prop drawn just above this block —
+// a strapped weapon is a static accessory regardless of aim
+// direction, same reasoning as every other stowed/strapped prop this
+// session (quivers, shields, stowed bows).
+// ═══════════════════════════════════════════════════════════════
+// REVISED (offset bug fix — see screenshot: bow rendering far from the
+// rider, disconnected from hands/body). 45°/30px pushed the pivot too
+// far below the rider and rotated too aggressively for this rider's
+// tighter body scale. Tightened to 15px / ~40% of a quarter-turn (36°)
+// — same shared numbers now used by infscript.js's archer (see that
+// file's DOWN_AIM_OFFSET/DOWN_AIM_ROT) — keeping the whole bow+arrow+
+// hand assembly closer to the rider's actual hand position instead of
+// swinging out on a long, steep arc.
+const DOWN_AIM_ANGLE = 0.4 * (Math.PI / 2);  // 36°, matches infscript.js's archer
+// NOTE: DOWN_Y_OFFSET is now a LOCAL override, no longer numerically
+// tied to infscript.js's foot archer (still 15px there). Per direct
+// request, the horse archer's downward bow needed to sit closer to the
+// rider than the shared 15px value gave — riders have a tighter body
+// scale than standing infantry (same point raised earlier in this
+// branch's own comments), so the same absolute offset reads as
+// proportionally larger "detached" distance here. Tightened to 9px.
+// If infscript.js's foot archer offset ever changes, this does NOT
+// need to follow it anymore — they're intentionally decoupled now.
+const DOWN_Y_OFFSET = 9;              // lower the whole aiming assembly (was 15)
+const pivotY = facingDown ? (handY + DOWN_Y_OFFSET) : handY;
+
+const rotateAroundPivot = (px, py, angle) => {
+    const ddx = px - handX, ddy = py - pivotY;
+    const cosA = Math.cos(angle), sinA = Math.sin(angle);
+    return {
+        x: handX + (ddx * cosA - ddy * sinA),
+        y: pivotY + (ddx * sinA + ddy * cosA)
+    };
+};
+
 ctx.save();
-ctx.translate(handX, handY); 
-ctx.rotate(bowKhatra); 
-ctx.translate(-handX, -handY);
+ctx.translate(handX, pivotY); 
+ctx.rotate(bowKhatra + (facingDown ? DOWN_AIM_ANGLE : 0)); 
+ctx.translate(-handX, -pivotY);
 
 // isJapan already declared at top of function
 
@@ -1721,16 +2427,19 @@ ctx.stroke();
 
 ctx.restore();
             // Draw Arrow (Only renders if hasArrow is true, which is fixed to start at 0.2)
+            const haArrowPt = facingDown ? rotateAroundPivot(rightHandX, rightHandY, DOWN_AIM_ANGLE) : { x: rightHandX, y: rightHandY };
             if (hasArrow) {
                 ctx.save();
-                ctx.translate(rightHandX, rightHandY); 
+                ctx.translate(haArrowPt.x, haArrowPt.y); 
+                let haNockRot = 0;
                 if (cycle >= 0.2 && cycle < 0.4) {
                     // Smoothly rotates the arrow into nocking position
                     let nockProgress = (cycle - 0.2) / 0.2;
-                    ctx.rotate((-Math.PI / 4) * (1 - nockProgress));
+                    haNockRot = (-Math.PI / 4) * (1 - nockProgress);
                 }
+                ctx.rotate(haNockRot + (facingDown ? DOWN_AIM_ANGLE : 0));
                 ctx.fillStyle = "#8d6e63"; ctx.fillRect(-4, -0.5, 16, 1); 
-                ctx.fillStyle = "#9e9e9e"; ctx.fillRect(12, -1.5, 3, 3); 
+                ctx.fillStyle = "#9e9e9e"; ctx.beginPath(); ctx.moveTo(12, -1); ctx.lineTo(16, 0); ctx.lineTo(12, 1); ctx.fill(); 
                 ctx.fillStyle = "#d32f2f"; 
                 ctx.fillRect(-3, -1.5, 4, 1); ctx.fillRect(-3, 0.5, 4, 1); 
                 ctx.restore();
@@ -1738,7 +2447,7 @@ ctx.restore();
 
             // Draw Right Hand
             ctx.fillStyle = "#ffccbc"; 
-            ctx.beginPath(); ctx.arc(rightHandX, rightHandY, 2, 0, Math.PI * 2); ctx.fill();
+            ctx.beginPath(); ctx.arc(haArrowPt.x, haArrowPt.y, 2, 0, Math.PI * 2); ctx.fill();
         }
         
         ctx.restore();
@@ -1810,9 +2519,22 @@ let gLegSwing = moving ? Math.sin(animFrame * 0.4) * 2 : 0;
         ctx.restore();
 
         // 2. Shortsword Animation Logic
+        // ═══════════════════════════════════════════════════════════
+        // DOWNWARD FACING (facingDirY===1) — ported this session.
+        // Same rotation-offset trick as the other two cavalry melee
+        // branches: blade/guard/hand shapes below (step 3) are drawn
+        // along local +X and stay completely unchanged. `lunge` replaces
+        // the original inline `handX = 4 + (p*6)` / `10 - (p*6)` — same
+        // 0→6→0 shape across the swing cycle, just pulled into its own
+        // variable so it can be applied to whichever axis the current
+        // facing needs (X for the side view's sideways lunge, Y for the
+        // down view's toward-the-viewer lunge) without duplicating the
+        // phase-timing math twice.
+        // ═══════════════════════════════════════════════════════════
         var meleeCycle = cycle; 
         var swingAngle = -Math.PI / 2; // Ready position
         var handX = 4, handY = 8;
+        var lunge = 0;
 
         if (isAttacking) {
             if (meleeCycle < 0.2) { 
@@ -1822,20 +2544,28 @@ let gLegSwing = moving ? Math.sin(animFrame * 0.4) * 2 : 0;
                 // Swing down
                 var p = (meleeCycle - 0.2) / 0.3;
                 swingAngle = -Math.PI / 1.2 + (Math.PI * 1.5 * p);
-                handX = 4 + (p * 6);
+                lunge = p * 6;
             } else { 
                 // Recover
                 var p = (meleeCycle - 0.5) / 0.5;
                 swingAngle = Math.PI * 0.3 - (Math.PI * 0.8 * p);
-                handX = 10 - (p * 6);
+                lunge = 6 - (p * 6);
             }
         }
 		else{}
 
+        if (facingDown) {
+            handX = 1;          // small centered offset — no sideways drift while facing camera
+            handY = 8 + lunge;  // lunge now reaches down-screen, toward the viewer
+        } else {
+            handX = 4 + lunge;  // original sideways lunge (unchanged behavior)
+            // handY stays at its 8 baseline, as before
+        }
+
         // 3. Render Shortsword
         ctx.save();
         ctx.translate(handX, handY + reducedBob);
-        ctx.rotate(swingAngle);
+        ctx.rotate(swingAngle + (facingDown ? DOWN_QUADRANT_ANGLE : 0));
         
         // Blade
         ctx.fillStyle = "#cfd8dc"; // Steel
@@ -1865,6 +2595,37 @@ let gLegSwing = moving ? Math.sin(animFrame * 0.4) * 2 : 0;
  
 } else {
     // --- MODE B: RANGED CANNON (SURGERY FIX REPLICATED) ---
+    // ═══════════════════════════════════════════════════════════════
+    // DOWNWARD FACING (facingDirY===1) — ported this session, per
+    // explicit user request (overriding this session's earlier
+    // deferral, which filed this under "mounts, later" reasoning that
+    // no longer applies now that the user has asked for it directly).
+    //
+    // Same "genuine re-layout, not just a rotation" approach as
+    // infscript.js's rocket cart (a good side-by-side reference if this
+    // needs revisiting) — the wheelbarrow chassis, single wheel, and
+    // barrel are re-positioned with named constants below rather than
+    // just rotated, so the wheel/handle placement actually makes sense
+    // from this angle instead of an automatic rotation of side-view art
+    // that happened to carry a wheel along for the ride.
+    //
+    // DESIGN, for a future session to tune:
+    //   - The barrel points down-screen (toward the viewer/target)
+    //     instead of sideways; the muzzle end is at the LARGEST Y
+    //     (furthest from the rider, closest to camera).
+    //   - The frame's "back handles" (gripped near the rider in the
+    //     side view) sit at the smallest Y (closest to the rider);
+    //     the "front bed" extends toward the muzzle end.
+    //   - The single wheel sits centered along the frame's length,
+    //     same relative position as the side view.
+    //   - recoil (a horizontal kick in the side view) becomes a
+    //     vertical kick here — firing pushes the carriage AWAY from
+    //     the target, i.e. up-screen (smaller Y), so it's now
+    //     subtracted from the down-offset rather than added to X.
+    //   - Muzzle flash/smoke and the whole swab/ball/ram/match-cord
+    //     reload sequence all reach down from the muzzle instead of
+    //     sideways, same relative depths/timings as the side view.
+    // ═══════════════════════════════════════════════════════════════
     
     // 1. Unified Timing Logic (Matches Hand Cannoner success)
     let maxCd = 300; 
@@ -1883,6 +2644,95 @@ let gLegSwing = moving ? Math.sin(animFrame * 0.4) * 2 : 0;
         gunY = 1.0; 
     }
 
+    if (facingDown) {
+        const CANNON_DOWN_Y = 20;   // how far below the rider the whole assembly sits
+        const CANNON_WHEEL_Y = 8;   // wheel position along the frame's length
+        const CANNON_BED_Y = 16;    // front bed / muzzle-end of the frame
+
+        ctx.save();
+        ctx.translate(0, CANNON_DOWN_Y + gunY + (reducedBob || 0) - recoil);
+        ctx.rotate(gunAngle);
+
+        // --- CHINESE WHEELBARROW WAGON CHASSIS ---
+        ctx.save();
+        ctx.translate(0, 3);
+
+        // Frame — back handles (near rider) to front bed (toward muzzle)
+        ctx.fillStyle = "#5d4037"; ctx.strokeStyle = "#3e2723"; ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(-3, -10);
+        ctx.lineTo(3, -10);
+        ctx.lineTo(3, CANNON_BED_Y);
+        ctx.lineTo(-3, CANNON_BED_Y);
+        ctx.closePath();
+        ctx.fill(); ctx.stroke();
+
+        // Wheel Strut / Axle Mount
+        ctx.fillRect(-2, CANNON_WHEEL_Y - 4, 4, 8);
+        ctx.strokeRect(-2, CANNON_WHEEL_Y - 4, 4, 8);
+
+        // The Central Wheel
+        let wheelRot = moving ? animFrame * 0.4 : 0;
+        ctx.save();
+        ctx.translate(0, CANNON_WHEEL_Y);
+        ctx.rotate(wheelRot);
+        ctx.fillStyle = "#4e342e"; ctx.strokeStyle = "#212121"; ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.arc(0, 0, 6, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+        ctx.strokeStyle = "#212121"; ctx.lineWidth = 1;
+        for (let w = 0; w < 4; w++) {
+            ctx.beginPath(); ctx.moveTo(-6, 0); ctx.lineTo(6, 0); ctx.stroke();
+            ctx.rotate(Math.PI / 4);
+        }
+        ctx.restore();
+        ctx.restore();
+
+        // Barrel — pointing down-screen, muzzle at the far end
+        ctx.fillStyle = "#424242"; ctx.strokeStyle = "#212121"; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(-2, 2); ctx.lineTo(-1.5, 20); ctx.lineTo(2.5, 20); ctx.lineTo(3, 2); ctx.fill(); ctx.stroke();
+        ctx.fillStyle = "#616161"; ctx.fillRect(-2.5, 20, 6, 3); // Muzzle ring
+
+        // Support hand holding the stock
+        ctx.fillStyle = "#ffccbc"; ctx.beginPath(); ctx.arc(2, 10, 2, 0, Math.PI * 2); ctx.fill();
+
+        // Muzzle flash & smoke — reaching down from the muzzle
+        if (isAttacking && cd > 270) {
+            ctx.fillStyle = "#fff176"; ctx.beginPath();
+            ctx.arc(0.5, 23, 3 + Math.random() * 2, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = "#ff5722"; ctx.beginPath();
+            ctx.arc(0.5, 25, 5 + Math.random() * 3, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = "rgba(180, 180, 180, 0.7)";
+            ctx.beginPath();
+            ctx.arc(-2, 30, 7 + Math.random() * 4, 0, Math.PI * 2);
+            ctx.arc(1, 35, 5 + Math.random() * 4, 0, Math.PI * 2);
+            ctx.fill();
+        }
+        // Reload sequence (swab -> ball -> ram) — same relative depths,
+        // now reaching down from the muzzle instead of sideways
+        else if (isAttacking && cycle < 0.55) {
+            let p = (cycle - 0.15) / 0.40;
+            let depth = Math.sin(p * Math.PI) * 15;
+            ctx.strokeStyle = "#546e7a"; ctx.lineWidth = 2;
+            ctx.beginPath(); ctx.moveTo(0.5, 23 - depth); ctx.lineTo(0.5, 33 - depth); ctx.stroke();
+        }
+        else if (isAttacking && cycle < 0.65) {
+            ctx.fillStyle = "#212121";
+            ctx.beginPath(); ctx.arc(-1 + Math.sin(cycle * 40) * 2, 22, 2, 0, Math.PI * 2); ctx.fill();
+        }
+        else if (isAttacking && cycle < 0.90) {
+            let p = (cycle - 0.65) / 0.25;
+            let depth = Math.sin(p * Math.PI) * 18;
+            ctx.strokeStyle = "#cfd8dc"; ctx.lineWidth = 2;
+            ctx.beginPath(); ctx.moveTo(0.5, 23 - depth); ctx.lineTo(0.5, 35 - depth); ctx.stroke();
+        }
+        else if (isAttacking && cycle < 0.99) {
+            let matchDip = Math.sin((cycle - 0.90) * 15) * 4;
+            ctx.strokeStyle = "#ff5722"; ctx.lineWidth = 1.5;
+            ctx.beginPath(); ctx.moveTo(-7 + matchDip, 4); ctx.lineTo(-2, 4); ctx.stroke();
+        }
+
+        ctx.restore();
+
+    } else {
     ctx.save();
     // Offset for the camel's back and apply bobbing
     ctx.translate(8.0 + recoil, gunY + (reducedBob || 0) + 8); 
@@ -1980,6 +2830,7 @@ let gLegSwing = moving ? Math.sin(animFrame * 0.4) * 2 : 0;
     }
 
     ctx.restore();
+    }
 }}
  else {
  
@@ -1993,19 +2844,57 @@ let gLegSwing = moving ? Math.sin(animFrame * 0.4) * 2 : 0;
         let thrustX = 0;
         let thrustY = 0;
 
+        // ═══════════════════════════════════════════════════════════
+        // DOWNWARD FACING (facingDirY===1) — ported this session.
+        // This is the main cavalry melee weapon, analogous to
+        // infantry's spearman branch in infscript.js. The shaft/tip/
+        // highlight/hand SHAPE code below is completely unchanged —
+        // only a base rotation offset is added, same trick used for
+        // infscript.js's peasant and two_handed branches.
+        //
+        // The shaft is drawn along local +X (moveTo/lineTo using
+        // thrustX added directly to the X coordinate), so adding a
+        // fixed +90° (Math.PI/2) base rotation redirects that whole
+        // local +X axis to point down-screen instead of sideways —
+        // including the THRUST phase (cycle >= 0.66, the final hit of
+        // the 3-hit combo), where thrustX currently pushes the tip
+        // forward along local X: with the +90° base applied, that same
+        // push now correctly lands on screen-Y (reaching toward the
+        // viewer) automatically, with no need to separately swap which
+        // axis thrustX/thrustY land on (unlike the spearman/shortsword
+        // edits, which needed an explicit axis swap because those
+        // weren't already going through a shared rotation wrapper).
+        // The two "sway" phases (cycle<0.66, the wind-up swings before
+        // the final thrust) keep their existing lanceRot sway angle
+        // ADDED on top of the new base, so the same 3-hit combo feel
+        // (sway one way, sway the other, then thrust) carries over,
+        // now oriented toward the viewer instead of to the side.
+        //
+        // NOT touched: the mount (horse) itself stays in normal side
+        // view per the user's explicit simplification — only this
+        // rider-held weapon redirects.
+        // ═══════════════════════════════════════════════════════════
+        const lanceBaseRot = facingDown ? DOWN_QUADRANT_ANGLE : 0;
+
         if (isAttacking) {
             // 3-Hit Combo System
             if (cycle < 0.33) {
                 let p = cycle / 0.33;
-                lanceRot = -Math.PI / 4 * Math.sin(p * Math.PI); 
+                lanceRot = lanceBaseRot + (-Math.PI / 4 * Math.sin(p * Math.PI));
             } else if (cycle < 0.66) {
                 let p = (cycle - 0.33) / 0.33;
-                lanceRot = Math.PI / 3 * Math.sin(p * Math.PI); 
+                lanceRot = lanceBaseRot + (Math.PI / 3 * Math.sin(p * Math.PI));
             } else {
                 let p = (cycle - 0.66) / 0.34;
+                lanceRot = lanceBaseRot;
                 thrustX = Math.sin(p * Math.PI) * 18; 
                 thrustY = Math.sin(p * Math.PI) * 3;
             }
+        } else {
+            // Idle (not attacking): still needs the base offset applied,
+            // or the couched lance would rest pointing sideways while
+            // the unit is otherwise posed facing the camera.
+            lanceRot = lanceBaseRot;
         }
 
         // --- RENDER LANCE ---
@@ -2047,5 +2936,18 @@ let gLegSwing = moving ? Math.sin(animFrame * 0.4) * 2 : 0;
     } // Closes the final 'else' weapon block
 
     ctx.restore(); // 2. Restores the Rider's 'bob' and elevation layer 
+
+// Backshot z-order: for facing-up, low-armor-tier riders, the body was
+// deliberately NOT drawn earlier (see useBackView above) — draw it now,
+// on top of everything the weapons-logic section above just drew, so
+// the weapon reads as held behind/away from the viewer. Every other
+// rider already drew its body before the weapons logic and does
+// nothing here. No early-return branches exist in this file's weapons
+// logic (unlike infscript.js's archer/crossbow melee fallbacks), so
+// this single call at the true end of the function is sufficient —
+// nothing else to guard against.
+if (useBackView) {
+    drawRiderBody();
+}
 
 }

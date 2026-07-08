@@ -789,6 +789,17 @@
     _stopLazy() {
       if (typeof stopLazyGeneral === 'function') stopLazyGeneral();
     },
+    // NEW: called once an order/formation/move command has actually been
+    // issued (never on a failed "Select units first" early-return — that's
+    // not a real command). Only flips the robot button back to manual; it
+    // must NOT touch unit orders here, since the order was just given via
+    // the normal path above this call and must stand as issued. Player can
+    // press the robot button again any time to re-enable it.
+    _revertRobot() {
+      if (W.MC3TacticalAI && typeof W.MC3TacticalAI.revertToManualOnCommand === 'function') {
+        W.MC3TacticalAI.revertToManualOnCommand();
+      }
+    },
     _safe(x, y, m) {
       return (typeof getSafeMapCoordinates === 'function')
         ? getSafeMapCoordinates(x, y, m || 50)
@@ -825,6 +836,7 @@
         u.reactionDelay    = Math.floor(Math.random() * 61) + 3;
       });
       if (typeof startLazyGeneral === 'function') startLazyGeneral();
+      this._revertRobot(); // real order issued — robot reverts to manual
       this._audio('charge');
     },
 
@@ -850,6 +862,7 @@
         u.x = s.x;
         u.y = s.y;
       });
+      this._revertRobot(); // real order issued — robot reverts to manual
       this._audio('ui_click');
     },
 
@@ -866,6 +879,7 @@
         u.formationTimer   = 240;
         u.reactionDelay    = Math.floor(Math.random() * 61) + 3;
       });
+      this._revertRobot(); // real order issued — robot reverts to manual
       this._audio('ui_click');
     },
 
@@ -888,6 +902,7 @@
       if (typeof calculateFormationOffsets === 'function') {
         calculateFormationOffsets(sel, style, cmd);
       }
+      this._revertRobot(); // real order issued — robot reverts to manual
       this._audio('ui_click');
     },
 
@@ -918,6 +933,7 @@
         u.formationTimer   = 240;
         u.reactionDelay    = Math.floor(Math.random() * 15) + 5;
       });
+      this._revertRobot(); // real formation command issued — robot reverts to manual
       this._audio('ui_click');
     },
 
@@ -940,6 +956,7 @@
         u.formationTimer = 120;
         u.reactionDelay  = Math.floor(Math.random() * 20) + 2;
       });
+      this._revertRobot(); // real move order issued — robot reverts to manual
       this._audio('ui_click');
     },
 
@@ -1000,6 +1017,18 @@
           u.target       = null;
         }
       });
+
+      // SURGERY: selecting units here never ran lazyTakeManualControl, so a
+      // unit frozen at siege start (disableAICombat/_lazyManual both true —
+      // see enterSiegeBattlefield) stayed frozen even after being selected
+      // and given an order: processTacticalOrders' very first line bails on
+      // disableAICombat before it ever looks at orderType. Selection must
+      // clear both flags the same way battlefield_commands.js's own
+      // group-select does, or orders from this control scheme silently do
+      // nothing.
+      if (typeof lazyTakeManualControl === 'function') {
+        lazyTakeManualControl(all.filter(u => u.selected));
+      }
 
       this._stopLazy();
       this._audio('ui_click');
@@ -2096,6 +2125,13 @@ if (_didMove) {
       const all = G.allPlayerUnits();
       all.forEach(u => u.selected = false);
       grpUnits.forEach(u => u.selected = true);
+      // SURGERY: same fix as the numeric-key handler above — without this,
+      // units frozen at siege start (disableAICombat/_lazyManual) stayed
+      // frozen after being selected via a group card, and any order given
+      // afterward was silently swallowed by processTacticalOrders.
+      if (typeof lazyTakeManualControl === 'function') {
+        lazyTakeManualControl(grpUnits);
+      }
       if (typeof AudioManager !== 'undefined') AudioManager.playSound?.('ui_click');
     },
 
@@ -2541,6 +2577,10 @@ _applyBoxSelect(x1, y1, x2, y2) {
 
       const inBattle = G.isBattle();
       const inMenu   = G.isMenuOpen();
+      // During naval battles (ocean/coastal), hide all land-battle RTS controls.
+      // Ship is controlled via the mobile helm joysticks; formation orders are irrelevant.
+      const isNaval  = !!window.inNavalBattle && !window.inRiverBattle;
+      const inCamp   = !!(W.inCampMode);
       const root     = D.getElementById(ROOT);
 
       if (root) root.style.display = inMenu ? 'none' : '';
@@ -2551,17 +2591,24 @@ _applyBoxSelect(x1, y1, x2, y2) {
         return;
       }
 
+      // Hide the ↩️ return button while encamped; it reappears automatically
+      // once packUpCamp() finishes and inCampMode returns to false.
+      const pbtn = D.getElementById('mc3-pbtn');
+      if (pbtn) pbtn.style.display = inCamp ? 'none' : '';
+
+      // Keep joystick visible during naval for camera panning
       Joystick.setVisible(true);
 
       for (let i = 1; i <= 5; i++) {
         const g = D.getElementById(`mc3-g${i}`);
         if (g) g.style.display = inBattle ? '' : 'none';
       }
-['mc3-form-toggle', 'mc3-cmd-toggle', 'mc3-stack-btn'].forEach(id => {
+      ['mc3-form-toggle', 'mc3-cmd-toggle', 'mc3-stack-btn'].forEach(id => {
         const el = D.getElementById(id);
         if (el) el.style.display = inBattle ? '' : 'none';
       });
 
+      // Always close trays when not in battle
       if (!inBattle) {
         _closeTray('cmd');
         _closeTray('form');

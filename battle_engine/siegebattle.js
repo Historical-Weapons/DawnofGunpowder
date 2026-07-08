@@ -312,6 +312,16 @@ function enterSiegeBattlefield(enemyNPC, playerObj, cityObj) {
 	
     console.log(`INITIALIZING SIEGE BATTLE: ${cityObj.name}`);
     window.__SIEGE_AUTO_RETREAT_TRIGGERED__ = false;
+    // SURGERY: this was never reset between battles. If the player had
+    // breached a gate in ANY prior siege this session, this stayed true
+    // forever after, so a brand new siege — fresh gate, gateHP=1000,
+    // isOpen=false — would still read gateBreached=true from frame one via
+    // the `window.__SIEGE_GATE_BREACHED__ ||` short-circuit in
+    // processTacticalOrders, sending every siege_assault unit straight into
+    // the gate-funnel/charge logic before the gate had actually been
+    // touched. Confirmed root cause of "rush to plaza even though the
+    // southern gate is closed."
+    window.__SIEGE_GATE_BREACHED__ = false;
     
     // ADD THIS:
     window.inNavalBattle = false; 
@@ -393,9 +403,18 @@ if (typeof overheadCityGates !== 'undefined') {
 // 5. DEPLOY ARMIES
     let playerTroops = playerObj.troops || 0;
 
-    // ---> NEW: GLOBAL BATTLE SCALE <---
+    // ── FIX 4: Per-side cap with ratio preservation (siege) ─────────────────
+    // Mirrors the identical logic in enterBattlefield so the Settings UI
+    // maxSandboxBattleTroops slider works for siege battles too.
+    // Custom battles bypass via __IS_CUSTOM_BATTLE__ and keep the old formula.
     let totalCombatants = playerTroops + enemyNPC.count;
-    window.GLOBAL_BATTLE_SCALE = totalCombatants > 400 ? Math.ceil(totalCombatants / 300) : 1;
+    if (window.__IS_CUSTOM_BATTLE__) {
+        window.GLOBAL_BATTLE_SCALE = totalCombatants > 400 ? Math.ceil(totalCombatants / 300) : 1;
+    } else {
+        const _cap = Math.max(20, Math.min(300, window.maxSandboxBattleTroops || 100));
+        const _largerSide = Math.max(playerTroops, enemyNPC.count || 0);
+        window.GLOBAL_BATTLE_SCALE = (_largerSide > _cap) ? (_largerSide / _cap) : 1;
+    }
 
     deploySiegeAttackers(currentBattleData.playerFaction, playerTroops, "player");
     deploySiegeDefenders(faction, enemyNPC.count, "enemy", enemyNPC.roster);
@@ -406,32 +425,37 @@ if (typeof overheadCityGates !== 'undefined') {
         initSiegeRoofOverlay();
     }
 	
-    // --- NEW LOGIC: ASSIGN 20% FLY-SWARM AND COUNTER-BATTERY ROLES ---
-    let pUnitsForRoles = battleEnvironment.units.filter(u => u.side === "player" && !u.isCommander);
-    let validClimbers = pUnitsForRoles.filter(u => !u.stats?.isRanged && canUseSiegeEngines(u));
-    let rangedTroops = pUnitsForRoles.filter(u => u.stats?.isRanged || String(u.stats?.role).toLowerCase().includes("archer"));
-
-// Assign 10% of eligible melee to be Ladder Fanatics (minimum 4 guaranteed)
-    let fanaticCount = Math.max(4, Math.floor(validClimbers.length * 0.1));
-    for (let i = 0; i < fanaticCount; i++) {
-        let rIdx = Math.floor(Math.random() * validClimbers.length);
-        let u = validClimbers.splice(rIdx, 1)[0];
-        if (u) {
-            u.siegeRole = "ladder_fanatic";
-            u.orderType = "ladder_crew";
-            u.disableAICombat = true; // Ignore enemies, prioritize ladder entirely
+    // SURGERY: attackers start genuinely frozen — unselected, and excluded
+    // from both AI layers this codebase has:
+    //   - disableAICombat=true blocks ai_categories.js's processTargeting
+    //     (its very first line bails on this) and processTacticalOrders'
+    //     100px emergency survival override — the per-unit targeting layer.
+    //   - _lazyManual=true excludes them from getLivePlayers() in
+    //     autoAttack.js, so _runSiege/_runLand/the emergency guard-ring
+    //     never touch them — the macro AI layer.
+    // Both clear automatically the moment the player acts: a manual command
+    // goes through lazyTakeManualControl() (battlefield_commands.js), the
+    // auto-attack button goes through fireAuto() (autoAttack.js) — both
+    // updated to clear disableAICombat alongside _lazyManual.
+    battleEnvironment.units.forEach(u => {
+        if (u.side === "player" && !u.isCommander) {
+            u.selected = false;
+            u.disableAICombat = true;
+            u._lazyManual = true;
         }
-    }
+    });
 
-    // Assign 20% of eligible ranged to be Counter-Battery Snipers
-    let sniperCount = Math.floor(rangedTroops.length * 0.20);
-    for (let i = 0; i < sniperCount; i++) {
-        let rIdx = Math.floor(Math.random() * rangedTroops.length);
-        let u = rangedTroops.splice(rIdx, 1)[0];
-        if (u) {
-            u.siegeRole = "counter_battery";
-        }
-    }
+    // NOTE: ladder_fanatic / counter_battery role assignment used to happen
+    // right here, synchronously, the instant troops were deployed — before
+    // the player (or the auto-press timer below) had done anything. Since
+    // orderType="ladder_crew" is picked up immediately by ai_categories.js's
+    // processTargeting regardless of the auto-attack button, those units
+    // were walking to a ladder on their own at siege start — the confirmed
+    // source of "some units already moving with no command given." Moved to
+    // autoAttack.js's runAssignment() (see _runSiege), the one function that
+    // actually runs whether the assault starts from the timer below or a
+    // manual button press, so role assignment only happens the moment real
+    // automation begins, same as every other siege role.
     // -----------------------------------------------------------------
  
     // 6. CAMERA & AUDIO
@@ -465,12 +489,13 @@ if (typeof overheadCityGates !== 'undefined') {
     // to the player spawn point, causing archers to fire point-blank
     // from every direction the moment the loading screen cleared.
 
-    // ---> SURGERY: LAZY AUTO-SIEGE START <---
-    // Automatically order all troops to begin the assault so the player doesn't have to manually spam Q
-    let pUnits = battleEnvironment.units.filter(u => u.side === "player" && !u.isCommander && !u.disableAICombat);
-    if (typeof executeSiegeAssaultAI === 'function') {
-       // executeSiegeAssaultAI(pUnits);
-    }
+    // ---> SURGERY: LAZY AUTO-SIEGE START — REMOVED <---
+    // This used to arm a 1-3s randomized timer that pressed the auto-attack
+    // button on the player's behalf. Confirmed requirement now is the
+    // opposite: no automation fires on its own for siege attackers at all —
+    // see the disableAICombat/_lazyManual freeze pass above. The button
+    // still works exactly as before when the player actually clicks it
+    // (fireAuto() in autoAttack.js); nothing here calls it for them anymore.
 
     if (typeof AudioManager !== 'undefined') {
         AudioManager.init();
@@ -610,6 +635,83 @@ for (let i = 0; i < unitsToSpawn; i++) {
     }
 }
 
+// ============================================================================
+// INTERIOR OBSTACLE AVOIDANCE (post-breach: gate -> plaza/center)
+// ----------------------------------------------------------------------------
+// getSiegePathfindingVector (below) only ever handled ONE case: a unit
+// outside the wall heading for the gate/a ladder. Once a unit was actually
+// INSIDE the walls — which is exactly the post-breach "rush the plaza"
+// scenario — it fell straight back to a raw beeline vector with zero
+// building/wall avoidance. That's why units visibly walked straight into
+// houses and wall stubs and sat there until the reactive "stuck 90 ticks ->
+// briefly ghost through" extractor eventually bailed them out.
+// This is lightweight steering, not full A* pathfinding: sample a few points
+// along the intended heading. If clear, go straight (cheap — the common
+// case). If something solid (tile 2 = building, 6 = solid wall/stone,
+// 7 = tower base) is in the way, try a small fan of deflection angles and
+// take the first clear one, smallest deflection first. The chosen deflection
+// is cached for ~15 ticks per unit so it doesn't re-sample every frame and
+// doesn't visibly flip-flop between two directions.
+// ============================================================================
+function _isBlockedGroundTile(wx, wy) {
+    if (typeof battleEnvironment === 'undefined' || !battleEnvironment.grid) return false;
+    const tx = Math.floor(wx / BATTLE_TILE_SIZE);
+    const ty = Math.floor(wy / BATTLE_TILE_SIZE);
+    const col = battleEnvironment.grid[tx];
+    if (!col) return false;
+    const t = col[ty];
+    return t === 2 || t === 6 || t === 7;
+}
+
+function _siegePathIsClear(x, y, dx, dy, dist) {
+    const len = Math.hypot(dx, dy) || 1;
+    const ux = dx / len, uy = dy / len;
+    const steps = Math.min(5, Math.ceil(dist / 24));
+    for (let i = 1; i <= steps; i++) {
+        const sampleDist = Math.min(dist, i * 24);
+        if (_isBlockedGroundTile(x + ux * sampleDist, y + uy * sampleDist)) return false;
+    }
+    return true;
+}
+
+function _getInteriorAvoidanceVector(unit, dx, dy, dist) {
+    if (dist < 5) return { dx, dy, dist };
+
+    const frameNow = (typeof currentBattleData !== 'undefined' && currentBattleData) ? (currentBattleData.frames || 0) : 0;
+
+    // Reuse a recent steering decision instead of resampling every frame.
+    if (unit._siegeAvoidUntil && unit._siegeAvoidUntil > frameNow) {
+        const len = Math.hypot(dx, dy) || 1;
+        const newAngle = Math.atan2(dy, dx) + (unit._siegeAvoidAngle || 0);
+        return { dx: Math.cos(newAngle) * len, dy: Math.sin(newAngle) * len, dist };
+    }
+
+    if (_siegePathIsClear(unit.x, unit.y, dx, dy, dist)) {
+        unit._siegeAvoidAngle = 0;
+        unit._siegeAvoidUntil = 0;
+        return { dx, dy, dist };
+    }
+
+    // Blocked — try a small fan of deflection angles (~20/40/63/86 degrees),
+    // smallest first, alternating sides so there's no permanent turn bias.
+    const baseAngle = Math.atan2(dy, dx);
+    const len = Math.hypot(dx, dy) || 1;
+    const candidates = [0.35, -0.35, 0.7, -0.7, 1.1, -1.1, 1.5, -1.5];
+    for (let i = 0; i < candidates.length; i++) {
+        const a = candidates[i];
+        const testAngle = baseAngle + a;
+        const tdx = Math.cos(testAngle) * len, tdy = Math.sin(testAngle) * len;
+        if (_siegePathIsClear(unit.x, unit.y, tdx, tdy, Math.min(dist, 80))) {
+            unit._siegeAvoidAngle = a;
+            unit._siegeAvoidUntil = frameNow + 15;
+            return { dx: tdx, dy: tdy, dist };
+        }
+    }
+    // Nothing clear nearby — fall back to the original heading; the existing
+    // applyStuckExtractor() is still there as a last-resort escape.
+    return { dx, dy, dist };
+}
+
 function getSiegePathfindingVector(unit, target, originalDx, originalDy, originalDist) {
     if (!inSiegeBattle || unit.side !== "player" || unit.onWall || unit.isClimbing || (unit.siegeRole && unit.siegeRole.includes('ladder'))) {
         return { dx: originalDx, dy: originalDy, dist: originalDist };
@@ -646,6 +748,12 @@ function getSiegePathfindingVector(unit, target, originalDx, originalDy, origina
             }
         }
     }
+
+    // Post-breach and already inside the walls: this is the "rush the
+    // center" case that previously had zero obstacle avoidance at all.
+    if (window.__SIEGE_GATE_BREACHED__ && unit.y < wallBoundaryY) {
+        return _getInteriorAvoidanceVector(unit, originalDx, originalDy, originalDist);
+    }
     
     return { dx: originalDx, dy: originalDy, dist: originalDist };
 }
@@ -681,7 +789,9 @@ siegeEquipment = { rams: [], trebuchets: [], mantlets: [], ladders: [], ballista
     // (Spawn Rams, Trebuchets, Mantlets, and Ladders as usual...)
     if (southGate) {
         siegeEquipment.rams.push({
-            x: midX, y: campY - 350, targetGate: southGate, hp: 1000, speed: 0.65, isBreaking: false,
+            // HP tripled (1000 -> 3000) so the ram survives long enough for a
+            // capped 5-unit crew to actually break the gate.
+            x: midX, y: campY - 350, targetGate: southGate, hp: 3000, speed: 0.65, isBreaking: false,
             shieldHP: 220, shieldMaxHP: 220, shieldW: 54, shieldH: 28, shieldOffsetX: 0, shieldOffsetY: -52
         });
     }
@@ -813,7 +923,7 @@ siegeEquipment.ladders.push({
         crewAssigned: [], // NEW: Track the dedicated pushers
         speed: 0.54,      //  ladder speed
         isDeployed: false,
-        hp: 300
+        hp: 900 // Tripled (300 -> 900) alongside the ram
     });
 }
 }

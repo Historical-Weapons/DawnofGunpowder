@@ -1,6 +1,6 @@
 // ============================================================================
 // RANDOM DIALOGUE — 13th Century Sinosphere Edition
-// Complete replacement of the old system.
+// v2.0 — 4-state relation-aware rewrite
 //
 // Design principles:
 //   • No "You again? What is it now?" — just say something new every time.
@@ -10,7 +10,7 @@
 //   • Two entry points:
 //       RandomDialogue.generate(context, npcRef)      → "What's on your mind?"
 //       RandomDialogue.generateHello(context, npcRef) → "Hello" / greeting
-//   • Class + relationship + force-ratio determine the pool.
+//   • Class + 4-state relation + force-ratio determine the pool.
 //   • All flavour is era-accurate to the medieval sinosphere (13th century).
 //
 // Context object expected by both methods:
@@ -20,9 +20,16 @@
 //     playerNumbers: number,  // total player troops
 //     npcNumbers:    number,  // NPC force count
 //     npcType:       string,  // "Civilian" | "Commerce" | "Bandit" | "Military" | "Patrol"
-//     isEnemy:       bool,
-//     isAlly:        bool
+//     relation:      string,  // "same" | "ally" | "peace" | "war"  (preferred)
+//     isEnemy:       bool,    // backward-compat fallback if relation absent
+//     isAlly:        bool     // backward-compat fallback if relation absent
 //   }
+//
+// Relation semantics:
+//   "same"  — NPC belongs to the player's own faction (subordinate / colleague)
+//   "ally"  — Different faction, formally allied (peer respect, NOT subordinate)
+//   "peace" — Neutral stranger: no alliance, no war
+//   "war"   — Active enemy
 // ============================================================================
 
 const RandomDialogue = (function () {
@@ -31,13 +38,11 @@ const RandomDialogue = (function () {
     // ── Utility ───────────────────────────────────────────────────────────────
     const rand = (arr) => arr[Math.floor(Math.random() * arr.length)];
 
-    // Per-NPC anti-repeat tracker. Keys are the npc object references themselves.
-    // Keeps the last ⌊N/2⌋ used lines out of the pool so picks stay fresh.
+    // Per-NPC anti-repeat tracker.
     const _historyMap = new WeakMap();
 
     function pickFresh(pool, npcRef) {
         if (!pool || pool.length === 0) return "...";
-        // If npcRef isn't a usable WeakMap key just pick at random
         if (!npcRef || typeof npcRef !== "object") return rand(pool);
 
         let seen = _historyMap.get(npcRef);
@@ -59,6 +64,17 @@ const RandomDialogue = (function () {
             playerDominates: ratio >= 3,
             npcDominates:    ratio <= 0.33
         };
+    }
+
+    // ── Relation resolver ──────────────────────────────────────────────────────
+    // Accepts the new "relation" string field; falls back to old booleans so
+    // any caller that hasn't been updated yet still works correctly.
+    function resolveRelation(context) {
+        if (context.relation) return context.relation;
+        // Backward compat: old callers set isAlly=true only for same faction
+        if (context.isEnemy) return "war";
+        if (context.isAlly)  return "same";
+        return "peace";
     }
 
     // ========================================================================
@@ -102,11 +118,11 @@ const RandomDialogue = (function () {
                 "Please forgive these poor farmers for blocking your road, General.",
             ],
             neutral: [
-                "Good day to you, General! Heaven must be pleased to see your banners.",
-                "Greetings, Lord. The road ahead was clear when we last passed it.",
-                "Well met, great General. We are but simple people heading to market.",
-                "Heaven bless your march, Commander. We get out of your way.",
+                "Good day, traveller. The road ahead was clear when we last passed it.",
+                "Greetings, Commander. We are but simple people heading to market.",
+                "Heaven bless your march, soldier. We get out of your way.",
                 "A fine day to meet such a distinguished force on the road, my Lord.",
+                "Well met, General. We mean no trouble and ask only for safe passage.",
             ],
             friendly: [
                 "Blessings upon your campaign, great General! May Heaven guide your blades!",
@@ -127,11 +143,11 @@ const RandomDialogue = (function () {
                 "I greet you humbly, Lord. The guild vouches for every item in these carts.",
             ],
             neutral: [
-                "Well met, General! Perhaps your quartermaster and I can talk business.",
-                "Good day, Lord. This merchant's caravan is at your service, should you need it.",
-                "Greetings, noble General. A man of your position must have fine tastes.",
-                "Honoured Commander, welcome. I trade in quality. What does your army need?",
-                "A pleasure, General. The roads feel safer with a host like yours about.",
+                "Well met, Commander. Perhaps your quartermaster and I can talk business.",
+                "Good day, traveller. This merchant's caravan passes with no ill intent.",
+                "Greetings, Commander. A man of your position must have fine tastes.",
+                "Honoured soldier, welcome. I trade in quality. What does your army need?",
+                "A pleasure, Commander. The roads feel safer with a host like yours about.",
             ],
             friendly: [
                 "Excellent fortune, General! I was hoping to cross paths with you.",
@@ -144,13 +160,24 @@ const RandomDialogue = (function () {
 
         // ── Military (軍士) ─────────────────────────────────────────────────
         military: {
-            ally: [
+            // Same faction — NPC is the player's own soldier
+            same: [
                 "Commander! Well met. The patrol went smoothly — nothing to report.",
                 "General, your column is a welcome sight. We hold this position on order.",
                 "Brother in arms! We were expecting your advance. The road is clear.",
                 "All present and ready, Commander. The flank is secure.",
                 "Well met, sir! The men are rested. We await your orders.",
                 "General, our scouts report clear skies to the north. You may advance.",
+            ],
+            // Different faction, formally allied — peer soldier, NOT subordinate
+            alliedForeign: [
+                "Well met, Commander. Our lords stand together — a fine thing in troubled times.",
+                "Allied colors! A welcome sight on this road. What news from your front?",
+                "Greetings, Commander. The alliance holds firm on our end.",
+                "Fellow soldier, different banner — well met. Safe march ahead.",
+                "Your banner is known to us as a friend. Ride freely through our lines.",
+                "Good to meet an allied force in the field. Our enemies have fewer friends than they thought.",
+                "We keep our blades pointed the same direction as yours, Commander. Well met.",
             ],
             enemy: [
                 "So you finally show your face. My scouts knew you were close.",
@@ -172,12 +199,21 @@ const RandomDialogue = (function () {
 
         // ── Patrol / City Guard (衛兵) ────────────────────────────────────
         patrol: {
-            ally: [
+            // Same faction
+            same: [
                 "All clear on this stretch, Commander. Good to see you.",
                 "The district is quiet today. No incidents to report, General.",
                 "We just finished our sweep. Good timing, sir. The road is clean.",
                 "The checkpoint is open for you, Commander. Safe passage ahead.",
                 "Greetings, sir. Nothing unusual on our patrol today.",
+            ],
+            // Different faction, formally allied
+            alliedForeign: [
+                "Allied banner — pass freely, Commander. We hold this road for our lord.",
+                "Well met. Our lords are in accord. Every courtesy extended to your forces.",
+                "Friendly colors on the road today. No inspection required. Safe travels.",
+                "We recognize your banner as a friend. The district is quiet. Pass freely, Commander.",
+                "Allied troops are always welcome through our patrol route. No delays for you.",
             ],
             enemy: [
                 "Stop right there. This is a controlled checkpoint.",
@@ -192,7 +228,7 @@ const RandomDialogue = (function () {
                 "Good day. Travel documents, please.",
                 "You have reached the district checkpoint. Weapons sheathed.",
                 "State your faction and destination. We log all armed movement here.",
-                "A routine stop, General. Nothing personal. Papers, please.",
+                "A routine stop, Commander. Nothing personal. Papers, please.",
             ]
         }
     };
@@ -206,7 +242,6 @@ const RandomDialogue = (function () {
 
         // ── Bandits (山賊) ───────────────────────────────────────────────────
         bandit: {
-            // Player force overwhelms the bandits (3:1+)
             outnumbered: [
                 "My Lord, we are just charcoal burners. Very dedicated charcoal burners.",
                 "Forgive these mountain folk, General. We are simple hunters. Of mushrooms.",
@@ -229,7 +264,6 @@ const RandomDialogue = (function () {
                 "We were just leaving! The fog is thick and the hills are calling us home.",
                 "Heaven watches over the righteous, General. And you appear very righteous indeed.",
             ],
-            // Bandits have the numbers or equal footing
             confident: [
                 "Your purse is looking heavy today, General. Share the weight with the mountains.",
                 "A fine convoy and a thin escort. The heavens must smile on us today, brothers.",
@@ -256,7 +290,6 @@ const RandomDialogue = (function () {
 
         // ── Civilians (百姓 — common people, farmers) ─────────────────────
         civilian: {
-            // Enemy faction or player hopelessly outnumbered
             fearful: [
                 "This lowly one prostrates before the Great General. Please spare our stores.",
                 "Great Lord, we have already paid our summer taxes to the magistrate's office!",
@@ -279,30 +312,29 @@ const RandomDialogue = (function () {
                 "We offer what little we have. Please do not take the cart. It is all we own.",
                 "This foolish one spoke out of turn. Forgive me, great General.",
             ],
-            // Balanced or unclear relationship
+            // Neutral stranger — no assumed affiliation, no fame assumed
             neutral: [
-                "The river road is flooded again this season. Take the mountain path, General.",
+                "The river road is flooded again this season. Take the mountain path, Commander.",
                 "Have you heard news from the capital? They say the Emperor holds court again.",
                 "The price of grain has risen sharply since the southern campaign began.",
                 "A large host like yours must cost a fortune to feed every single day.",
                 "The local magistrate raised the salt tax again. Bitter times are ahead.",
                 "Crows have been circling the eastern pass for three days now. Ill omen.",
-                "The bridge upstream was washed out in last night's storm, General.",
+                "The bridge upstream was washed out in last night's storm, Commander.",
                 "We are taking this year's silk to market. Hoping the prices are fair.",
                 "The tea merchants say there is unrest near the northern passes again.",
                 "Lots of soldiers on the roads lately. Makes a simple farmer very nervous.",
                 "Bao the blacksmith says iron has tripled in price since spring. Hard times.",
                 "Wolves attacked the shepherd's flock in the hills again last week.",
-                "The river runs fast this year, General. The water spirits must be restless.",
+                "The river runs fast this year, Commander. The water spirits must be restless.",
                 "The Buddhist monks at the hilltop temple offer rice to passing armies.",
                 "Our village has forty men left after the levies. Half what we had before.",
                 "Have you passed through the market at Changping? The trading there is lively.",
-                "Safe travels, General. The northern road was clear as of this morning.",
+                "Safe travels, soldier. The northern road was clear as of this morning.",
                 "The mountain clans have been quiet lately. Perhaps the autumn peace holds.",
                 "Word from the east says the garrison was resupplied. Good news for everyone.",
                 "My son aspires to the civil examinations. We pray Heaven guides his brush.",
             ],
-            // Allied faction or player is a protector
             friendly: [
                 "Blessings upon your banners, Great General! May Heaven guide your campaign!",
                 "It is an honor to see such a righteous force on our road today.",
@@ -347,22 +379,22 @@ const RandomDialogue = (function () {
             ],
             neutral: [
                 "The silk road north is very active this season. Many Khaganate traders about.",
-                "Iron prices have tripled since the campaign started, General. Hard times for all.",
+                "Iron prices have tripled since the campaign started, Commander. Hard times for all.",
                 "I carry spices from the southern ports. Always a good market in the northern cities.",
-                "The tea tariff at the eastern pass is crushing honest trade this season, Lord.",
+                "The tea tariff at the eastern pass is crushing honest trade this season.",
                 "I hear the northern cities are paying very well for quality cotton right now.",
                 "A large army like yours has considerable appetite. Might you need provisions?",
-                "The trade winds favor the coastal route this season, General.",
+                "The trade winds favor the coastal route this season, Commander.",
                 "I just came from the capital market. Salt is scarce but silk still flows freely.",
                 "The war has been good for the arms merchants. Less so for the rest of us.",
                 "The river fords are clear south of here, if you need to move your wagons.",
                 "The southern guilds are offering very strong prices for northern amber right now.",
                 "Our warehouse in the city is well-stocked. Perhaps your quartermaster has need?",
-                "The mountain passes close in two moons, General. Make haste if you head north.",
+                "The mountain passes close in two moons, Commander. Make haste if you head north.",
                 "Porcelain is moving well this season. The western buyers cannot get enough of it.",
                 "Word from the harbor is three ships arrived from the south just last week.",
                 "A prudent lord knows that commerce fills the granaries as well as war does.",
-                "We trade in quality goods, General. Fair prices for honest dealings always.",
+                "We trade in quality goods, Commander. Fair prices for honest dealings always.",
                 "The local guild master has good standing with the garrison, should you need supplies.",
                 "I know a shortcut through the eastern valley that will save your column two days.",
                 "Whatever your cause, your quartermaster should speak with me before you leave.",
@@ -387,7 +419,8 @@ const RandomDialogue = (function () {
 
         // ── Military / Field Forces (軍隊) ─────────────────────────────────
         military: {
-            ally: [
+            // Same faction — subordinate soldiers, full command authority
+            same: [
                 "The northern flank is secured, General. Our cavalry patrol reported no movement.",
                 "We await your orders, Commander. The men are rested and ready for the march.",
                 "The supply convoy is three li behind us. We will make camp before nightfall.",
@@ -408,6 +441,29 @@ const RandomDialogue = (function () {
                 "The river crossing at the ford is clear, General. Ready for your advance.",
                 "Our foragers report the western fields are unharvested. The enemy retreated in haste.",
                 "For the realm! It is always an honor to share the field with your command.",
+            ],
+            // Different faction, formally allied — peer soldiers, no subordination
+            alliedForeign: [
+                "Our scouts share their reports freely with allied commands. The eastern ridge is clear.",
+                "The supply route we both rely on runs through the valley pass. We have it secured.",
+                "Between allied soldiers I can speak plainly — the enemy's numbers have been overreported.",
+                "Our lord sends his respects to your command, Commander. The alliance is honored in full.",
+                "We have been coordinating with your quartermasters. The eastern junction is prepared.",
+                "Your vanguard held well in the last engagement. Word travels between allied camps.",
+                "The terrain to the north offers an opportunity neither of our lords has exploited yet.",
+                "Intelligence flows freely between our commands. My captain's latest reports are yours.",
+                "When the campaign ends, there will be much to celebrate between our peoples.",
+                "The alliance is stronger for having soldiers like yours in the field, Commander.",
+                "We hold the western flank. If you need us to extend our patrol line, send a rider.",
+                "Your army's reputation precedes it. A pleasure to meet you as an ally rather than an obstacle.",
+                "Our patrol lines complement yours well. A sign our lords planned this alliance carefully.",
+                "A common enemy has a way of making good friends. I am glad our lords chose wisely.",
+                "We have had eyes on the southern road all week. Nothing concerning — and now neither do you.",
+                "Our lord tasked us with holding this sector. We are glad allied forces move through it safely.",
+                "What news from your flank, Commander? We share what we know across the alliance.",
+                "The combined strength of our lords is a serious deterrent. Our enemy has noticed.",
+                "My captain would welcome a meeting with your officers to coordinate the next advance.",
+                "Solid ground and good weather — a fine day to be on the same side, Commander.",
             ],
             enemy: [
                 "You march very far from your lord's protection, General. How admirably bold.",
@@ -457,7 +513,8 @@ const RandomDialogue = (function () {
 
         // ── Patrol / City Guard (衛兵 / 巡邏隊) ──────────────────────────
         patrol: {
-            ally: [
+            // Same faction
+            same: [
                 "All clear on this stretch of the road, Commander. Smooth passage ahead.",
                 "We chased off roaming bandits at dawn. The road is clear for your march.",
                 "The night watch was uneventful, General. Just a stray dog and some thick fog.",
@@ -474,6 +531,20 @@ const RandomDialogue = (function () {
                 "We arrested two suspected spies yesterday. They are with the interrogators now.",
                 "Safe travels ahead, sir. We will keep watch on your rear as you advance.",
                 "The road south was swept at first light. No trouble whatsoever, Commander.",
+            ],
+            // Different faction, formally allied
+            alliedForeign: [
+                "Allied forces are welcome to use this road freely, Commander.",
+                "Our patrol schedule is open to allied commands. Send word if you need our sweeps coordinated.",
+                "We share local intelligence with friendly forces — roads north and east have been clear all week.",
+                "The district has been informed of your presence. You are officially welcomed here.",
+                "Our lord's laws apply here, but allied soldiers receive every consideration under them.",
+                "Your passage is logged as allied friendly in our records. No delays for your column.",
+                "We have been keeping this district orderly for allied use. You will find it cooperative.",
+                "The locals along this road know your colors as friends. Expect no hostility from them.",
+                "We flagged suspicious activity near the south road yesterday — wanted to alert allied forces.",
+                "Our watchtowers spotted your camp fires last night. No alarm was raised — colors recognized.",
+                "If your foragers need the eastern fields, coordinate through us. It can be arranged.",
             ],
             enemy: [
                 "Your presence in this district has been noted and formally reported, General.",
@@ -499,24 +570,24 @@ const RandomDialogue = (function () {
             ],
             neutral: [
                 "State your business and destination for the road ledger, please.",
-                "How many are in your party, General? We are required to log all armed groups.",
+                "How many are in your party, Commander? We are required to log all armed groups.",
                 "Do you carry a valid travel permit for this district?",
                 "There is a road toll at the bridge ahead. Your quartermaster should be informed.",
                 "We enforce the local magistrate's decrees here. Your rank is noted but secondary.",
                 "Curfew falls at the second watch. See that your men are camped before then.",
-                "We are conducting a routine sweep. Please keep your weapons sheathed, General.",
+                "We are conducting a routine sweep. Please keep your weapons sheathed, Commander.",
                 "Do you carry any taxable goods in your wagons? We are required to ask.",
-                "No foraging within a li of the city walls. A standard local ordinance, General.",
+                "No foraging within a li of the city walls. A standard local ordinance, Commander.",
                 "We are neutral arbiters of the peace here. All must abide by the same rules.",
                 "The main gate closes at dusk. If you need entry after dark, speak to the captain.",
                 "Any disturbances in the market quarter carry heavy fines. Your men should know.",
                 "We have received complaints from local residents. Keep your soldiers on the road.",
-                "Anything to declare at this checkpoint, General?",
+                "Anything to declare at this checkpoint, Commander?",
                 "Movement after curfew requires a lantern pass. The prefect's office issues them.",
                 "We ask only that the peace be kept while you are in this district, nothing more.",
                 "There is an inspection fee for armed convoys crossing this region. Standard practice.",
                 "The laws of this district apply to all equally, regardless of one's lord's banner.",
-                "Move along when you are ready, General. Do not block the road for other travelers.",
+                "Move along when you are ready, Commander. Do not block the road for other travelers.",
                 "Your horses are not permitted inside the inner walls. The stables are to the east.",
             ]
         }
@@ -540,7 +611,7 @@ const RandomDialogue = (function () {
 
     function resolveGeneralPool(context) {
         const cls = classifyNPC(context);
-        const { isEnemy, isAlly } = context;
+        const rel = resolveRelation(context);
         const { playerDominates, npcDominates } = getOdds(context);
 
         if (cls.isBandit)   return playerDominates
@@ -548,26 +619,30 @@ const RandomDialogue = (function () {
                                 : GENERAL.bandit.confident;
 
         if (cls.isCivilian) {
-            if (isEnemy || npcDominates) return GENERAL.civilian.fearful;
-            if (isAlly  || playerDominates) return GENERAL.civilian.friendly;
+            if (rel === "war" || npcDominates)          return GENERAL.civilian.fearful;
+            if (rel === "same" || rel === "ally"
+                || playerDominates)                     return GENERAL.civilian.friendly;
             return GENERAL.civilian.neutral;
         }
 
         if (cls.isCommerce) {
-            if (isEnemy || npcDominates) return GENERAL.commerce.fearful;
-            if (isAlly  || playerDominates) return GENERAL.commerce.friendly;
+            if (rel === "war" || npcDominates)          return GENERAL.commerce.fearful;
+            if (rel === "same" || rel === "ally"
+                || playerDominates)                     return GENERAL.commerce.friendly;
             return GENERAL.commerce.neutral;
         }
 
         if (cls.isMilitary) {
-            if (isEnemy) return GENERAL.military.enemy;
-            if (isAlly)  return GENERAL.military.ally;
+            if (rel === "war")          return GENERAL.military.enemy;
+            if (rel === "same")         return GENERAL.military.same;
+            if (rel === "ally")         return GENERAL.military.alliedForeign;
             return GENERAL.military.neutral;
         }
 
         if (cls.isPatrol) {
-            if (isEnemy) return GENERAL.patrol.enemy;
-            if (isAlly)  return GENERAL.patrol.ally;
+            if (rel === "war")          return GENERAL.patrol.enemy;
+            if (rel === "same")         return GENERAL.patrol.same;
+            if (rel === "ally")         return GENERAL.patrol.alliedForeign;
             return GENERAL.patrol.neutral;
         }
 
@@ -577,7 +652,7 @@ const RandomDialogue = (function () {
 
     function resolveHelloPool(context) {
         const cls = classifyNPC(context);
-        const { isEnemy, isAlly } = context;
+        const rel = resolveRelation(context);
         const { playerDominates } = getOdds(context);
 
         if (cls.isBandit)   return playerDominates
@@ -585,26 +660,28 @@ const RandomDialogue = (function () {
                                 : HELLO.bandit.confident;
 
         if (cls.isCivilian) {
-            if (isAlly || playerDominates) return HELLO.civilian.friendly;
-            if (isEnemy)                   return HELLO.civilian.fearful;
+            if (rel === "same" || rel === "ally" || playerDominates) return HELLO.civilian.friendly;
+            if (rel === "war")                                        return HELLO.civilian.fearful;
             return HELLO.civilian.neutral;
         }
 
         if (cls.isCommerce) {
-            if (isEnemy)     return HELLO.commerce.fearful;
-            if (isAlly || playerDominates) return HELLO.commerce.friendly;
+            if (rel === "war")                                        return HELLO.commerce.fearful;
+            if (rel === "same" || rel === "ally" || playerDominates) return HELLO.commerce.friendly;
             return HELLO.commerce.neutral;
         }
 
         if (cls.isMilitary) {
-            if (isEnemy) return HELLO.military.enemy;
-            if (isAlly)  return HELLO.military.ally;
+            if (rel === "war")   return HELLO.military.enemy;
+            if (rel === "same")  return HELLO.military.same;
+            if (rel === "ally")  return HELLO.military.alliedForeign;
             return HELLO.military.neutral;
         }
 
         if (cls.isPatrol) {
-            if (isEnemy) return HELLO.patrol.enemy;
-            if (isAlly)  return HELLO.patrol.ally;
+            if (rel === "war")   return HELLO.patrol.enemy;
+            if (rel === "same")  return HELLO.patrol.same;
+            if (rel === "ally")  return HELLO.patrol.alliedForeign;
             return HELLO.patrol.neutral;
         }
 
@@ -641,37 +718,9 @@ const RandomDialogue = (function () {
 
         /**
          * No-op kept for API compatibility.
-         * State is now per-NPC via WeakMap rather than a shared session variable.
          */
         resetSession: function () {
             // Intentionally empty — the WeakMap cleans itself up with GC.
         }
     };
 })();
-
-
-// ============================================================================
-// PARLER_SYSTEM.JS  —  HELLO INTEGRATION PATCH
-// ============================================================================
-// The HELLO button in parler_system.js calls generateNPCDialogue(npc, "Hello")
-// which returns a single hardcoded string. Paste the block below over that
-// function (lines ~50–76 of parler_system.js) to route it through the new
-// RandomDialogue.generateHello pool instead.
-//
-//   function generateNPCDialogue(npc, choice) {
-//       if (choice !== "Hello") return "...";
-//       const isEnemy = player.enemies && player.enemies.includes(npc.faction);
-//       const isAlly  = npc.faction === player.faction;
-//       return RandomDialogue.generateHello({
-//           faction:       npc.faction,
-//           playerFaction: player.faction,
-//           playerNumbers: player.troops || 0,
-//           npcNumbers:    npc.count    || 0,
-//           npcType:       npc.role,
-//           isEnemy,
-//           isAlly
-//       }, npc);
-//   }
-//
-// No other changes to parler_system.js are required.
-// ============================================================================

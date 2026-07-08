@@ -104,8 +104,9 @@
 //               battleEnvironment.groundEffects (stuck arrows, blood)
 //               grows unbounded. In a 300-unit siege with towers firing
 //               every 80 ticks, it can reach 800+ entries. Every entry is
-//               drawn every frame. Hard-capped at PS6_GROUND_MAX = 120
-//               for siege; oldest entries are trimmed first.
+//               drawn every frame. Capped via window.siegeGroundEffectCap
+//               (90-140 by default, quality-scaled by the LOW/MED/HIGH/MAX
+//               preset tier); oldest entries are trimmed first.
 //               → Halves ground-effect render calls in late siege.
 //
 //  PS7 ★★★★☆  bgCanvas low-zoom throttle
@@ -117,15 +118,16 @@
 //               Static terrain doesn't move — nobody notices.
 //               → Eliminates 2/3 of the most expensive blit calls.
 //
-//  PS8 ★★★☆☆  Siege-context LOD tightening
-//               optimization-battles.js (PB1/PB2) uses a 400 px LOD
-//               threshold. A phone screen is 375 px wide; at battle zoom
-//               ~1.0 that means units just 25 px off-screen still get
-//               full sprites. In siege the camera is always facing the
-//               wall — units to the side are never the focus.  PS8
-//               temporarily reduces the LOD threshold to 260 px while
-//               inSiegeBattle is true.
-//               → ~15 % more units rendered as cheap dots.
+//  PS8 — RETIRED / SUPERSEDED. Used to write window.__pb_lod_sq expecting
+//               optimization-battles.js / optimization-mobile-battles.js to
+//               read it for siege-context LOD tightening; neither ever did
+//               (both compute LOD distance dynamically at call time), so
+//               this was a permanent no-op. The actual fix now lives
+//               directly inside MB2's _lodTier() in optimization-mobile-
+//               battles.js (mobile; active) and _shouldLOD() in this file's
+//               sibling optimization-battles.js (desktop; inert by design
+//               since desktop's LOD is always disabled at MAX quality).
+//               See the full explanation above _ps8_siegeLOD() below.
 //
 //  PS9 ★★★☆☆  Wall-clamping supplement (P8 compensation)
 //               P8 in optimization-sandbox.js throttles ALL of
@@ -201,20 +203,36 @@ var PS4_GATE_INTERVAL     = 20;
 var PS5_CULL_DIST         = 700;
 var PS5_CULL_DIST_SQ      = PS5_CULL_DIST * PS5_CULL_DIST;
 var PS5_CULL_EVERY        = 4;   // Only scan the projectile array every N frames
+
 // Siege-specific projectile cap (lower than P9's 100/180).
 // During a ram charge + ladder assault + trebuchet volley, every ranged
 // unit fires at once and the array fills in seconds.
-var PS5_PROJ_CAP          = IS_NATIVE ? 60 : 90;
+//
+// QUALITY-SCALED (v1.1): previously a fixed IS_NATIVE ? 60 : 90. Now reads
+// window.siegeProjectileCap live so the LOW/MED/HIGH/MAX preset tiers in
+// settings_ui.js can adjust it without a page reload. Falls back to the
+// original platform-fixed values if the settings system hasn't run yet.
+function _ps5_getProjCap() {
+    if (typeof window.siegeProjectileCap === 'number') return window.siegeProjectileCap;
+    return IS_NATIVE ? 60 : 90;
+}
 
 // PS6: Maximum ground effect entries during a siege.
-var PS6_GROUND_MAX        = IS_NATIVE ? 90 : 140;
+//
+// QUALITY-SCALED (v1.1): previously a fixed IS_NATIVE ? 90 : 140. Now reads
+// window.siegeGroundEffectCap live for the same reason as PS5 above.
+function _ps6_getGroundMax() {
+    if (typeof window.siegeGroundEffectCap === 'number') return window.siegeGroundEffectCap;
+    return IS_NATIVE ? 90 : 140;
+}
 
 // PS7: Below this zoom level the bgCanvas blit is throttled to 1-in-3 frames.
 var PS7_ZOOM_THRESHOLD    = 0.45;
 var PS7_BLIT_SKIP         = 3;
 
-// PS8: Tighter LOD distance for siege context (world-pixels).
-//      optimization-battles.js uses 400; siege uses 260.
+// PS8: RETIRED — see _ps8_siegeLOD() below for why and where this logic
+//      actually lives now. Constants kept only so nothing that might still
+//      reference them by name breaks; they are no longer used by _ps8_siegeLOD.
 var PS8_SIEGE_LOD_PX      = 260;
 var PS8_SIEGE_LOD_SQ      = PS8_SIEGE_LOD_PX * PS8_SIEGE_LOD_PX;
 
@@ -524,8 +542,9 @@ function _ps5_projectileCull() {
         }
 
         // Apply siege cap — trim oldest entries from front
-        if (projs.length > PS5_PROJ_CAP) {
-            projs.splice(0, projs.length - PS5_PROJ_CAP);
+        var projCap = _ps5_getProjCap();
+        if (projs.length > projCap) {
+            projs.splice(0, projs.length - projCap);
         }
     };
 }
@@ -558,7 +577,7 @@ function _ps6_groundEffectsCap() {
             writable: true,
             value: function () {
                 // Only enforce the cap during siege battles
-                if (window.inSiegeBattle && this.length >= PS6_GROUND_MAX) {
+                if (window.inSiegeBattle && this.length >= _ps6_getGroundMax()) {
                     this.splice(0, PS6_TRIM_COUNT); // Evict oldest effects
                 }
                 return _nativePush.apply(this, arguments);
@@ -616,42 +635,35 @@ function _ps7_bgCanvasLowZoom() {
 
 
 // ════════════════════════════════════════════════════════════════════════
-//  PS8  SIEGE-CONTEXT LOD TIGHTENING  ★★★☆☆
+//  PS8  SIEGE-CONTEXT LOD TIGHTENING  — RETIRED / SUPERSEDED
 // ════════════════════════════════════════════════════════════════════════
 //
-//  optimization-battles.js (PB1/PB2) defines PB_LOD_DIST_PX = 400 and
-//  exposes it via window.__pb_lod_sq for external override.
-//  In siege the camera almost never pans far east/west (the wall is a
-//  horizontal strip), so units 260+ px from the player are typically
-//  off the left/right sides of a phone screen anyway.
+//  BUG FOUND DURING AUDIT: this patch wrote to window.__pb_lod_sq expecting
+//  optimization-battles.js (desktop _shouldLOD()) and optimization-mobile-
+//  battles.js (MB2's _lodTier()) to read it. Neither ever did — both
+//  compute their LOD distance dynamically from desktopBattleQuality /
+//  mobileBattleQuality at call time, and window.__pb_lod_sq was never
+//  referenced anywhere outside this function. PS8 has therefore been a
+//  complete no-op for as long as that refactor has existed: it set a
+//  property nothing read, then restored it to a value nothing had used.
 //
-//  PS8 checks for the window.__pb_lod_sq property (set by PB1/PB2) and
-//  reduces it to PS8_SIEGE_LOD_SQ while inSiegeBattle is true.
-//  A setInterval monitors the inSiegeBattle flag and restores the
-//  original value when the siege ends so field battles are unaffected.
+//  FIX: siege-context LOD tightening is now implemented directly inside
+//  the two real LOD functions —
+//    optimization-battles.js   _shouldLOD()   (desktop; inert in practice
+//                               since desktopBattleQuality is locked to 100,
+//                               which always disables LOD before reaching
+//                               the siege branch — desktop never had LOD)
+//    optimization-mobile-battles.js   MB2's _lodTier()   (mobile; ACTIVE —
+//                               tightens lodPx by ~25-30% during siege,
+//                               scaled per-tier same as everywhere else)
 //
-//  If optimization-battles.js is not loaded (__pb_lod_sq is undefined),
-//  this patch is a safe no-op.
+//  This function is kept as a documented no-op (rather than deleted) so a
+//  future search for "PS8" or "siege LOD" lands here and finds the real
+//  answer instead of silently vanishing.
 // ────────────────────────────────────────────────────────────────────────
 function _ps8_siegeLOD() {
-    // Expose the shared LOD override hook that optimization-battles.js
-    // checks. If that file uses a private var instead of a window property,
-    // this will fall through silently.
-    var _origLodSq = null;
-    var _lodMonitor = setInterval(function () {
-        var inSiege = (typeof inSiegeBattle !== 'undefined' && inSiegeBattle) ||
-                      window.inSiegeBattle;
-
-        if (inSiege && _origLodSq === null && window.__pb_lod_sq !== undefined) {
-            // Siege just started — tighten LOD
-            _origLodSq = window.__pb_lod_sq;
-            window.__pb_lod_sq = PS8_SIEGE_LOD_SQ;
-        } else if (!inSiege && _origLodSq !== null) {
-            // Siege ended — restore original LOD
-            window.__pb_lod_sq = _origLodSq;
-            _origLodSq = null;
-        }
-    }, 500); // Check every 0.5 s — low overhead
+    console.log('[OPT-SIEGE PS8] No-op — superseded. Siege LOD tightening now ' +
+                'lives inside MB2 (_lodTier) in optimization-mobile-battles.js. See comment above.');
 }
 
 
@@ -720,8 +732,28 @@ function _ps9_wallClampSupplement() {
             if (u.side === 'player' && !u.isCommander) {
                 if (u.y < wallY + 20 && !atLad && !atGate) {
                     u.y = wallY + 20;
-                    var dirX = (gateX > u.x) ? 1 : -1;
-                    u.x += dirX * 1.8;
+                    // BUGFIX: hasOrders alone is not a safe signal that the
+                    // player actually commanded this unit. The hard-freeze
+                    // in customsiegebattle.js sets hasOrders: false at siege
+                    // start, but hasOrders can flip true from many other
+                    // code paths (naval boarding gate, ladder pickup, morale
+                    // fleeing, etc.) without ever routing through the real
+                    // command system (executeSiegeAssaultAI / orderType).
+                    // Previously this block nudged ANY hasOrders-true unit
+                    // toward the gate every frame regardless of orderType or
+                    // the _lazyManual freeze flag, which produced a silent
+                    // gate-rush that looked like AI but was actually this
+                    // raw position clamp. Now it respects the same freeze
+                    // flag processTargeting's frozen guard trusts, and only
+                    // nudges units that hold an actual siege/engage order.
+                    if (
+                        !u._lazyManual &&
+                        u.hasOrders &&
+                        ["siege_assault", "move_to_point", "seek_engage"].indexOf(u.orderType) !== -1
+                    ) {
+                        var dirX = (gateX > u.x) ? 1 : -1;
+                        u.x += dirX * 1.8;
+                    }
                 }
             } else if (u.side === 'enemy') {
                 if (u.y > wallY - 20 && !atGate) {

@@ -1,4 +1,3 @@
-
 function drawSiegeCrewman(ctx, x, y, factionColor, facing = 1, pose = 0) {
     ctx.save();
     ctx.translate(x, y);
@@ -101,7 +100,35 @@ function drawSiegeCrewman(ctx, x, y, factionColor, facing = 1, pose = 0) {
 function renderSiegeEngines(ctx) {
     if (!inSiegeBattle) return;
 
-siegeEquipment.mantlets.forEach(m => {
+    // ── VIEWPORT CULLING (quality-gated) ────────────────────────────────────
+    // Previously this function drew every mantlet/ladder/ram/trebuchet/ballista
+    // unconditionally — dozens of canvas ops each, even when miles off-screen.
+    // _seOnScreen mirrors isOnScreen() in battlefield_launch.js (same camera
+    // rect + padding idea) but with a quality-scaled margin so LOW gets a
+    // tight, pixel-near cull (matches MB16's 0px margin philosophy) while
+    // MED/HIGH/MAX keep a generous buffer so engines don't pop in abruptly.
+    //
+    // Falls back to "always visible" if camera isn't available yet (e.g. very
+    // first frame), so this can never hide engines due to a timing race.
+    var _seMargin = 300; // desktop / MAX default
+    if (typeof window.mobileBattleQuality === 'number' &&
+        (typeof window.Capacitor !== 'undefined' || /\bwv\b/.test(navigator.userAgent) ||
+         window.AndroidInterface != null || /Android/.test(navigator.userAgent))) {
+        var _seQ = Math.max(0, Math.min(100, window.mobileBattleQuality));
+        _seMargin = _seQ < 40 ? 0 : _seQ < 80 ? 150 : 300;
+    }
+
+    function _seOnScreen(obj) {
+        if (typeof camera === 'undefined' || !camera) return true;
+        return (
+            obj.x > camera.x - _seMargin &&
+            obj.x < camera.x + camera.width + _seMargin &&
+            obj.y > camera.y - _seMargin &&
+            obj.y < camera.y + camera.height + _seMargin
+        );
+    }
+
+siegeEquipment.mantlets.filter(_seOnScreen).forEach(m => {
     if (m.hp <= 0) {
         // --- DESTROYED MANTLET RUBBLE --- splintered planks lying flat
         ctx.save();
@@ -175,7 +202,7 @@ siegeEquipment.mantlets.forEach(m => {
 // ============================================================================
 // In processSiegeEngines(), targetPixelY is wallPixelY + 15.
  
-siegeEquipment.ladders.forEach(l => {
+siegeEquipment.ladders.filter(_seOnScreen).forEach(l => {
     if (l.hp <= 0) {
 // --- DESTROYED LADDERTOWER (MATCHES ORIGINAL GEOMETRY) ---
         ctx.save();
@@ -364,7 +391,7 @@ ctx.fillRect(-18, -13, 36, 3);
     ctx.restore();
 });
 
-siegeEquipment.rams.forEach(r => {
+siegeEquipment.rams.filter(_seOnScreen).forEach(r => {
         ctx.save();
         ctx.translate(r.x, r.y);
 
@@ -531,7 +558,7 @@ let lunge = r.isBreaking ? Math.max(0, Math.pow(cycle, 9)) * 25 : 0;
         ctx.restore(); // Restore main ram coordinates
     });
          
-siegeEquipment.trebuchets.forEach(t => {
+siegeEquipment.trebuchets.filter(_seOnScreen).forEach(t => {
     if (t.hp <= 0) {
         // --- DESTROYED TREBUCHET RUBBLE ---
         ctx.save();
@@ -768,7 +795,7 @@ siegeEquipment.trebuchets.forEach(t => {
     
     }
 
-    // Optional: Small diegeEquipment.trebuchets.forEach(tust/tension marks at the ground points during firing
+    // Optional: small dust/tension marks at the ground points during firing
     if (isFiring && throwPhase < 0.5) {
         ctx.fillStyle = "rgba(255, 255, 255, 0.3)";
         ctx.beginPath();
@@ -810,7 +837,7 @@ ctx.restore();
 // ============================================================================
 // BALLISTA RENDERING (BIRDS-EYE)
 // ============================================================================
-siegeEquipment.ballistas.forEach(bal => {
+siegeEquipment.ballistas.filter(_seOnScreen).forEach(bal => {
 let rotAngle = bal.aimAngle !== undefined ? bal.aimAngle + Math.PI/2 : (bal.side === "enemy" ? Math.PI : 0);
 
     if (bal.hp <= 0) {

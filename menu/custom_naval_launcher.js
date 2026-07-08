@@ -1,4 +1,3 @@
-
 (function() {
 
     // =========================================================================
@@ -20,6 +19,10 @@
         if (typeof cleanupCustomSiege === 'function') cleanupCustomSiege();
         if (typeof cleanupNavalSailCanvas === 'function') cleanupNavalSailCanvas();
 
+        // Reset ship helm input so stale joystick state doesn't bleed
+        window._shipHelmInput = { dx: 0, dy: 0 };
+        window._shipRotateInput = { dx: 0, dy: 0 };
+
         if (typeof battleEnvironment !== 'undefined' && battleEnvironment) {
             battleEnvironment.units = [];
             battleEnvironment.projectiles = [];
@@ -27,6 +30,7 @@
             battleEnvironment.grid = null;
             battleEnvironment.bgCanvas = null;
             battleEnvironment.fgCanvas = null;
+            battleEnvironment.treeFrontCanvas = null;
             battleEnvironment.cityGates = [];
         }
 
@@ -62,6 +66,8 @@
         if (typeof keys !== 'undefined') {
             for (let k in keys) keys[k] = false;
         }
+        // Hide ship joysticks immediately on cleanup
+        if (window.NavalHelmUI) window.NavalHelmUI.clearNavalHelm();
     };
 
     // =========================================================================
@@ -72,10 +78,14 @@
 
         window.inNavalBattle = true;
         inBattleMode = true;
+        window.inBattleMode = true;  // === EXPLICIT: ensure mobile_ui can detect battle state ===
         zoom = 0.1;
 
-        BATTLE_WORLD_WIDTH = 4800;
-        BATTLE_WORLD_HEIGHT = 3200;
+        // === NAVAL BATTLEFIELD 10x LARGER ===
+        // 50000×32000 = 1.6 billion sq units (≈10x the old 16000×10000 map)
+        // Ships start at 18% / 82% so there's a vast ocean to sail across.
+        BATTLE_WORLD_WIDTH = 50000;
+        BATTLE_WORLD_HEIGHT = 32000;
         BATTLE_COLS = Math.floor(BATTLE_WORLD_WIDTH / (typeof BATTLE_TILE_SIZE !== 'undefined' ? BATTLE_TILE_SIZE : 8));
         BATTLE_ROWS = Math.floor(BATTLE_WORLD_HEIGHT / (typeof BATTLE_TILE_SIZE !== 'undefined' ? BATTLE_TILE_SIZE : 8));
 
@@ -101,8 +111,8 @@
 // STEP 2: Apply custom ship sizes from GUI.
         const SHIP_DEFS = {
             LIGHT:  { width: 750,  height: 300, mastCount: 2, sailScale: 0.50, type: "Light Scout"  },
-            MEDIUM: { width: 1200, height: 480, mastCount: 3, sailScale: 0.48, type: "Medium Junk"   },
-            HEAVY:  { width: 1800, height: 660, mastCount: 3, sailScale: 0.74, type: "Heavy Dragon"  }
+            MEDIUM: { width: 1200, height: 480, mastCount: 2, sailScale: 0.48, type: "Medium Junk"   },
+            HEAVY:  { width: 1800, height: 660, mastCount: 2, sailScale: 0.74, type: "Heavy Dragon"  }
         };
 
         if (navalEnvironment.ships.length >= 2) {
@@ -115,6 +125,13 @@
             s0.mastCount = pS.mastCount;
             s0.sailScale = pS.sailScale;
             s0.type      = pS.type; 
+            // Ensure sailing properties survive the resize override
+            s0.heading   = s0.heading   ?? Math.PI * 1.5;
+            s0.speed     = s0.speed     ?? 0;
+            s0.maxSpeed  = s0.maxSpeed  ?? 2.5;
+            s0.sailTurnSpeed = 0.006;  // SLOW sail rotation — keep in sync with generateShips
+            s0.vx = 0; s0.vy = 0;
+            s0.isPlayerControlled = true;
 
             let s1 = navalEnvironment.ships[1]; // Enemy Ship
             s1.width     = eS.width;
@@ -122,26 +139,28 @@
             s1.mastCount = eS.mastCount;
             s1.sailScale = eS.sailScale;
             s1.type      = eS.type; 
+            s1.heading   = s1.heading   ?? Math.PI * 0.5;
+            s1.speed     = s1.speed     ?? 0;
+            s1.maxSpeed  = s1.maxSpeed  ?? 2.5;
+            s1.sailTurnSpeed = 0.006;  // SLOW sail rotation — keep in sync with generateShips
+            s1.vx = 0; s1.vy = 0;
+            s1.isPlayerControlled = false;
 
             // =====================================================================
             // FIX 6: DYNAMIC SHIP SPACING
             // Recalculates X/Y coordinates after the GUI resize override to prevent
             // the massive bounding boxes from overlapping in the center.
             // =====================================================================
-            let centerX = BATTLE_WORLD_WIDTH / 2;  // 2400
-            let centerY = BATTLE_WORLD_HEIGHT / 2; // 1600
+            let centerX = BATTLE_WORLD_WIDTH / 2;
             
-            // The physical water gap between the bows of the two ships.
-            // 250 is the standard campaign boarding distance.
-            let engagementGap = 250; 
-            
-            // Player faces North (-Y), placed at the bottom half of the map
+            // === EXTREME OPPOSITE ENDS ===
+            // Player at south 85%, enemy at north 15% of map height
+            // Margin from edge = 10% of ship height for safety
             s0.x = centerX;
-            s0.y = centerY + (s0.height / 2) + (engagementGap / 2);
+            s0.y = BATTLE_WORLD_HEIGHT * 0.82;  // player near south edge
             
-            // Enemy faces South (+Y), placed at the top half of the map
             s1.x = centerX;
-            s1.y = centerY - (s1.height / 2) - (engagementGap / 2);
+            s1.y = BATTLE_WORLD_HEIGHT * 0.18;  // enemy near north edge
         }
 
         // STEP 3: Clear lanes based on new (correct) ship geometry
@@ -207,13 +226,39 @@ player.maxHealth = pCmdr.maxHp;
         if (typeof triggerEpicZoom === "function") triggerEpicZoom(0.1, 1.5, 3500);
         else zoom = 0.8;
 
-        if (typeof startCustomBattleMonitor === 'function') startCustomBattleMonitor();
         window.isPaused = false;
 
         if (!window.__battleLoopStarted) {
             window.__battleLoopStarted = true;
             if (typeof draw === 'function') draw();
         }
+
+        // ── NAVAL JOYSTICK: force-show immediately + deferred fallbacks ──────
+        // forceNavalHelm is called synchronously here AND deferred to beat any
+        // timing race where NavalHelmUI wasn't ready yet at this exact moment.
+        (function _forceHelmWithFallbacks() {
+            function _tryForce() {
+                if (window.NavalHelmUI && window.inNavalBattle) {
+                    window.NavalHelmUI.forceNavalHelm();
+                }
+            }
+            _tryForce();                          // immediate
+            setTimeout(_tryForce, 100);           // after first RAF frame
+            setTimeout(_tryForce, 400);           // after first 250ms poll cycle
+            setTimeout(_tryForce, 1000);          // belt-and-suspenders at 1s
+        })();
+
+        // ── BATTLE MONITOR: delayed start so units are present on first tick ─
+        // Previously startCustomBattleMonitor ran immediately. Its first 250ms
+        // tick could fire before _customNavalDeckSpawn finished populating units,
+        // seeing pAlive=0 and eAlive=0 and calling leaveBattlefield() — which
+        // clears inNavalBattle=false and hides the joystick buttons.
+        // Delaying by 1500ms guarantees units are spawned and visible.
+        setTimeout(function() {
+            if (window.inNavalBattle && typeof startCustomBattleMonitor === 'function') {
+                startCustomBattleMonitor();
+            }
+        }, 1500);
     };
 
     // =========================================================================
@@ -223,11 +268,7 @@ player.maxHealth = pCmdr.maxHp;
     function _customNavalDeckSpawn(rosterArray, side, faction, color, ship) {
         if (!ship) return;
 
-        // FIX 5: Build the spawn list WITHOUT sort() before grid calculation.
-        // sort() was scrambling index order, pushing units to outer grid cells
-        // where they're closest to the hull edge and most likely to miss the
-        // safety check. Commander is prepended, then the user's roster in order.
-let spawnList = ["General", ...rosterArray];
+        let spawnList = ["General", ...rosterArray];
         let cols = Math.ceil(Math.sqrt(spawnList.length * (ship.width / ship.height)));
         if (cols < 1) cols = 1;
         let rows = Math.ceil(spawnList.length / cols);
@@ -239,52 +280,62 @@ let spawnList = ["General", ...rosterArray];
 
         const blockW = cols * spacingX;
         const blockH = rows * spacingY;
-        const startX = ship.x - (blockW / 2);
-        const startY = ship.y - (blockH / 2);
 
-        // FIX 2: Campaign-proven superellipse hull check.
-        // Uses only ship.width / ship.height — immune to s.type mismatches.
-        // Matches `pointInShip` in battlefield_launch.js exactly.
-        function _isOnDeck(px, py, s) {
-            const dx = px - s.x;
-            const dy = py - s.y;
-            const rx = s.width  / 2;
-            const ry = s.height / 2;
-            return (Math.pow(Math.abs(dx) / rx, 2.5) + Math.pow(Math.abs(dy) / ry, 2.5)) <= 0.90;
+        // Ship heading rotation — spawn positions must be rotated into world space
+        const _h   = ship.heading || 0;
+        const _cos = Math.cos(_h);
+        const _sin = Math.sin(_h);
+
+        // On-deck test in SHIP-LOCAL space (unrotated)
+        function _isOnDeckLocal(lx, ly) {
+            const rx = ship.width  / 2;
+            const ry = ship.height / 2;
+            return (Math.pow(Math.abs(lx) / rx, 2.5) + Math.pow(Math.abs(ly) / ry, 2.5)) <= 0.90;
         }
 
         spawnList.forEach((unitKey, i) => {
             let template = UnitRoster.allUnits[unitKey] || UnitRoster.allUnits["Militia"];
-let isCmdr   = (unitKey === "General");
+            let isCmdr   = (unitKey === "General");
 
             const row = Math.floor(i / cols);
             const col = i % cols;
 
-            let px = startX + (col * spacingX) + (spacingX / 2) + (Math.random() - 0.5) * (spacingX * 0.4);
-            let py = startY + (row * spacingY) + (spacingY / 2) + (Math.random() - 0.5) * (spacingY * 0.4);
+            // Calculate position in SHIP-LOCAL space (centered at 0,0, bow at +X)
+            let localX = -blockW/2 + (col * spacingX) + (spacingX / 2) + (Math.random() - 0.5) * (spacingX * 0.4);
+            let localY = -blockH/2 + (row * spacingY) + (spacingY / 2) + (Math.random() - 0.5) * (spacingY * 0.4);
 
-            // Tactical role positioning: ranged to front, cavalry to back
+            // Tactical role positioning along ship length (local X axis)
             const roleStr2 = String(template.role || "").toLowerCase();
-            const shiftAmt = ship.height * 0.05;
+            const shiftAmt = ship.width * 0.05;
             if (side === "player") {
-                if (roleStr2.includes("archer") || roleStr2.includes("crossbow") || roleStr2.includes("gun")) py -= shiftAmt;
-                if (roleStr2.includes("cavalry") || roleStr2.includes("horse")   || roleStr2.includes("mount")) py += shiftAmt;
+                if (roleStr2.includes("archer") || roleStr2.includes("crossbow") || roleStr2.includes("gun")) localX += shiftAmt;
+                if (roleStr2.includes("cavalry") || roleStr2.includes("horse")   || roleStr2.includes("mount")) localX -= shiftAmt;
             } else {
-                if (roleStr2.includes("archer") || roleStr2.includes("crossbow") || roleStr2.includes("gun")) py += shiftAmt;
-                if (roleStr2.includes("cavalry") || roleStr2.includes("horse")   || roleStr2.includes("mount")) py -= shiftAmt;
+                if (roleStr2.includes("archer") || roleStr2.includes("crossbow") || roleStr2.includes("gun")) localX -= shiftAmt;
+                if (roleStr2.includes("cavalry") || roleStr2.includes("horse")   || roleStr2.includes("mount")) localX += shiftAmt;
             }
 
-            // Safety net: jitter back onto deck if tactical shift pushed unit off hull
-            if (!_isOnDeck(px, py, ship)) {
-                for (let attempt = 0; attempt < 50 && !_isOnDeck(px, py, ship); attempt++) {
-                    px = ship.x + (Math.random() - 0.5) * (ship.width  * 0.20);
-                    py = ship.y + (Math.random() - 0.5) * (ship.height * 0.20);
+            // Safety net: jitter back onto deck if off hull (in local space)
+            if (!_isOnDeckLocal(localX, localY)) {
+                for (let attempt = 0; attempt < 50 && !_isOnDeckLocal(localX, localY); attempt++) {
+                    localX = (Math.random() - 0.5) * (ship.width  * 0.20);
+                    localY = (Math.random() - 0.5) * (ship.height * 0.20);
                 }
-                // Absolute fallback: dead center on the mast
-                if (!_isOnDeck(px, py, ship)) {
-                    px = ship.x;
-                    py = ship.y;
+                if (!_isOnDeckLocal(localX, localY)) {
+                    localX = 0; localY = 0; // dead center
                 }
+            }
+
+            // Rotate local → world and offset by ship center
+            let px = ship.x + localX * _cos - localY * _sin;
+            let py = ship.y + localX * _sin + localY * _cos;
+
+            // === ABSOLUTE SAFETY CLAMP ===
+            // Never spawn outside map bounds. If rotation pushed unit off-map,
+            // snap back to ship center. This prevents the "black abyss" bug.
+            if (px < 50 || px > BATTLE_WORLD_WIDTH - 50 || py < 50 || py > BATTLE_WORLD_HEIGHT - 50) {
+                px = ship.x;
+                py = ship.y;
             }
 
             let unitStats = Object.assign(new Troop(template.name, template.role, template.isLarge, faction), template);

@@ -632,6 +632,7 @@ if (target) { targetX = target.x; targetY = target.y; }
         targetY: targetY, 
         speed: speed,
         anim: Math.floor(Math.random() * 100), 
+        hairStyle: Math.floor(Math.random() * 5), // Song Dynasty hair — locked at spawn, never changes
         isMoving: true, 
         waitTimer: 0,
         battlingTimer: 0,   
@@ -668,6 +669,7 @@ function spawnBandit(padX, padY) {
         targetY: coords.y + (Math.random() - 0.5) * 400,
         speed: 0.45, 
         anim: Math.floor(Math.random() * 100), 
+        hairStyle: Math.floor(Math.random() * 5), // Song Dynasty hair — locked at spawn, never changes
         isMoving: true, 
         waitTimer: 0,
         battlingTimer: 0,   
@@ -705,6 +707,7 @@ function spawnMongolHorde(padX, padY) {
         targetY: coords.y + (Math.random() - 0.5) * 800,
         speed: 0.5, 
         anim: Math.floor(Math.random() * 100), 
+        hairStyle: Math.floor(Math.random() * 5), // Song Dynasty hair — locked at spawn, never changes
         isMoving: true, 
         waitTimer: 0,
         battlingTimer: 0,   
@@ -1424,6 +1427,9 @@ function updateNPCs(cities) {
 
                 let moveStep = Math.min(currentSpeed * terrainMod, 1); 
                 if (dist > 0) { npc.x += (dx / dist) * moveStep; npc.y += (dy / dist) * moveStep; }
+                // Track facing direction for sprite flip.
+                // Horse art faces LEFT natively → moving right needs flip (-1), left needs no flip (1).
+                if (Math.abs(dx) > 0.1) npc.facingDir = dx > 0 ? -1 : 1;
                 npc.isMoving = true; npc.anim += moveStep * 1.5; 
             }
         }
@@ -1551,6 +1557,13 @@ let distSq = dx * dx + dy * dy;
 
 // --- PASS 1: DRAW SPRITES ---
     visibleNPCs.forEach(npc => {
+        // Lazy hairStyle assignment — fires exactly once per NPC whose hairStyle
+        // was not stamped at spawn (e.g. NPCs loaded from an older save file).
+        // Math.random() is only called when hairStyle is null/undefined; after
+        // that the property is set and the check short-circuits, so there is
+        // zero flicker or per-frame randomness.
+        if (npc.hairStyle == null) npc.hairStyle = Math.floor(Math.random() * 5);
+
         // Safety check: Attempt to use TILE_SIZE, fallback to tSize if it doesn't exist
         let effectiveSize = (typeof TILE_SIZE !== 'undefined') ? TILE_SIZE : tSize;
 
@@ -1561,11 +1574,33 @@ let distSq = dx * dx + dy * dy;
         let useBoat = !tile || ["Coastal", "River", "Ocean", "Sea", "Deep Ocean"].includes(tile.name);
 
         if (useBoat) {
-            // Drawing the ship using the NPC's faction color
-            drawShipFunc(npc.x, npc.y, npc.isMoving, npc.anim, npc.color);
+            // Ship size scales with unit count — small scout vs large war fleet
+            let shipSize = npc.count || 50;
+            drawShipFunc(npc.x, npc.y, npc.isMoving, npc.anim, npc.color, shipSize);
         } else {
-            // Drawing the land caravan using the NPC's faction color
-            drawCaravanFunc(npc.x, npc.y, npc.isMoving, npc.anim, npc.color); 
+            let role = npc.role || "";
+
+            if (role === "Civilian") {
+                // Walking farmer — no horse, simple peasant look
+                if (typeof drawFarmerNPC === 'function') {
+                    drawFarmerNPC(npc.x, npc.y, npc.isMoving, npc.anim, npc.color, npc.faction, npc.hairStyle || 0);
+                } else {
+                    drawCaravanFunc(npc.x, npc.y, npc.isMoving, npc.anim, npc.color, null, npc.facingDir || 1, npc.hairStyle || 0);
+                }
+
+            } else if (role === "Commerce") {
+                // Merchant wagon (no horse) — centred, flips with movement direction
+                if (typeof drawCommerceWagonNPC === 'function') {
+                    drawCommerceWagonNPC(npc.x, npc.y, npc.isMoving, npc.anim, npc.color, npc.facingDir || 1);
+                } else {
+                    drawCaravanFunc(npc.x, npc.y, npc.isMoving, npc.anim, npc.color, null, npc.facingDir || 1, npc.hairStyle || 0);
+                }
+
+            } else {
+                // Military, Patrol, Bandit — mounted rider with Song Dynasty hair
+                // hairStyle is locked at spawn so it never flickers or changes mid-game
+                drawCaravanFunc(npc.x, npc.y, npc.isMoving, npc.anim, npc.color, npc.faction, npc.facingDir || 1, npc.hairStyle || 0);
+            }
         }
     });
 
@@ -1587,12 +1622,16 @@ let distSq = dx * dx + dy * dy;
 
         let displayText = (npc.isImportant ? "📜 " : "") + npc.role + statusIcon;
 
+        // Commerce wagons are now centred on npc.x (horse/tongue removed).
+        // No X-offset needed; all roles use npc.x directly.
+        const textX = npc.x;
+
         // Draw shadow/outline
         ctx.fillStyle = "rgba(0,0,0,0.8)";
-        ctx.fillText(displayText, npc.x + 1, npc.y - 24); 
+        ctx.fillText(displayText, textX + 1, npc.y - 24);
         // Draw main text
         ctx.fillStyle = npc.color;
-        ctx.fillText(displayText, npc.x, npc.y - 25);
+        ctx.fillText(displayText, textX, npc.y - 25);
     });
 
     // --- PASS 3: CONDITIONAL DETAILS ---
@@ -1605,16 +1644,19 @@ let distSq = dx * dx + dy * dy;
         let my = (typeof worldMouseY !== 'undefined') ? worldMouseY : 0;
         const isMouseOver = Math.hypot(npc.x - mx, npc.y - my) < 30;
 
+        // Same centre offset for the detail text below the label
+        const detailX = npc.x;
+
         if (distToPlayerSq < 40000 || isMouseOver || npc.battlingTimer > 0) {
             ctx.fillStyle = "#fff";
             let label = (npc.role === "Commerce" || npc.role === "Civilian") ? "People" : "Troops";
-            ctx.fillText(`${npc.count} ${label}`, npc.x, npc.y - 12);
+            ctx.fillText(`${npc.count} ${label}`, detailX, npc.y - 12);
             
             if (distToPlayerSq < 10000 || isMouseOver) {
                 ctx.fillStyle = "#ffd700";
-                ctx.fillText(`G: ${Math.floor(npc.gold)}`, npc.x - 14, npc.y - 35);
+                ctx.fillText(`G: ${Math.floor(npc.gold)}`, detailX - 14, npc.y - 35);
                 ctx.fillStyle = "#8bc34a";
-                ctx.fillText(`F: ${Math.floor(npc.food)}`, npc.x + 14, npc.y - 35);
+                ctx.fillText(`F: ${Math.floor(npc.food)}`, detailX + 14, npc.y - 35);
             }
         }
     });

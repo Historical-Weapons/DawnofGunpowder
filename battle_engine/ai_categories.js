@@ -61,13 +61,19 @@ function isSiegeRangedDefender(unit) {
 const AICategories = {
 
     cleanupDeadUnits: function(units, now) {
+        // Body lingering duration (ms) before a dead unit is removed from the
+        // battle. Tunable via the Graphics Quality settings (LOW/MED/HIGH/MAX).
+        // Default preserves the original hardcoded behaviour (1000ms) if the
+        // settings system hasn't initialised this global yet.
+        const lingerMs = (typeof window.bodyLingerMs === 'number') ? window.bodyLingerMs : 1000;
+
         return units.filter(u => {
             if (u.removeFromBattle) return false;
             if (u.hp <= 0) {
                 if (!u.deathTime) handleUnitDeath(u);
    
                 if (u.isCommander) return true;
-                return (now - u.deathTime) < 1000;
+                return (now - u.deathTime) < lingerMs;
             }
             return true;
         });
@@ -141,6 +147,16 @@ processMoraleAndFleeing: function(unit, pCount, eCount, currentBattleData) {
     }
 
     if (unit.stats.armor >= 30 && currentBattleData.frames < 18000) baseTick *= 0.01;
+    // SURGERY: "assault momentum" — significantly resist fleeing for the
+    // first 3 real minutes (10800 frames @ 60fps) of a siege, player
+    // attackers only. Same shape/magnitude as the armor protection directly
+    // above (99% decay reduction, not a hard floor — a unit that was
+    // already breaking before this window, or hits the hard-panic-from-
+    // casualties override below, can still flee; this only slows the climb
+    // toward that point). Scoped to attackers specifically, not defenders,
+    // and only while actually in a siege.
+    const inSiegeNow = typeof inSiegeBattle !== 'undefined' && inSiegeBattle;
+    if (inSiegeNow && unit.side === 'player' && currentBattleData.frames < 10800) baseTick *= 0.01;
     if (unit.stats.armor < 5 && unit.target && hpPct < 0.9 && !weOutnumberEnemy) baseTick += 0.02;
 
     // --- CASUALTY MORALITY DEBUFF ---
@@ -186,6 +202,17 @@ let inSiege = typeof inSiegeBattle !== 'undefined' && inSiegeBattle;
         return; 
     }
 
+    // GUARD: player seek_engage units are now fully owned by
+    // processTacticalOrders()/pickSmartCombatTarget() in battlefield_commands.js
+    // (smart wounded/flanking/isolation/focus-fire scoring). Without this,
+    // this file's own generic fallback scan further down still runs for them
+    // ~0.8% of frames and can silently stomp that smart pick back to a plain
+    // nearest-enemy target. Enemy seek_engage is untouched — it still falls
+    // through to the smart block right below.
+    if (unit.side === "player" && unit.orderType === "seek_engage") {
+        return;
+    }
+
     // ════════════════════════════════════════════════════════════════════════
     // ENEMY LAND AI: seek_engage handler (mirrors processTacticalOrders)
     // ════════════════════════════════════════════════════════════════════════
@@ -198,14 +225,118 @@ let inSiege = typeof inSiegeBattle !== 'undefined' && inSiegeBattle;
     // doesn't tag the unit with a stable target — causing the chaotic /
     // "dumb charge" behaviour.  This block ONLY runs in non-siege battles
     // (siege has its own dedicated defender targeting block further down).
+    //
+    // SMART TARGETING (v1.1): this runs every single frame, unthrottled, for
+    // the unit's entire remaining time in combat — including all the way
+    // through and after EnemyLandStrategyAI's CHARGING phase, which tears
+    // itself down after a single tick and never runs again. That makes THIS
+    // the only place that can deliver real ongoing battlefield intelligence
+    // (rout-chasing, target discrimination) for the rest of the fight; a
+    // one-shot decision made back in the strategic layer can't adapt as the
+    // battle evolves. Three biases are layered onto plain nearest-distance,
+    // land-battles only (naval has its own correct logic in _handleMovement
+    // and must not be touched here):
+    //   1. Prefer a target that's already FLEEING/WAVERING — denying a
+    //      routing unit the chance to rally is one of the most impactful
+    //      things a real battle AI does; a near-dead/broken unit is also
+    //      much less of a threat to actually trade blows with.
+    //   2. Prefer an angle that's already flanking (isFlanked() in
+    //      battlefield_logic.js is purely geometric — >120° from whatever
+    //      the target is currently facing — and mechanically halves their
+    //      defense in calculateDamageReceived). This is a real combat edge,
+    //      not cosmetic, so it's worth a nudge for every unit, not just cav.
+    //   3. Mounted/large units (cavalry) additionally avoid anti-cavalry
+    //      specialists (Firelance bonusVsLarge:25, Spearman/Pike:20 — the
+    //      highest anti-large punishes in the roster) and prefer the soft
+    //      ranged backline (archers/crossbow/hand-cannon, bonusVsLarge:0)
+    //      they can fight without being countered — "don't suicide charge
+    //      into the spear wall, go pick off the archers instead."
     if (unit.side === "enemy" && unit.orderType === "seek_engage" && !inSiege) {
-        let nearestDist = Infinity;
+        const isLandContext = !(typeof inNavalBattle !== 'undefined' && inNavalBattle);
+
+        let scannerIsMounted = false;
+        let scannerIsRanged  = false;
+        let scannerIsMelee   = false;
+        if (isLandContext) {
+            const _txt = String((unit.unitType || "") + " " + (unit.stats?.role || "") + " " + (unit.stats?.name || "")).toLowerCase();
+            scannerIsMounted = Boolean(unit.stats?.isLarge || unit.isMounted || /\b(cav|horse|mounted|camel|eleph|lancer)\b/.test(_txt));
+            scannerIsRanged  = !!(unit.stats?.isRanged);
+            scannerIsMelee   = !scannerIsRanged;
+        }
+
+        let bestScore = Infinity;
         let nearestEnemy = null;
         for (let i = 0; i < units.length; i++) {
             const other = units[i];
             if (other.side === "player" && other.hp > 0 && !other.isDummy) {
                 const d = Math.hypot(unit.x - other.x, unit.y - other.y);
-                if (d < nearestDist) { nearestDist = d; nearestEnemy = other; }
+                let score = d;
+
+                if (isLandContext) {
+                    // ── UNIVERSAL BONUSES (all unit types) ──────────────────
+                    // Prefer routing/wavering units — they die fast
+                    if (other.state === 'FLEEING' || other.state === 'WAVERING') score -= 280;
+
+                    // Prefer wounded targets (below 50% HP)
+                    const otherMaxHp = (other.stats && other.stats.health) ? other.stats.health : (other.maxHp || other.hp || 1);
+                    const otherHpPct = other.hp / otherMaxHp;
+                    if (otherHpPct < 0.5)  score -= 130;
+                    if (otherHpPct < 0.25) score -= 80; // stacking: very low HP is very juicy
+
+                    // Flanking bonus
+                    if (typeof isFlanked !== 'undefined' && isFlanked(unit, other)) score -= 90;
+
+                    // Slightly prefer isolated targets (no ally within 120px)
+                    let isIsolated = true;
+                    for (let k = 0; k < units.length; k++) {
+                        const ally = units[k];
+                        if (ally === other || ally.side !== 'player' || ally.hp <= 0) continue;
+                        if (Math.hypot(ally.x - other.x, ally.y - other.y) < 120) { isIsolated = false; break; }
+                    }
+                    if (isIsolated) score -= 100;
+
+                    // ── MOUNTED UNITS ────────────────────────────────────────
+                    if (scannerIsMounted) {
+                        const antiCav = Math.max(
+                            (other.stats && other.stats.bonusVsLarge) || 0,
+                            (other.stats && other.stats.antiLargeDamage) || 0
+                        );
+                        score += antiCav * 14; // Firelance(25)->+350, Spearman(20)->+280 effective-px penalty
+                        if (other.stats && other.stats.isRanged && !other.stats.isLarge && antiCav < 15) {
+                            score -= 110; // soft, squishy backline shooters are juicy, low-risk prey
+                        }
+                        // Extra flanking bonus for cavalry — they hit harder from the side
+                        if (typeof isFlanked !== 'undefined' && isFlanked(unit, other)) score -= 60; // stacking
+                    }
+
+                    // ── RANGED UNITS: avoid enemies already in melee, prefer open targets ──
+                    if (scannerIsRanged && !scannerIsMounted) {
+                        // Deprioritize targets already engaged with an ally (risk of friendly fire)
+                        const otherInMelee = (other.state === 'attacking' || other.state === 'moving') &&
+                            (() => {
+                                for (let k = 0; k < units.length; k++) {
+                                    const a = units[k];
+                                    if (a.side !== 'enemy' || a.hp <= 0 || a.isCommander) continue;
+                                    if (Math.hypot(a.x - other.x, a.y - other.y) < 45) return true;
+                                }
+                                return false;
+                            })();
+                        if (otherInMelee) score += 80; // prefer non-engaged targets
+
+                        // Prefer low-armor targets
+                        const otherArmor = (other.stats && other.stats.armor) || 0;
+                        if (otherArmor < 5)  score -= 70;
+                        if (otherArmor < 15) score -= 30;
+                    }
+
+                    // ── MELEE UNITS: prefer targets whose back is turned ────
+                    if (scannerIsMelee && !scannerIsMounted) {
+                        // Target is already fighting someone else = back is exposed = bonus
+                        if (other.state === 'attacking') score -= 60;
+                    }
+                }
+
+                if (score < bestScore) { bestScore = score; nearestEnemy = other; }
             }
         }
         if (nearestEnemy) {
@@ -325,7 +456,26 @@ if (inSiege && (unit.siegeRole === "treb_crew" || unit.siegeRole === "trebuchet_
 // ATTACKER COMMON GOAL (OVERHAULED FOR LADDERS & PLAZA)
             // ATTACKER COMMON GOAL
 if (unit.side === "player") {
-    
+
+    // 0. FROZEN GUARD: units held with _lazyManual (e.g. the hard-freeze at
+    // siege start, before the player presses the siege auto-attack button)
+    // must not be touched by this macro-targeting system at all.
+    if (unit._lazyManual) return;
+
+    // 0b. REQUIRE AN EXPLICIT COMMAND. This whole macro-targeting system
+    // used to run for every player unit by default and only bailed out for
+    // follow/retreat/hold_position (see the old hasManualCommand check
+    // below). That meant a completely fresh unit — hasOrders: false, never
+    // touched by the player — sailed straight through with nothing to stop
+    // it, and got auto-assigned to a ladder or gate rush on its own. Sieges
+    // should start with attackers doing nothing at all until the player
+    // gives an actual command (pressing the siege auto-attack button, which
+    // sets orderType = "siege_assault" via executeSiegeAssaultAI, or a
+    // direct move/seek order). No recognized command yet -> do nothing.
+    const hasEngageCommand = unit.hasOrders &&
+        ["siege_assault", "move_to_point", "seek_engage"].includes(unit.orderType);
+    if (!hasEngageCommand) return;
+
     // 1. Define who is "On Duty" (These units ignore your follow/retreat orders to finish the siege task)
     const isActiveCrew = ["ram_pusher", "ladder_carrier", "battering_ram", "engine_crew"].includes(unit.siegeRole);
 
@@ -605,13 +755,15 @@ if (unit.side === "player") {
 
 processAction: function(unit, battleEnv, currentBattleData, player) {
 
-// PERFORMANCE: Skip heavy AI for units not visible on screen.
-        // Exception: ladder/ram pushers must always process regardless of camera position.
-        const _isActivePusher = (unit.siegeRole === "ladder_fanatic" || unit.orderType === "ladder_crew");
-        if (!_isActivePusher && typeof camera !== 'undefined' && typeof isOnScreen === 'function' && !isOnScreen(unit, camera)) {
-            if (unit.cooldown > 0) unit.cooldown--;
-            return;
-        }
+// ---> REMOVED: camera-visibility AI skip <---
+// This used to early-return for any unit not currently on screen, which
+// meant off-camera units never got processAction (movement/combat) called
+// at all -- they sat completely frozen until the player zoomed/panned far
+// enough out for isOnScreen() to return true for them. isOnScreen() /
+// VIEW_PADDING is a RENDER-ONLY helper (see battlefield_launch.js /
+// optimization-battles.js) and must never gate simulation logic -- only
+// drawing (troop_draw.js already culls render the right way). Simulation
+// must keep running for every unit regardless of camera position.
 
 // ---> SURGERY: Evaluate the gate status FIRST before the ladder logic
         let southGate = (typeof battleEnvironment !== 'undefined' && battleEnvironment.cityGates) 
@@ -674,6 +826,37 @@ if (!isGateBreached && unit.side === "player" && unit.target && !unit.target.isD
                 return; 
             }
         }
+
+        // =========================================================
+        // ---> FIX: UNCOMMANDED SIEGE ATTACKER HARD FREEZE (ALL ROLES) <---
+        // =========================================================
+        // Root cause: with no orders yet, processTargeting()'s generic fallback
+        // scan still hands this unit a live unit.target (nearest enemy) purely
+        // from proximity/line-of-sight, and the "Land battles" block inside
+        // _handleMovement (unit.side === "player" && !unit.hasOrders, further
+        // down this file) then lets EVERY type creep toward that target with
+        // no siege check at all — melee close the whole distance to the gate,
+        // and even ranged units advance to their "auto-assigned position near
+        // the wall" (dist < 20 before it holds). That block was written for
+        // open-field battles, where "walk toward the enemy by default" is
+        // correct; it was never given a siege exclusion, so it fires here too.
+        // The cavalry_reserve freeze above is really just a special case of
+        // this same problem for one role. Fix: freeze every player siege unit
+        // outright — melee, ranged, gunpowder, cavalry alike — the instant it
+        // has no orders, before it ever reaches that fallback or _handleMovement.
+        // Land battles are completely untouched (inSiege gates this entirely),
+        // and this stands down the moment the player selects the unit and
+        // issues any real command (hasOrders flips true, orderType gets set —
+        // see executeSiegeAssaultAI / the Q-E-R-F handlers in
+        // battlefield_commands.js), at which point normal siege AI resumes.
+        if (inSiege && unit.side === "player" && !unit.hasOrders && !unit.isCommander) {
+            unit.vx = 0;
+            unit.vy = 0;
+            unit.state = "idle";
+            // Same stamina-regen courtesy as the cavalry freeze — resting, not fighting.
+            if (unit.stats.stamina < 100 && Math.random() > 0.9) unit.stats.stamina++;
+            return;
+        }
   
        // ---> SURGERY 2: THE COMBAT/ACTION HARD BLOCK <---
         // Kept the hard block ONLY for pure pacifist roles like ladder carriers
@@ -712,6 +895,12 @@ if (!isGateBreached && unit.side === "player" && unit.target && !unit.target.isD
             unit.isMounted ||
             /\b(cav|horse|mounted|camel|eleph|lancer)\b/.test(txt)
         );
+
+        // Horse archers / mounted ranged: must ALWAYS maintain gap unless out of ammo.
+        // This flag bypasses the stop-dead-to-shoot velocity zero further below so
+        // microLightCav's kite orderMove vectors actually execute frame-to-frame.
+        const isRangedCav = isMountedOrLarge && !!(unit.stats?.isRanged) &&
+            (unit.stats?.ammo > 0 || unit.ammo > 0);
 
         if (unit.target) {
             if (inSiege && unit.side === "player" && isMountedOrLarge) {
@@ -779,10 +968,16 @@ if (typeof unit.stats.updateStance === 'function') {
                 if (unit.stats.currentStance === "statusrange") {
                     
                     // ---> SURGERY: ALL ARCHERS STOP DEAD TO SHOOT <---
-                    unit.vx = 0;
-                    unit.vy = 0;
-                    // Force state to prevent the engine from jittering the animation if residual velocity exists
-                    unit.state = "attacking"; 
+                    // RANGED_CAV EXCEPTION: horse archers / mounted ranged keep their
+                    // velocity so microLightCav's kite orderMove actually executes.
+                    // They shoot while moving — that is the entire point of the unit type.
+                    // Only zero velocity for grounded ranged units.
+                    if (!isRangedCav) {
+                        unit.vx = 0;
+                        unit.vy = 0;
+                        // Force state to prevent the engine from jittering the animation if residual velocity exists
+                        unit.state = "attacking";
+                    }
                     // -----------------------------------------
                     
                 }
@@ -1031,6 +1226,26 @@ if (unit.isClimbing && unit.targetLadder) {
         let baseSpeed = unit.stats?.speed || 1;
         unit.vy = -Math.abs(baseSpeed * 1.4); 
 
+        // 3b. CLIMB EXIT: arrived at the wall-top landing.
+        // This is the other half of the real climb state machine — without
+        // this, isClimbing would never turn back off and the unit would climb
+        // forever. On arrival we snap exactly to the landing Y (no residual
+        // velocity carrying them past it), flip onWall on as the RESULT of a
+        // completed climb, and hand them a real order so nothing downstream
+        // treats them as "uncommanded" and shoves them back off the wall.
+        let _climbTargetY = (unit.climbTargetY != null) ? unit.climbTargetY
+            : (typeof SiegeTopography !== 'undefined' ? SiegeTopography.wallPixelY - 20 : unit.y - 20);
+        if (unit.y <= _climbTargetY) {
+            unit.y            = _climbTargetY;
+            unit.isClimbing   = false;
+            unit.onWall       = true;
+            unit.vy           = 0;
+            unit.ignoreSeparation = false;
+            unit.hasOrders    = true;
+            unit.orderType    = "seek_engage";
+            unit.target       = null; // let processTargeting acquire a real target now they're on the wall
+        }
+
         // 4. Hard Block: Prevent any other movement logic from running
         return;
 	}
@@ -1043,11 +1258,21 @@ if (unit.isClimbing && unit.targetLadder) {
 
             if (currentTile === 9) {
                 isOnLadderTile = true;
-                if (!unit.onWall && unit.side === "player") {
-                    unit.onWall = true;
-                    // THE POP: Throws them up onto the landing pad we just carved
-                    let safeWallY = typeof SiegeTopography !== 'undefined' ? SiegeTopography.wallPixelY : (unit.y - 40);
-                    unit.y = safeWallY - 20; 
+                // REAL CLIMB ENTRY (replaces the old instant teleport-to-wall-top
+                // "pop"). That pop skipped the climb animation entirely and left
+                // units standing on the wall with no real order, which is why
+                // they'd get knocked/walked back down by other systems (wall
+                // clamps, collision, re-targeting) a moment later — the unit
+                // never actually passed through a protected "climbing" state.
+                // Now touching the ladder base just starts a genuine multi-frame
+                // ascent via the isClimbing branch above, which locks the unit
+                // to the ladder rail and drives it straight up. See the matching
+                // exit condition inside that branch for how climbing ends.
+                if (!unit.onWall && !unit.isClimbing && unit.side === "player") {
+                    unit.isClimbing  = true;
+                    unit.targetLadder = unit.targetLadder || unit.target || { x: unit.x };
+                    let wallY = typeof SiegeTopography !== 'undefined' ? SiegeTopography.wallPixelY : (unit.y - 160);
+                    unit.climbTargetY = wallY - 20; // matches the old landing-pad Y
                 }
             }
             // ---> SURGERY: Safeguard 'onWall' stripping <---
@@ -1116,6 +1341,73 @@ else if (currentTile === 8 || currentTile === 10) unit.onWall = true;
             }
             else if (dist > 50) shouldHold = true; 
         }
+
+        // =========================================================
+        // NAVAL AI OVERRIDE - ENEMY TROOPS
+        // Enemy units hold on their ship until player ship is within 200px,
+        // then they attack. Swimming units are never frozen.
+        // =========================================================
+        if (typeof inNavalBattle !== 'undefined' && inNavalBattle &&
+            unit.side === 'enemy' && !unit.isCommander) {
+
+            // Find nearest player unit and player ship
+            var _nearestPlayer = null, _nearestPlayerDist = Infinity;
+            if (typeof battleEnvironment !== 'undefined' && battleEnvironment.units) {
+                battleEnvironment.units.forEach(function(pu) {
+                    if (pu.side !== 'player' || pu.hp <= 0) return;
+                    var _pd = Math.hypot(unit.x - pu.x, unit.y - pu.y);
+                    if (_pd < _nearestPlayerDist) { _nearestPlayerDist = _pd; _nearestPlayer = pu; }
+                });
+            }
+            var _playerShipDist = Infinity;
+            if (typeof navalEnvironment !== 'undefined' && navalEnvironment.ships) {
+                var _pShipObj = navalEnvironment.ships.find(function(s) { return s.side === 'player'; });
+                if (_pShipObj) _playerShipDist = Math.hypot(unit.x - _pShipObj.x, unit.y - _pShipObj.y);
+            }
+            var _threatDist = Math.min(_nearestPlayerDist, _playerShipDist);
+            var _isSwimming = unit.isSwimming || false;
+            var _isCav = isLargeUnit || String(unit.unitType || '').toLowerCase().includes('cav');
+            var _navalAggroRange = (window.NAVAL_AI_SETTINGS ? window.NAVAL_AI_SETTINGS.troopAggroRange : 200);
+
+            if (_isSwimming) {
+                // Swimming: unfreeze and seek nearest player
+                shouldHold = false;
+                if (_nearestPlayer) { unit.target = _nearestPlayer; unit.orderType = 'seek_engage'; }
+
+            } else if (_threatDist <= _navalAggroRange) {
+                // AGGRO: player ship/unit within aggro range - wake up and attack!
+                // BUGFIX: cavalry previously had its own unconditional freeze branch
+                // ABOVE this check ("paralysed to prevent drowning"), so it could
+                // never reach this aggro-range unfreeze at all — melee cavalry would
+                // stand frozen through an entire boarding action no matter how close
+                // the player got. Cavalry now shares the exact same aggro-range gate
+                // infantry already used correctly; it only differs in WHERE it holds
+                // (see the "else" hold branch below) so it still doesn't wander into
+                // the water and drown while waiting.
+                // Range is configurable via window.NAVAL_AI_SETTINGS.troopAggroRange (default 200px).
+                shouldHold = false;
+                if (_nearestPlayer) {
+                    unit.target = _nearestPlayer;
+                    unit.orderType = 'seek_engage';
+                    unit.hasOrders = true;
+                }
+
+            } else if (_isCav) {
+                // Cavalry out of aggro range: paralysed in place to prevent drowning.
+                // (Previously this was checked FIRST and unconditionally, before the
+                // aggro-range branch above ever got a chance to run for cavalry.)
+                shouldHold = true; unit.vx = 0; unit.vy = 0;
+
+            } else {
+                // Out of aggro range: hold position on deck
+                var _surf = typeof window.getNavalSurfaceAt === 'function'
+                    ? window.getNavalSurfaceAt(unit.x, unit.y) : 'DECK';
+                if (_surf === 'DECK' || _surf === 'PLANK') {
+                    shouldHold = true; unit.vx = 0; unit.vy = 0;
+                }
+            }
+        }
+
 			// =========================================================
 			// SIEGE MOVEMENT & ANTI-STUCK OVERHAUL
 			// =========================================================
@@ -1569,20 +1861,53 @@ _handleCombatExecution: function(unit, dx, dy, dist, battleEnv, player) {
 	},
 	
 	processProjectilesAndCleanup: function(battleEnvironment) {
-        // ---> 30 SECOND CLEANUP LOGIC <---
-        const THIRTY_SECONDS = 30000;
+        // ---> PROJECTILE/GROUND-EFFECT LINGER CLEANUP <---
+        // Duration (ms) that stuck arrows/bolts/javelins/stones remain visible
+        // on the ground or embedded in corpses before being removed. Tunable
+        // via the Graphics Quality settings (LOW/MED/HIGH/MAX). Default
+        // preserves the original hardcoded behaviour (30 seconds) if the
+        // settings system hasn't initialised this global yet.
+        const LINGER_MS = (typeof window.projectileLingerMs === 'number') ? window.projectileLingerMs : 30000;
         const nowTime = Date.now();
         let units = battleEnvironment.units;
 
         if (battleEnvironment.groundEffects) {
-            battleEnvironment.groundEffects = battleEnvironment.groundEffects.filter(g => (nowTime - g.timestamp) < THIRTY_SECONDS);
+            battleEnvironment.groundEffects = battleEnvironment.groundEffects.filter(g => (nowTime - g.timestamp) < LINGER_MS);
         }
 
         units.forEach(u => {
             if (u.stuckProjectiles) {
-                u.stuckProjectiles = u.stuckProjectiles.filter(sp => (nowTime - sp.timestamp) < THIRTY_SECONDS);
+                u.stuckProjectiles = u.stuckProjectiles.filter(sp => (nowTime - sp.timestamp) < LINGER_MS);
             }
         });
+
+        // ── NAVAL DECK TEST ──────────────────────────────────────────────────
+        // Returns the ship whose deck currently covers world point (x,y), or
+        // null if the point is over open water. Mirrors the rotated-superellipse
+        // on-deck test naval_battles.js already uses to decide which units ride
+        // along with a ship, so "is this point on the ship" agrees everywhere.
+        function _shipUnderPoint(x, y) {
+            if (!window.inNavalBattle || typeof navalEnvironment === 'undefined' || !navalEnvironment.ships) return null;
+            const swayX = navalEnvironment.shipSwayX || 0;
+            const swayY = navalEnvironment.shipSwayY || 0;
+            for (let k = 0; k < navalEnvironment.ships.length; k++) {
+                const s = navalEnvironment.ships[k];
+                const sx = s.x + swayX;
+                const sy = s.y + swayY;
+                const cosInv = Math.cos(-(s.heading || 0));
+                const sinInv = Math.sin(-(s.heading || 0));
+                const wx = x - sx;
+                const wy = y - sy;
+                const lx = wx * cosInv - wy * sinInv;
+                const ly = wx * sinInv + wy * cosInv;
+                const rx = s.width  * 0.55;
+                const ry = s.height * 0.55;
+                if ((Math.pow(Math.abs(lx) / rx, 2.5) + Math.pow(Math.abs(ly) / ry, 2.5)) <= 1.0) {
+                    return s;
+                }
+            }
+            return null;
+        }
 
 /* 4. UPDATE PROJECTILES (PHYSICS BASED COLLISION) */
         for (let i = battleEnvironment.projectiles.length - 1; i >= 0; i--) {
@@ -1612,7 +1937,19 @@ _handleCombatExecution: function(unit, dx, dy, dist, battleEnv, player) {
                 p.x < -200 || p.x > (typeof BATTLE_WORLD_WIDTH !== 'undefined' ? BATTLE_WORLD_WIDTH : 2000) + 200 ||
                 p.y < -200 || p.y > (typeof BATTLE_WORLD_HEIGHT !== 'undefined' ? BATTLE_WORLD_HEIGHT : 2000) + 200) {
 
-                if (isJavelin || isBolt || isArrow || isSlinger || isRocket || isBomb) {
+                // ── NAVAL WATER vs DECK CHECK ──────────────────────────────
+                // On naval maps, a projectile that runs out of range/flight
+                // normally lands in open water and should vanish immediately
+                // (no stuck decal — there's nothing solid for it to stick
+                // to). If it happens to land on a ship's deck instead, it
+                // sticks like normal and is tagged with the ship it landed
+                // on (+ a ship-local offset) so naval_battles.js's existing
+                // "drag things with the ship" pass can carry it along, the
+                // same way it already drags units standing on deck.
+                let landedOnShip = window.inNavalBattle ? _shipUnderPoint(p.x, p.y) : null;
+                let skipDecal = window.inNavalBattle && !landedOnShip;
+
+                if (!skipDecal && (isJavelin || isBolt || isArrow || isSlinger || isRocket || isBomb)) {
                     if (!battleEnvironment.groundEffects) battleEnvironment.groundEffects = [];
                     if (battleEnvironment.groundEffects.length < 400) {
 
@@ -1633,13 +1970,40 @@ _handleCombatExecution: function(unit, dx, dy, dist, battleEnv, player) {
                             landedAngle += (Math.random() > 0.5 ? 1 : -1) * (0.6 + Math.random() * 0.7);
                         }
 
-                        battleEnvironment.groundEffects.push({
+                        let ge = {
                             type: effectType,
                             x: landedX,
                             y: landedY,
                             angle: landedAngle,
-                            timestamp: Date.now()
-                        });
+                            timestamp: Date.now(),
+                            // FIX (ship flicker): freeze the visual-variant seed at
+                            // spawn time. Ship-stuck decals get x/y re-derived every
+                            // frame from the ship's sway/rock wobble (see naval_battles.js
+                            // section 7b) so they can track the moving deck — but if the
+                            // sprite-variant picker in drawStuckProjectileOrEffect() reads
+                            // its seed from that same live x/y, the variant changes every
+                            // frame and the decal flickers between sprites. Storing a
+                            // one-time seed here means the variant is picked once and
+                            // never changes again, while x/y stay free to update.
+                            seed: Math.random()
+                        };
+
+                        if (landedOnShip) {
+                            // Ship-local offset, captured at CURRENT heading so
+                            // naval_battles.js can re-derive world x/y every
+                            // frame as the ship moves/turns (same pattern used
+                            // for units riding the deck).
+                            const cosInv = Math.cos(-(landedOnShip.heading || 0));
+                            const sinInv = Math.sin(-(landedOnShip.heading || 0));
+                            const wx = landedX - landedOnShip.x;
+                            const wy = landedY - landedOnShip.y;
+                            ge.parentShip = landedOnShip;
+                            ge.shipLocalX = wx * cosInv - wy * sinInv;
+                            ge.shipLocalY = wx * sinInv + wy * cosInv;
+                            ge.shipLocalAngle = landedAngle - (landedOnShip.heading || 0);
+                        }
+
+                        battleEnvironment.groundEffects.push(ge);
                     }
                 }
 
@@ -1707,10 +2071,25 @@ _handleCombatExecution: function(unit, dx, dy, dist, battleEnv, player) {
                         // Bomb direct hits create craters directly under the unit (Always happens)
                         if (isBomb) {
                             if (!battleEnvironment.groundEffects) battleEnvironment.groundEffects = [];
-                            battleEnvironment.groundEffects.push({
+                            const craterGe = {
                                 type: "bomb_crater",
-                                x: p.x, y: p.y, angle: 0, timestamp: Date.now()
-                            });
+                                x: p.x, y: p.y, angle: 0, timestamp: Date.now(),
+                                seed: Math.random() // frozen seed — see note above on flicker fix
+                            };
+                            if (window.inNavalBattle) {
+                                const craterShip = _shipUnderPoint(p.x, p.y);
+                                if (craterShip) {
+                                    const cosInv = Math.cos(-(craterShip.heading || 0));
+                                    const sinInv = Math.sin(-(craterShip.heading || 0));
+                                    const wx = p.x - craterShip.x;
+                                    const wy = p.y - craterShip.y;
+                                    craterGe.parentShip     = craterShip;
+                                    craterGe.shipLocalX     = wx * cosInv - wy * sinInv;
+                                    craterGe.shipLocalY     = wx * sinInv + wy * cosInv;
+                                    craterGe.shipLocalAngle = -(craterShip.heading || 0);
+                                }
+                            }
+                            battleEnvironment.groundEffects.push(craterGe);
                         }
 
                         // 4. EXP and Audio Logic
@@ -1749,7 +2128,19 @@ _handleCombatExecution: function(unit, dx, dy, dist, battleEnv, player) {
             let minStickDist = (isArrow || isBolt) ? 100 : 30;
             let canHitStructure = distFlown >= minStickDist;
 
-            if (!hitMade && canHitStructure && typeof BATTLE_TILE_SIZE !== 'undefined' && battleEnvironment.grid) {
+            // ── NAVAL GUARD ──────────────────────────────────────────────────
+            // battleEnvironment.grid is reused on naval maps to hold purely
+            // COSMETIC water terrain (generateNavalMap(): 12=reef, 13=rocks,
+            // 14=algae, 15=dark water — scattered across open ocean via noise,
+            // nothing to do with ships). This block's tile===8/12 check means
+            // "walkway" on land/siege maps, so a projectile flying over a reef
+            // patch mid-flight (well before maxRange) was being misread as a
+            // walkway hit and stuck as a plain static {x,y} decal with no
+            // parentShip tag — bypassing the water-vs-deck / drag-with-ship
+            // logic in the range-miss branch above entirely. Walls, towers,
+            // walkways, and siege engines don't exist in naval battles, so
+            // this whole block is simply inert there.
+            if (!hitMade && canHitStructure && !window.inNavalBattle && typeof BATTLE_TILE_SIZE !== 'undefined' && battleEnvironment.grid) {
                 let ptx  = Math.floor(p.x / BATTLE_TILE_SIZE);
                 let pty  = Math.floor(p.y / BATTLE_TILE_SIZE);
                 let tile = (battleEnvironment.grid[ptx] && battleEnvironment.grid[ptx][pty] !== undefined)

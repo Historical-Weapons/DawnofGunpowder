@@ -302,6 +302,55 @@ updateCasualtyMoralePressure(units, currentBattleData);
             }
             // ---> END OVERRIDE <---
 
+            // ---> LAND BATTLE FLEEING OVERRIDE (ENEMY: UP OR SIDEWAYS, NEVER DOWNWARD) <---
+            // Enemies spawn near the TOP of the map and the player spawns near the
+            // BOTTOM (see battlefield_launch.js: spawnY = player ? height-30 : height*0.15),
+            // so "downward" for an enemy unit means fleeing toward/through the
+            // player's own lines and spawn rather than away from the fight.
+            //
+            // ai_categories.js's _handleBrokenFleeing/_handleWavering pick whichever
+            // of the four map edges is geometrically nearest, with no awareness of
+            // which side is "home." If an enemy unit gets pushed deep into player
+            // territory mid-battle, "nearest edge" can resolve to the BOTTOM edge —
+            // sending a routing unit further down, through the player's own army,
+            // instead of away from it. Only the bottom-edge case produces an
+            // escapePoint with y strictly greater than the unit's current y (the
+            // left/right branches leave y unchanged; the top branch decreases it),
+            // so checking escapePoint.y > unit.y is a precise, cheap detector for
+            // "the generic algorithm picked south" — no need to duplicate its full
+            // nearest-edge computation here, just redirect when it picks the one
+            // direction that's wrong for this side.
+            if (isFleeingOrWavering && unit.side === "enemy" &&
+                !(typeof inSiegeBattle !== 'undefined' && inSiegeBattle) &&
+                !(typeof inNavalBattle !== 'undefined' && inNavalBattle) &&
+                unit.escapePoint && unit.escapePoint.y > unit.y) {
+
+                const isWavering = (unit.state === "WAVERING");
+                // Match the padding convention each handler already uses for its
+                // OTHER three directions, so travel distance/speed feels identical
+                // regardless of which direction ends up chosen:
+                //   _handleBrokenFleeing (OUTER): padding = -2000 (runs off-map)
+                //   _handleWavering      (INNER): padding = 20    (hovers near edge)
+                const distToLeft  = unit.x;
+                const distToRight = BATTLE_WORLD_WIDTH - unit.x;
+                const distToTop   = unit.y;
+                const nearest = Math.min(distToLeft, distToRight, distToTop);
+
+                if (nearest === distToTop) {
+                    unit.escapePoint.y = isWavering ? 20 : -2000;
+                    // x stays as-is (already either unit.x or a jittered value)
+                } else if (nearest === distToLeft) {
+                    unit.escapePoint.x = isWavering ? 20 : -2000;
+                    unit.escapePoint.y = unit.y;
+                } else {
+                    unit.escapePoint.x = isWavering ? (BATTLE_WORLD_WIDTH - 20) : (BATTLE_WORLD_WIDTH + 2000);
+                    unit.escapePoint.y = unit.y;
+                }
+                // Kill any residual downward momentum so physics doesn't fight the redirect.
+                if (unit.vy > 0) unit.vy = 0;
+            }
+            // ---> END LAND OVERRIDE <---
+
             if (isFleeingOrWavering) return; // Skip normal targeting/combat if they are running away
         }
 		
@@ -328,6 +377,43 @@ updateCasualtyMoralePressure(units, currentBattleData);
         }
 		
 		
+        // =========================================================
+        // NAVAL BOARDING GATE
+        // Runs BEFORE processTargeting so orderType is correct when read.
+        // Pre-collision: freeze all non-commanders on deck.
+        // Post-collision: force seek_engage + triple stats.range so troops
+        // charge from across the full ship deck instead of standing still.
+        // =========================================================
+        if (window.inNavalBattle && !unit.isCommander) {
+            if (!window._navalBoardingTimer) {
+                const _surface = (typeof window.getNavalSurfaceAt === 'function')
+                    ? window.getNavalSurfaceAt(unit.x, unit.y) : 'DECK';
+                if (_surface === 'DECK' || _surface === 'EDGE') {
+                    unit.orderType        = 'hold_position';
+                    unit.hasOrders        = true;
+                    unit.orderTargetPoint = { x: unit.x, y: unit.y };
+                    if (Math.abs(unit.vx) > 0.2 || Math.abs(unit.vy) > 0.2) {
+                        unit.vx *= 0.2; unit.vy *= 0.2;
+                    }
+                    AICategories.processTargeting(unit, units);
+                    AICategories.processAction(unit, battleEnvironment, currentBattleData, player);
+                    if (unit.cooldown > 0) unit.cooldown--;
+                    return;
+                }
+            } else {
+                if (unit.orderType === 'hold_position' || unit.orderType === 'move_to_point') {
+                    unit.orderType        = 'seek_engage';
+                    unit.hasOrders        = true;
+                    unit.orderTargetPoint = null;
+                    unit.isPatrolling     = false;
+                }
+                if (unit.stats && unit.stats.range) {
+                    if (!unit._navalBaseRange) unit._navalBaseRange = unit.stats.range;
+                    unit.stats.range = unit._navalBaseRange * 3;
+                }
+            }
+        }
+
         // Targeting & Action (Movement or Attack)
         AICategories.processTargeting(unit, units);
         AICategories.processAction(unit, battleEnvironment, currentBattleData, player);
@@ -964,13 +1050,21 @@ if (battleEnvironment.bgCanvas) {
 if (battleEnvironment.fgCanvas) {
     battleEnvironment.fgCanvas.width = 0;
     battleEnvironment.fgCanvas.height = 0;
-    battleEnvironment.bgCanvas = null;
+    battleEnvironment.fgCanvas = null; // FIX: was nulling bgCanvas again (copy-paste typo) — fgCanvas itself was never cleared here
+}
+if (battleEnvironment.treeFrontCanvas) {
+    battleEnvironment.treeFrontCanvas.width = 0;
+    battleEnvironment.treeFrontCanvas.height = 0;
+    battleEnvironment.treeFrontCanvas = null;
 }
 
 	
 console.log("Leaving battlefield. Restoring overworld state...");
 // --- ADD THIS LINE TO SHUT DOWN THE ENEMY GENERAL ---
     if (typeof EnemyTacticalAI !== 'undefined') EnemyTacticalAI.stop();
+    // Mirror: shut down the player-side Lazy General AI heartbeat too (covers
+    // the custom-battle path, which calls this original function directly).
+    if (typeof stopLazyGeneral === 'function') stopLazyGeneral();
     if (typeof cleanupSiegeRoofOverlay === 'function') cleanupSiegeRoofOverlay();
     
     // ADD THIS:
@@ -998,13 +1092,49 @@ if (typeof player !== 'undefined') player.stunTimer = 0;
         camera.y = playerObj.y - canvas.height / 2;
     }
 
-    // --- 3. CALCULATE BATTLE RESULTS (Keep your existing logic) ---
+    // --- 3. CALCULATE BATTLE RESULTS ---
     let pUnitsAlive = battleEnvironment.units.filter(u => u.side === "player" && !u.isCommander && u.hp > 0).length;
-    let eUnitsAlive = battleEnvironment.units.filter(u => u.side === "enemy" && !u.isCommander && u.hp > 0).length; 
+    let eUnitsAlive = battleEnvironment.units.filter(u => u.side === "enemy" && !u.isCommander && u.hp > 0).length;
 
-    let scale = (currentBattleData && currentBattleData.initialCounts.player > 300) ? 5 : 1; 
-    let playerLost = currentBattleData.initialCounts.player - (pUnitsAlive * scale);
-    let enemyLost = currentBattleData.initialCounts.enemy - (eUnitsAlive * scale);
+    // ── FIX: Use trueInitialCounts (full pre-battle army) and initialCounts
+    // (deployed count ≤ 150, set by leave_battle_roster.js) to correctly map
+    // battlefield survivors back to real-army casualties.
+    //
+    // Old code used initialCounts (always 0 for sandbox battles) with a
+    // hardcoded scale guess — giving 0 casualties every time.
+    //
+    // The correct math:
+    //   survivalRatio = fieldSurvivors / deployedCount          (0..1)
+    //   trueSurvivors = round( fullArmy × survivalRatio ) + reserves
+    //   lost          = fullArmy - trueSurvivors
+    //
+    // This preserves proportionality regardless of whether the 150-cap or
+    // GLOBAL_BATTLE_SCALE reduced the on-field count.
+    const _ic  = (currentBattleData && currentBattleData.initialCounts)      || { player: 0, enemy: 0 };
+    const _tic = (currentBattleData && currentBattleData.trueInitialCounts)   || { player: 0, enemy: 0 };
+
+    // Full army that entered battle (trueInitialCounts is set by leave_battle_roster deployArmy)
+    const _pTrueInit = _tic.player || _ic.player || 0;
+    const _eTrueInit = _tic.enemy  || _ic.enemy  || 0;
+
+    // Units actually spawned on the field (initialCounts is now set by leave_battle_roster deployArmy)
+    const _pDeployed = _ic.player || Math.min(_pTrueInit, 150);
+    const _eDeployed = _ic.enemy  || Math.min(_eTrueInit, 150);
+
+    // Reserves that sat out the battle (should survive intact)
+    const _pReserves = (typeof player !== 'undefined' && player.reserveRoster)
+        ? player.reserveRoster.length : 0;
+    const _eReserves = (currentBattleData && currentBattleData.enemyRef && currentBattleData.enemyRef.reserveRoster)
+        ? currentBattleData.enemyRef.reserveRoster.length : 0;
+
+    // Map field survivors back to the full-army scale
+    const _pSurvRatio = _pDeployed > 0 ? pUnitsAlive / _pDeployed : 0;
+    const _eSurvRatio = _eDeployed > 0 ? eUnitsAlive / _eDeployed : 0;
+    const _pTrueSurv  = Math.round(_pTrueInit * _pSurvRatio) + _pReserves;
+    const _eTrueSurv  = Math.round(_eTrueInit * _eSurvRatio) + _eReserves;
+
+    let playerLost = Math.max(0, _pTrueInit - _pTrueSurv);
+    let enemyLost  = Math.max(0, _eTrueInit - _eTrueSurv);
 
     let isFleeing = eUnitsAlive > 0;
     let didPlayerWin = !isFleeing;
@@ -1215,8 +1345,20 @@ ctx.ellipse(
 function updateCasualtyMoralePressure(units, currentBattleData) {
     if (!Array.isArray(units) || !currentBattleData || !currentBattleData.initialCounts) return;
 
-    const pStart = Math.max(1, currentBattleData.initialCounts.player || 0);
-    const eStart = Math.max(1, currentBattleData.initialCounts.enemy || 0);
+    // ── FIX: initialCounts now holds the DEPLOYED count (≤150) set by
+    // leave_battle_roster.js deployArmy after the 150-cap slice.
+    // Comparing live unit counts against the deployed baseline gives an
+    // accurate loss percentage.  Fall back to trueInitialCounts / scale
+    // for any edge case where initialCounts was not populated yet.
+    const _mcScale = window.GLOBAL_BATTLE_SCALE || 1;
+    const pStart = Math.max(1,
+        currentBattleData.initialCounts.player ||
+        Math.round(((currentBattleData.trueInitialCounts && currentBattleData.trueInitialCounts.player) || 0) / _mcScale)
+    );
+    const eStart = Math.max(1,
+        currentBattleData.initialCounts.enemy  ||
+        Math.round(((currentBattleData.trueInitialCounts && currentBattleData.trueInitialCounts.enemy)  || 0) / _mcScale)
+    );
 
     const pAlive = units.filter(u => u && u.side === "player" && u.hp > 0 && !u.isCommander).length;
     const eAlive = units.filter(u => u && u.side === "enemy" && u.hp > 0 && !u.isCommander).length;

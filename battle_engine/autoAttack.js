@@ -25,7 +25,9 @@
  *    through rather than freeze indefinitely.
  *
  *  EMERGENCY PROTOCOL (any phase, any battle type):
- *    If player general HP < 50 % → cavalry and archers form a protective ring.
+ *    If player general HP < 20 % → cavalry and archers form a protective ring.
+ *    (Was checking 95% in code despite this comment saying 50% — fired on
+ *    almost any scratch. Both now match at 20%.)
  *
  *  BUG FIX — "units run away despite high morale":
  *    The retreatDetected killswitch has been permanently removed.
@@ -94,27 +96,9 @@
     const fireAuto = (ev) => {
       if (autoRunning) return;
 
-      // Block during sieges
-      if (typeof inSiegeBattle !== 'undefined' && inSiegeBattle) {
-        if (ev) { ev.preventDefault(); ev.stopPropagation(); }
-        let toast = D.getElementById('mc3-siege-toast');
-        if (!toast) {
-          toast = D.createElement('div');
-          toast.id = 'mc3-siege-toast';
-          toast.style.cssText =
-            'position:absolute;top:-35px;left:50%;transform:translateX(-50%);' +
-            'background:rgba(0,0,0,0.85);color:#ff5252;padding:6px 10px;' +
-            'border-radius:6px;font-size:12px;font-weight:bold;white-space:nowrap;' +
-            'pointer-events:none;transition:opacity 0.2s;border:1px solid #ff5252;';
-          const c = D.getElementById('mc3-tactical-container');
-          if (c) { c.style.position = 'relative'; c.appendChild(toast); }
-        }
-        toast.innerText = '🏯 Disabled in sieges';
-        toast.style.opacity = '1';
-        if (toast.fadeTimeout) clearTimeout(toast.fadeTimeout);
-        toast.fadeTimeout = setTimeout(() => { toast.style.opacity = '0'; }, 2000);
-        return;
-      }
+      // Sieges are now supported (Smart Siege Assault AI) — the old
+      // "Disabled in sieges" block/toast has been removed. isSiegeNow()
+      // further down just picks which branch triggerTacticalAssault() runs.
 
       const now = Date.now();
       if (now - lastFire < 500) return;
@@ -128,11 +112,21 @@
       autoBtn.style.pointerEvents  = 'none';
       manualBtn.style.pointerEvents = 'auto';
       manualBtn.style.opacity       = '1';
-      
-      // SURGERY 1: Disable RTSControls group buttons 1-5
-      for (let i = 1; i <= 5; i++) {
-        let gBtn = D.getElementById('mc3-g' + i);
-        if (gBtn) { gBtn.style.pointerEvents = 'none'; gBtn.style.opacity = '0.3'; }
+
+      // Pressing the robot button hands the WHOLE army to the AI: clear any
+      // leftover selection / per-unit manual override so no unit is stranded
+      // outside its control. NOTE: group buttons 1-5 are deliberately left
+      // enabled here (the old "SURGERY 1: disable" block was removed) —
+      // the player must still be able to select units WHILE the robot runs,
+      // in order to peel individual units into manual control (see
+      // getLivePlayers()'s _lazyManual check and lazyTakeManualControl()).
+      {
+        const env0 = _env();
+        if (env0 && env0.units) {
+          env0.units.forEach(u => {
+            if (u.side === 'player') { u.selected = false; u._lazyManual = false; u.disableAICombat = false; }
+          });
+        }
       }
 
       triggerTacticalAssault();
@@ -162,7 +156,11 @@
         const pu = env.units.filter(u => u.side === 'player');
         restoreSpeeds(pu);
         pu.forEach(u => {
-          u.selected = false; u.hasOrders = true;
+          // _lazyManual = true here is what makes this the true GLOBAL stop:
+          // it excludes every unit from getLivePlayers() above AND from
+          // Lazy General AI's getLazyControlledUnits() in
+          // battlefield_commands.js, so nothing keeps moving them.
+          u.selected = false; u.hasOrders = true; u._lazyManual = true;
           u.orderType = 'hold_position'; u.vx = 0; u.vy = 0;
           u.orderTargetPoint = _safe(u.x, u.y);
         });
@@ -171,6 +169,49 @@
         if (UC) { UC._snap = ''; UC.update(); }
       }
     };
+
+    // ── Command-triggered revert (NEW) ──────────────────────────────────────
+    // Distinct from toggleManual() above on purpose: toggleManual() is what
+    // the 🛑 button does, and it deliberately force-overwrites EVERY player
+    // unit's order to hold_position — that's correct for an explicit "stop
+    // everything" press, but wrong here. This function is called right after
+    // the player has already issued a real order/formation/move command (see
+    // RTSControls.js Cmd.* and the desktop keydown switch in
+    // battlefield_commands.js) — the order itself has already gone through,
+    // so this must ONLY flip the robot button back to manual/off. It must
+    // NOT touch unit orders, or it would silently undo the very command the
+    // player just gave.
+    // REVISED: this used to force-flip the GLOBAL robot flag to "off" (and
+    // kill tacticalInterval outright) the instant ANY single unit received a
+    // manual command — which stopped the robot AI for the WHOLE army, not
+    // just the commanded unit(s). That directly conflicted with the per-unit
+    // model: selecting/commanding a unit should only pull THAT unit out of
+    // the robot's control; every other unit must keep running the robot AI
+    // untouched, in every battle type (land/river/siege/naval).
+    //
+    // The per-unit exclusion now happens on its own: battlefield_commands.js
+    // sets unit._lazyManual = true the moment a unit is selected or given an
+    // order (lazyTakeManualControl), and getLivePlayers() above filters
+    // _lazyManual units out of every tick automatically. So this hook no
+    // longer needs to touch autoRunning/isManualMode or the interval at all.
+    // Kept as a no-op (instead of deleted) purely so the existing callers in
+    // battlefield_commands.js (_mc3RevertRobotOnCommand) keep working.
+    const revertToManualOnCommand = () => {
+      // Intentionally does nothing to global state anymore — see comment above.
+    };
+
+    // Small public surface so other files (RTSControls.js Cmd.*, and the
+    // desktop keydown handler in battlefield_commands.js) can trigger the
+    // revert without reaching into this IIFE's closed-over state.
+    W.MC3TacticalAI = W.MC3TacticalAI || {};
+    W.MC3TacticalAI.isAutoRunning = () => autoRunning;
+    W.MC3TacticalAI.revertToManualOnCommand = revertToManualOnCommand;
+    // Lets a siege-start choke point (see siegebattle.js) simulate a real press
+    // of the 🤖/🏯 button after a short randomized delay, instead of duplicating
+    // fireAuto's setup (clearing selection/_lazyManual, flipping button state,
+    // calling triggerTacticalAssault). Passing no event is safe — fireAuto only
+    // touches ev when one is provided.
+    W.MC3TacticalAI.triggerAutoPress = () => { if (!autoRunning) fireAuto(null); };
 
     autoBtn.addEventListener('touchstart',   fireAuto,     { passive: false });
     autoBtn.addEventListener('pointerdown',  fireAuto);
@@ -188,9 +229,11 @@
       container.style.display = inBattle ? 'flex' : 'none';
       if (inBattle) {
         const isSiege = typeof inSiegeBattle !== 'undefined' && inSiegeBattle;
+        // 🏯 is now just a "you're in a siege" indicator, not a disabled state —
+        // pressing it still runs Smart Siege Assault AI, same as 🤖 elsewhere.
         if (!autoRunning) {
           autoBtn.innerHTML = isSiege ? '🏯' : '🤖';
-          autoBtn.style.opacity = isSiege ? '0.7' : '1';
+          autoBtn.style.opacity = '1';
         }
       }
 if (!inBattle) {
@@ -260,6 +303,15 @@ function _safe(x, y, margin = 50) {
       if (u.origSmartSpeed !== undefined && u.stats) {
         u.stats.speed = u.origSmartSpeed;
         delete u.origSmartSpeed;
+      }
+      // SURGERY: battlefield_commands.js's lazyBackupSpeed/lazySetSpeedScale
+      // use a differently-named backup (_lazyOrigSpeed), so a unit whose
+      // speed was scaled through that system wasn't being reverted by this
+      // global kill-switch path at all. Cross-check both so neither system
+      // can leave a unit permanently stuck at a scaled speed.
+      if (u._lazyOrigSpeed !== undefined && u.stats) {
+        u.stats.speed = u._lazyOrigSpeed;
+        delete u._lazyOrigSpeed;
       }
     });
   }
@@ -591,7 +643,13 @@ function _safe(x, y, margin = 50) {
     const getLivePlayers = () => env.units.filter(u => {
       const t = String(u.unitType || '').toLowerCase();
       return u.side === 'player' && u.hp > 0 && u !== W.player
-        && !u.isCommander && t !== 'commander' && t !== 'general';
+        && !u.isCommander && t !== 'commander' && t !== 'general'
+        // PER-UNIT OVERRIDE: a unit the player has selected/commanded is
+        // flagged _lazyManual (see lazyTakeManualControl in
+        // battlefield_commands.js) and must be left alone by every robot
+        // branch below (_runLand/_runRiver/_runSiege/_runNaval) — it is
+        // re-checked every tick since this function is called repeatedly.
+        && !u._lazyManual;
     });
     const getLiveEnemies = () =>
       env.units.filter(u => u.side === 'enemy' && u.hp > 0 && !u.isDummy);
@@ -601,6 +659,14 @@ function _safe(x, y, margin = 50) {
     let pUnits = getLivePlayers();
     let eUnits = getLiveEnemies();
     if (!pUnits.length || !eUnits.length) return;
+
+    // ── Siege branch (NEW — Smart Siege Assault AI) ───────────────────────
+    // Checked first: a siege is never naval/river, and must not fall through
+    // to the naval/river/land branches below (those are for field battles).
+    if (typeof inSiegeBattle !== 'undefined' && inSiegeBattle) {
+      _runSiege(env, MC, getLivePlayers, getLiveEnemies);
+      return;
+    }
 
     // ── Naval branch (UNTOUCHED) ──────────────────────────────────────────
     if (W.inNavalBattle) {
@@ -621,6 +687,124 @@ function _safe(x, y, margin = 50) {
     } else {
       _runLand(env, MC, getLivePlayers, getLiveEnemies, getGeneral, isForcedCharge);
     }
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  //  SIEGE LOGIC  (NEW — Smart Siege Assault AI)
+  //
+  //  Reuses executeSiegeAssaultAI() from battlefield_commands.js, which does
+  //  the actual troop categorization + ram/ladder/cavalry-reserve assignment.
+  //  This function's job is just: (1) select everyone so the assignment call
+  //  has something to work with, (2) run the assignment once immediately so
+  //  units engage siege equipment right away instead of waiting idle, and
+  //  (3) keep re-checking on a light interval so newly-arrived reinforcements
+  //  or units whose ram/ladder got destroyed are picked back up automatically
+  //  — without constantly reshuffling units that are already correctly busy.
+  // ══════════════════════════════════════════════════════════════════════════
+  function _runSiege(env, MC, getLivePlayers, getLiveEnemies) {
+    if (typeof currentSelectionGroup !== 'undefined') currentSelectionGroup = 5;
+    autoBtn.innerHTML = '🏯';
+    // One-time guard for the fanatic/sniper role assignment below — this
+    // runs on every runAssignment() tick (light interval), but the roll
+    // should only happen once per siege, not re-roll every re-check.
+    let fanaticSniperRolesAssigned = false;
+
+    const runAssignment = () => {
+      let pUnits = getLivePlayers();
+      if (!pUnits.length) return;
+
+      // SURGERY: +30% pace for units under active siege auto-attack control.
+      // Reuses lazySetSpeedScale (battlefield_commands.js) rather than a new
+      // ad-hoc multiplier — it already backs up/restores correctly, and both
+      // revert paths (this file's global kill-switch, and
+      // lazyTakeManualControl on manual selection) now check both backup
+      // systems, so a unit can't get stuck boosted no matter which path the
+      // player exits through. Idempotent: re-running this on an
+      // already-boosted unit is a no-op beyond re-asserting 1.3x, so it's
+      // safe to call on every light-interval tick, not just once.
+      if (typeof lazySetSpeedScale === 'function') {
+        pUnits.forEach(u => lazySetSpeedScale(u, 1.3));
+      }
+
+      // Only hand units to executeSiegeAssaultAI if they don't already have a
+      // live siege assignment — this is what keeps the interval from fighting
+      // its own previous assignment every tick. A unit needs (re)assignment if:
+      //   - it has no siege_assault order yet (fresh unit / first press), or
+      //   - its assigned ram/ladder/trebuchet has died (siegeTarget.hp <= 0), or
+      //   - it's a ram_pusher/ladder_carrier stuck with no siegeTarget at all.
+      const needsAssignment = pUnits.filter(u => {
+        if (u.orderType !== 'siege_assault') return true;
+        if ((u.siegeRole === 'ram_pusher' || u.siegeRole === 'ladder_carrier' ||
+             u.siegeRole === 'trebuchet_crew') &&
+            (!u.siegeTarget || u.siegeTarget.hp <= 0)) return true;
+        return false;
+      });
+
+      if (needsAssignment.length && typeof W.executeSiegeAssaultAI === 'function') {
+        W.executeSiegeAssaultAI(needsAssignment);
+      } else if (needsAssignment.length && typeof executeSiegeAssaultAI === 'function') {
+        executeSiegeAssaultAI(needsAssignment);
+      }
+
+      // SURGERY: ladder_fanatic / counter_battery roles used to be assigned
+      // synchronously in enterSiegeBattlefield (siegebattle.js) the instant
+      // troops were deployed, before the player or this function had done
+      // anything — and orderType="ladder_crew" is picked up immediately by
+      // ai_categories.js's processTargeting regardless of the auto-attack
+      // button, so those units walked to a ladder on their own at siege
+      // start. Moved here so it only happens the moment real automation
+      // actually begins (this function runs whether that's the 1-3s
+      // auto-press timer or a manual button press) — once per siege.
+      if (!fanaticSniperRolesAssigned && typeof canUseSiegeEngines === 'function') {
+        fanaticSniperRolesAssigned = true;
+        let pUnitsForRoles = pUnits.filter(u => !u.isCommander);
+        let validClimbers = pUnitsForRoles.filter(u => !u.stats?.isRanged && canUseSiegeEngines(u));
+        let rangedTroops = pUnitsForRoles.filter(u => u.stats?.isRanged || String(u.stats?.role).toLowerCase().includes("archer"));
+
+        let fanaticCount = Math.max(4, Math.floor(validClimbers.length * 0.1));
+        for (let i = 0; i < fanaticCount; i++) {
+          let rIdx = Math.floor(Math.random() * validClimbers.length);
+          let u = validClimbers.splice(rIdx, 1)[0];
+          if (u) {
+            u.siegeRole = "ladder_fanatic";
+            u.orderType = "ladder_crew";
+            u.disableAICombat = true; // Ignore enemies, prioritize ladder entirely
+          }
+        }
+
+        let sniperCount = Math.floor(rangedTroops.length * 0.20);
+        for (let i = 0; i < sniperCount; i++) {
+          let rIdx = Math.floor(Math.random() * rangedTroops.length);
+          let u = rangedTroops.splice(rIdx, 1)[0];
+          if (u) {
+            u.siegeRole = "counter_battery";
+          }
+        }
+      }
+    };
+
+    // Fire once immediately — this is the fix for units sitting idle after
+    // the button is pressed instead of moving on rams/ladders right away.
+    runAssignment();
+
+    tacticalInterval = setInterval(() => {
+      if (!MC.G.isBattle() || isManualMode) { _stopAI(getLivePlayers()); return; }
+      if (typeof inSiegeBattle !== 'undefined' && !inSiegeBattle) {
+        // Battle transitioned out of siege (shouldn't normally happen mid-battle,
+        // but stop cleanly rather than keep calling siege-only assignment logic).
+        clearInterval(tacticalInterval); tacticalInterval = null;
+        triggerTacticalAssault();
+        return;
+      }
+      const pUnits = getLivePlayers();
+      const eUnits = getLiveEnemies();
+      if (!pUnits.length || !eUnits.length) {
+        clearInterval(tacticalInterval); tacticalInterval = null;
+        autoBtn.innerHTML = '⏳';
+        return;
+      }
+      runAssignment();
+    }, 1500); // lighter cadence than field-battle AI — this is upkeep, not micro
   }
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -646,6 +830,27 @@ function _safe(x, y, margin = 50) {
       const fallback   = cmdr || myShip || pUnits[0];
       const safeAnchor = { x: fallback.x, y: fallback.y };
 
+      // ── BOARDING: collision timer fired — fight like a normal land battle ────
+      // _navalBoardingTimer is set by naval_battles.js the instant ships touch.
+      // Matches the same flag checked by battlefield_logic.js for enemy units.
+      // Force seek_engage and clear stale hold_position so processTargeting
+      // (in battlefield_logic) can assign targets this frame.
+      if (W._navalBoardingTimer) {
+        pUnits.forEach(u => {
+          if (u.isSwimming) {
+            u.orderType = 'move_to_point'; u.target = null;
+            u.orderTargetPoint = safeAnchor; return;
+          }
+          u.selected = true; u.hasOrders = true; u.isPatrolling = false;
+          if (u.orderType === 'hold_position' || u.orderType === 'move_to_point' || !u.orderType) {
+            u.orderType = 'seek_engage'; u.orderTargetPoint = null; u.target = null;
+          }
+        });
+        const UC = MC.UnitCards;
+        if (UC) { UC._snap = ''; UC.update(); }
+        return;
+      }
+
       pUnits.forEach(u => {
         u.selected = true; u.hasOrders = true;
         const surface = typeof W.getNavalSurfaceAt === 'function'
@@ -660,7 +865,18 @@ function _safe(x, y, margin = 50) {
         let near  = Infinity;
         eUnits.forEach(e => { const d = Math.hypot(u.x - e.x, u.y - e.y); if (d < near) near = d; });
 
-        if ((r === 'INFANTRY' || r === 'CAVALRY') && near < 120) {
+        // Also measure how far away the enemy ship itself is (ship-to-ship distance
+        // mirrors the 200px aggro threshold used on the enemy side in ai_categories.js,
+        // so both sides start charging at the same moment as ships close in, not only
+        // once grapple has already occurred).
+        let enemyShipDist = Infinity;
+        if (W.navalEnvironment && W.navalEnvironment.ships) {
+          const eShip = W.navalEnvironment.ships.find(s => !s.isPlayerControlled);
+          if (eShip) enemyShipDist = Math.hypot(u.x - eShip.x, u.y - eShip.y);
+        }
+        const nearAggroDist = Math.min(near, enemyShipDist);
+
+        if ((r === 'INFANTRY' || r === 'CAVALRY') && nearAggroDist < 200) {
           u.orderType = 'seek_engage'; u.orderTargetPoint = null; u.isPatrolling = false;
         } else {
           const dtp = u.orderTargetPoint
@@ -746,7 +962,7 @@ function _safe(x, y, margin = 50) {
       if (gen && gen.stats) {
         const maxHP  = gen.stats.health || gen.stats.maxHealth || 100;
         const hpPct  = gen.hp / maxHP;
-        if (hpPct < 0.95 && !emergencyActive) {
+        if (hpPct < 0.20 && !emergencyActive) {
           emergencyActive = true;
           autoBtn.innerHTML = '🆘';
         }
@@ -808,8 +1024,9 @@ function _safe(x, y, margin = 50) {
 
       // ── RIVER_FORM_UP ──────────────────────────────────────────────────
       } else if (phase === 'RIVER_FORM_UP') {
-        autoBtn.innerHTML = '🚩';
-        if (_armyFormed(pUnits, 80)) {
+        const riverFormed = _armyFormed(pUnits, 80);
+        autoBtn.innerHTML = riverFormed ? '🚩' : '🤔';
+        if (riverFormed) {
           phase = 'RIVER_CHARGE';
         }
 
@@ -966,7 +1183,7 @@ function _safe(x, y, margin = 50) {
       const gen = getGeneral();
       if (gen && gen.stats) {
         const maxHP = gen.stats.health || gen.stats.maxHealth || 100;
-        if (gen.hp / maxHP < 0.95 && !emergActive) {
+        if (gen.hp / maxHP < 0.20 && !emergActive) {
           emergActive = true;
           autoBtn.innerHTML = '🆘';
         }
@@ -1002,6 +1219,9 @@ function _safe(x, y, margin = 50) {
           marchY = pC.y + frontDir.y * 60;
           stuckMarchTick = 0;
         } else {
+          // Waiting on stragglers — units are genuinely holding position
+          // here, not stuck/broken, so say so instead of leaving 🚩 up.
+          autoBtn.innerHTML = '🤔';
           // Re-nudge any unit that has drifted very far from its slot
           pUnits.forEach(u => {
             if (!u.orderTargetPoint) return;
@@ -1037,6 +1257,7 @@ function _safe(x, y, margin = 50) {
 
         if (formed) {
           // ✓ Army is in position → step the formation centre forward
+          autoBtn.innerHTML = '🚶';
           stuckMarchTick = 0;
           const toE = { x: eC.x - marchX, y: eC.y - marchY };
           const toM = Math.max(1, Math.hypot(toE.x, toE.y));
@@ -1044,7 +1265,11 @@ function _safe(x, y, margin = 50) {
           marchY += (toE.y / toM) * MARCH_STEP;
           _marchFormation(pUnits, marchX, marchY, MARCH_SPEED);
         } else {
-          // ✗ Army not yet formed → nudge stragglers, wait for them
+          // ✗ Army not yet formed → nudge stragglers, wait for them.
+          // The formation centre isn't stepping this tick, so say so —
+          // otherwise this reads as frozen/stuck rather than deliberately
+          // holding for slower units to catch up.
+          autoBtn.innerHTML = '🤔';
           stuckMarchTick++;
 
           // Re-issue orders only to units that have significantly drifted
@@ -1064,6 +1289,7 @@ function _safe(x, y, margin = 50) {
           // (e.g. a unit is permanently stuck on terrain), force the step
           // anyway so the advance doesn't deadlock forever.
           if (stuckMarchTick >= STUCK_VALVE) {
+            autoBtn.innerHTML = '🚶'; // forcing the step — actually moving again
             stuckMarchTick = 0;
             const toE = { x: eC.x - marchX, y: eC.y - marchY };
             const toM = Math.max(1, Math.hypot(toE.x, toE.y));

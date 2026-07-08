@@ -129,6 +129,17 @@
 if (window.__MBP1__) return;
 window.__MBP1__ = true;
 
+// ── GRAPHICAL QUALITY TIER  (0 = LOW / absolute minimum, 100 = HIGH / full fidelity) ──────
+// Initialised here (before IS_MOBILE) so settings_ui.js can read/write it even on desktop
+// without waiting for this IIFE to finish.  All MB wrappers read it at call-time via
+// _mbGetQual() so changes made by the slider take effect on the NEXT rendered frame.
+//
+// Tier semantics (values are read dynamically — not locked at install time):
+//   0%  (LOW)  : current absolute-minimum defaults — maximum frame savings
+//   50% (MED)  : sprite-cache frame count ~3× larger, AI runs every frame
+//  100% (HIGH) : sprite cache bypassed entirely → fully smooth unit animation
+window.mobileBattleQuality = window.mobileBattleQuality ?? 0;
+
 var IS_MOBILE = (
     window.__FORCE_MOBILE_BATTLES__ === true ||
     typeof window.Capacitor !== 'undefined' ||
@@ -146,6 +157,22 @@ if (!IS_MOBILE) {
                 'color:#888;font-style:italic;');
     return;
 }
+
+// ── Dynamic quality helper — called at render time (not install time) ────────
+// Returns current quality 0-100.  All MB constants that affect visual quality
+// are computed from this value so the settings slider takes effect live.
+function _mbGetQual() {
+    return (typeof window.mobileBattleQuality === 'number')
+        ? Math.max(0, Math.min(100, window.mobileBattleQuality)) : 0;
+}
+
+// Quality→constant mappings (for reference / comments):
+//  animFrames  : 4  (q=0)  → 12  (q=50)  — bypassed at q≥80
+//  aiSkip      : 2  (q<40) → 1   (q≥40)  — skip-2=half-rate, 1=full
+//  lodFullPx   : 400(q=0)  → 800 (q=100) screen-px full-sprite zone
+//  groundMax   : 80 (q=0)  → 200 (q=100) ground-effects cap
+//  cullMargin  : 120(q=0)  → 300 (q=100) viewport pre-cull margin
+//  geMargin    : 200(q=0)  → 400 (q=100) ground-effect distance cull
 
 // ══════════════════════════════════════════════════════════════════════
 // PHASE 0 — SYNCHRONOUS RAW FUNCTION CAPTURE  (v1.6 PRIMARY FIX)
@@ -214,7 +241,8 @@ var MB2_BLUR_PX = MB2_FULL_PX; // (unused — blur removed)
 // MB3: processTargeting cull radius
 var MB3_CULL_PADDING = 250;
 
-// MB5: AI throttle frame skip (2 = half rate, land battles only)
+// MB5: AI throttle frame skip for LOW quality (q<40). 2 = 30 Hz simulation.
+// MED/HIGH always run at full rate regardless of this constant.
 var MB5_AI_SKIP = 2;
 
 // MB10: Ground effects total cap on mobile
@@ -294,34 +322,31 @@ function _install() {
     _mb10_groundCap();
     _mb12_deadUnitFlush();
     _mb13_groundEffectDistanceCull();
-    _mb14_sweepAndPrune();   // NEW v1.6
-    _mb16_viewportPreCull(); // NEW v1.6
+    _mb14_sweepAndPrune();
+    _mb16_viewportPreCull();
+    _mb17_zoomRestrict();  // NEW v2.0 — LOW only: clamp zoom to tight range
+    _mb18_projectileCull(); // NEW v2.0 — LOW only: projectile draw radius cull
+    _mb19_offscreenAISkip(); // NEW v2.0 — LOW only: off-screen units skip AI ticks
 
     console.log(
-        '%c[OPT-MOBILE-BATTLES v1.6] Mobile mode INSTALLED\n' +
+        '%c[OPT-MOBILE-BATTLES v2.0] Mobile mode INSTALLED\n' +
         '  Detection : Capacitor / Android WebView (strict)\n' +
-        '  Phase 0   : Synchronous raw fn capture (pre-DOMContentLoaded — drowning race FIXED)\n' +
-        '  MB1 Sprite cache — raw fn captured BEFORE PB1/PB2 wrap\n' +
-        '     (inf ' + MB1_INF_W + '×' + MB1_INF_H +
-            ', cav ' + MB1_CAV_W + '×' + MB1_CAV_H +
-            ', ' + MB1_ANIM_FRAMES + ' anim frames, ' + MB1_CACHE_MAX + ' entries max)\n' +
-        '     FIXED v1.6: swimming units bypass cache (drowning visual contamination)\n' +
-        '     FIXED v1.6: ranged cooldown > 0 bypasses cache (crossbow flicker)\n' +
-        '     FIXED v1.7: zoom-pre-scaled cache canvas + explicit dWidth/dHeight blit (blur eliminated)\n' +
-        '  MB2 2-tier proximity LOD: full<=' + MB2_FULL_PX + 'px, dot beyond (screen-px to nearest player unit)\n' +
-        '     Blur tier REMOVED — game has its own dot system; blurring was unwanted\n' +
-        '  MB3 processTargeting viewport cull\n' +
-        '  MB4 visType resolved via MB1 cache keys\n' +
-        '  MB5 updateBattleUnits throttled ~30Hz (land battles)\n' +
-        '  MB6 supply line off-screen cull\n' +
-        '  MB7 blood pool jitter fix\n' +
-        '  MB8 sort optimization (deferred)\n' +
-        '  MB9 selection ring micro-opt (deferred)\n' +
-        '  MB10 ground FX count cap @ ' + MB10_GROUND_MAX + '\n' +
-        '  MB12 dead unit LOD early-flush (viewport-rect, skips all dead-unit work off-screen)\n' +
-        '  MB13 ground FX off-screen cull (margin=' + MB13_GE_MARGIN + 'px, 2s interval)\n' +
-        '  MB14 sweep-and-prune collision (land battles, X-sorted, early-exit at ' + MB14_MAX_SWEEP_DX + 'px)\n' +
-        '  MB16 viewport pre-cull for drawBattleUnits (margin=' + MB16_CULL_MARGIN + 'px)',
+        '  Quality   : window.mobileBattleQuality=' + Math.round(_mbGetQual()) + '%\n' +
+        '              LOW(q<40)  : MB1 cache 4-8fr, MB5 30Hz, MB16 0px margin,\n' +
+        '                           MB2 250px LOD, MB17 zoom clamp (tight), MB18 proj cull, MB19 AI skip\n' +
+        '              MED(q40-79): MB1 bypassed (raw fn), MB5 full rate, MB16 150px, MB2 550px, MB17 zoom clamp (slight)\n' +
+        '              HIGH(q≥80) : MB1 bypassed (desktop), MB5 full rate, MB16 300px, MB2 800px, MB17 unrestricted\n' +
+        '  MB1 Sprite cache  (inf ' + MB1_INF_W + '×' + MB1_INF_H +
+            ', cav ' + MB1_CAV_W + '×' + MB1_CAV_H + ', ' + MB1_CACHE_MAX + ' entries max)\n' +
+        '     LOW=4-8 anim frames, MED=bypassed (raw fn), HIGH=bypassed (raw fn)\n' +
+        '  MB2 2-tier LOD  LOW=250px, MED=550px, HIGH=800px full-sprite zone\n' +
+        '  MB5 updateBattleUnits  LOW=30Hz throttle, MED/HIGH=full rate (desktop)\n' +
+        '  MB14 sweep-and-prune collision (land battles, X-gap=' + MB14_MAX_SWEEP_DX + 'px)\n' +
+        '  MB16 viewport pre-cull  LOW=0px, MED=150px, HIGH=300px margin\n' +
+        '  MB17 zoom restriction  LOW: ' + MB17_LOW_MIN + '\u2013' + MB17_LOW_MAX +
+            ', MED: ' + MB17_MED_MIN + '\u2013' + MB17_MED_MAX + ', HIGH: unrestricted\n' +
+        '  MB18 projectile draw cull  LOW only: ' + MB18_RADIUS + 'px radius\n' +
+        '  MB19 off-screen AI skip  LOW only: ' + MB19_OFFSCREEN_PAD + 'px pad, 1/' + MB19_TICK_DIVISOR + ' rate',
         'color:#76ff03;font-weight:bold;font-size:11px'
     );
 }
@@ -368,8 +393,19 @@ function _mb1_spriteCache() {
         return;
     }
 
+    // facingDirY added this session (bird's-eye up/down overhaul): the
+    // cached sprite's IDLE/MOVING pose now differs by vertical facing
+    // for ported unit types (currently just infantry "spearman" — see
+    // infscript.js top-of-file notes), so it must be part of the key or
+    // a unit that changes facingDirY while every other key component
+    // stays the same would keep showing its stale pre-change pose until
+    // TTL eviction. isAttacking frames were already always cache-bypassed
+    // (see the `if (isAttacking) return _prevInf...` guard below) so this
+    // only affects idle/moving frames, but those DO visibly differ now
+    // (e.g. a spearman's idle stance is a diagonal side-hold vs. a
+    // straight-down hold) so it still needed fixing.
     function _buildKey(unitType, unitName, side, armorTier, isAttacking, ammoCount,
-                       facingDir, animFrame, factionColor, extraTag) {
+                       facingDir, animFrame, factionColor, extraTag, facingDirY) {
         return (unitType || 'u') + '|' +
                (unitName || '') + '|' +
                (side || 'p') + '|' +
@@ -379,7 +415,8 @@ function _mb1_spriteCache() {
                (facingDir || 1) + '|' +
                animFrame + '|' +
                (factionColor || '#000') + '|' +
-               (extraTag || '');
+               (extraTag || '') + '|' +
+               (facingDirY || 0);
     }
 
     function _armorTier(val) {
@@ -550,6 +587,14 @@ function _mb1_spriteCache() {
         }
         // ────────────────────────────────────────────────────────────────
 
+        // ── Quality gate ──────────────────────────────────────────────────
+        //  MED+ (q ≥ 40) → bypass cache entirely: full desktop animation.
+        //    Per-request: only LOW keeps the frame cap; MED and HIGH must
+        //    both run completely unthrottled animation.
+        //  LOW  (q < 40)  → cache with 4 frames (choppy but light on CPU).
+        if (_mbGetQual() >= 40) return _prevInf.apply(this, arguments);
+        // ─────────────────────────────────────────────────────────────────
+
         _gcCache();
 
         var armorT   = _armorTier((unit.stats.armor !== undefined) ? unit.stats.armor : 2);
@@ -560,7 +605,10 @@ function _mb1_spriteCache() {
             if (ammoCount < 0) ammoCount = 0;
         }
 
-        var animF    = moving ? (Math.floor(frame * 0.3) & (MB1_ANIM_FRAMES - 1)) : 0;
+        // Dynamic frame count — LOW only now (q < 40, MED/HIGH bypassed above): 4..8 frames.
+        // Modulo (not bitmask) so non-power-of-2 counts work correctly.
+        var _mbNF = Math.round(4 + (Math.min(_mbGetQual(), 79) / 79) * 8); // 4..8 in practice (q<40)
+        var animF    = moving ? (Math.floor(frame * 0.3) % _mbNF) : 0;
         var facingDir = (unit.facingDir === -1) ? -1 : 1;
 
         var extra = (isFleeing ? 'F' : '');
@@ -580,7 +628,7 @@ function _mb1_spriteCache() {
         }
 
         var key = _buildKey(type, unitName, side, armorT, isAttacking, ammoCount,
-                            1, animF, factionColor, extra) +
+                            1, animF, factionColor, extra, unit.facingDirY) +
                   '|Z' + (Math.round((typeof zoom !== 'undefined' ? zoom : 1) * 4) / 4);
 
         var cv = _getCachedInfFrame(key, unit, moving, frame, factionColor,
@@ -635,6 +683,10 @@ function _mb1_spriteCache() {
         }
         // ────────────────────────────────────────────────────────────────
 
+        // ── Quality gate (same as infantry — MED+ bypasses, only LOW capped) ──
+        if (_mbGetQual() >= 40) return _prevCav.apply(this, arguments);
+        // ─────────────────────────────────────────────────────────────────
+
         _gcCache();
 
         var armorT   = _armorTier((unit.stats.armor !== undefined) ? unit.stats.armor : 2);
@@ -643,12 +695,17 @@ function _mb1_spriteCache() {
             ammoCount = Math.min(unit.stats.ammo, 4);
             if (ammoCount < 0) ammoCount = 0;
         }
-        var animF    = moving ? (Math.floor(frame * 0.3) & (MB1_ANIM_FRAMES - 1)) : 0;
+        var _mbNF = Math.round(4 + (Math.min(_mbGetQual(), 79) / 79) * 8); // 4..8 in practice (q<40, MED/HIGH bypassed above)
+        var animF    = moving ? (Math.floor(frame * 0.3) % _mbNF) : 0;
         var facingDir = (unit.facingDir === -1) ? -1 : 1;
         var extra = (isFleeing ? 'F' : '');
 
+        // NOTE: cavscript.js doesn't read facingDirY yet (see that file's
+        // top-of-function notes — only infantry spearman is ported this
+        // session), so this has no visible effect today. Included now so
+        // the cache doesn't need a second audit once cavalry is ported.
         var key = 'CAV|' + _buildKey(type, unitName, side, armorT, isAttacking, ammoCount,
-                                     1, animF, factionColor, extra) +
+                                     1, animF, factionColor, extra, unit.facingDirY) +
                   '|Z' + (Math.round((typeof zoom !== 'undefined' ? zoom : 1) * 4) / 4);
 
         var cv = _getCachedCavFrame(key, unit, moving, frame, factionColor,
@@ -717,14 +774,23 @@ function _mb2_tighterLOD() {
         return minSq;
     }
 
-    var _fullSq = MB2_FULL_PX * MB2_FULL_PX;
+    var _fullSq = MB2_FULL_PX * MB2_FULL_PX; // kept for log compat; runtime uses _mbGetQual()
 
     function _lodTier(wx, wy, unit) {
         if (unit && unit.isCommander && unit.side === 'player') return 0;
         if (typeof zoom === 'undefined') return 0;
 
+        // Quality-gated LOD full-sprite zone:
+        //   LOW  (q < 40)  → 250 px : only units within arm's reach of a
+        //     player unit get full sprites; everything else is a dot. On a
+        //     zoomed-in view (MB17 zoom restriction) this still covers the
+        //     main combat cluster the player cares about.
+        //   MED  (q 40-79) → 550 px : comfortable mid-range.
+        //   HIGH (q ≥ 80)  → 800 px : same as original high-quality default.
+        var q2 = _mbGetQual();
+        var lodPx = q2 < 40 ? 250 : q2 < 80 ? 550 : 800;
         var dSq = _minScreenDistSq(wx, wy);
-        if (dSq <= _fullSq) return 0;
+        if (dSq <= lodPx * lodPx) return 0;
         return 2;
     }
 
@@ -900,7 +966,15 @@ function _mb5_rafCap() {
 
         window.updateBattleUnits = function () {
             _tick++;
-            if (MB5_AI_SKIP > 1 && (_tick % MB5_AI_SKIP) !== 0) {
+            // Quality-gated simulation rate:
+            //   LOW  (q < 40) : skip every other frame → ~30 Hz simulation.
+            //     Halves all AI + physics + projectile CPU cost. The most
+            //     impactful single change for shitty phones. Siege + naval
+            //     always run at full rate regardless (their AI is heavier and
+            //     timing is more sensitive).
+            //   MED / HIGH (q ≥ 40) : full rate — identical to desktop.
+            var _mbSkip = (_mbGetQual() < 40) ? 2 : 1;
+            if (_mbSkip > 1 && (_tick % _mbSkip) !== 0) {
                 var inSiege = (typeof inSiegeBattle !== 'undefined' && inSiegeBattle);
                 var inNaval = (typeof inNavalBattle !== 'undefined' && inNavalBattle);
                 if (!inSiege && !inNaval) return;
@@ -908,8 +982,7 @@ function _mb5_rafCap() {
             return _orig.apply(this, arguments);
         };
 
-        console.log('[OPT-MOBILE-BATTLES MB5] updateBattleUnits throttled (skip-' +
-                    MB5_AI_SKIP + ', land battles only).');
+        console.log('[OPT-MOBILE-BATTLES MB5] updateBattleUnits: LOW=30Hz throttle, MED/HIGH=full rate (desktop equiv).');
     };
 
     _pollId = setInterval(function () {
@@ -1048,9 +1121,11 @@ function _mb10_groundCap() {
         if (typeof battleEnvironment === 'undefined' || !battleEnvironment) return;
         if (!Array.isArray(battleEnvironment.groundEffects)) return;
 
+        // Dynamic cap: 80 (q=0/LOW) → 200 (q=100/HIGH)
+        var cap = Math.round(80 + (_mbGetQual() / 100) * 120);
         var arr = battleEnvironment.groundEffects;
-        if (arr.length > MB10_GROUND_MAX) {
-            arr.splice(0, arr.length - MB10_GROUND_MAX);
+        if (arr.length > cap) {
+            arr.splice(0, arr.length - cap);
         }
     }, 1000);
 
@@ -1171,7 +1246,9 @@ function _mb13_groundEffectDistanceCull() {
         if (typeof player === 'undefined' || !player) return;
         if (typeof camera === 'undefined' || !camera) return;
 
-        var margin = MB13_GE_MARGIN;
+        // Dynamic margin: 200px (q=0/LOW) → 400px (q=100/HIGH)
+        // Larger margin = more ground effects survive (higher quality appearance)
+        var margin = Math.round(200 + (_mbGetQual() / 100) * 200);
         var left   = camera.x - margin;
         var right  = camera.x + camera.width  + margin;
         var top    = camera.y - margin;
@@ -1427,7 +1504,15 @@ function _mb16_viewportPreCull() {
             }
 
             var units = battleEnvironment.units;
-            var margin = MB16_CULL_MARGIN;
+            // Quality-gated viewport cull margin (world-px beyond camera edge):
+            //   LOW  (q < 40)  →  0 px : pixel-perfect cull. Units must be
+            //     inside the visible camera rect to be drawn at all. Combined
+            //     with the zoom restriction (MB17) this keeps the rendered set
+            //     tiny on low-end phones. Tiny pop-in is acceptable.
+            //   MED  (q 40-79) → 150 px : comfortable pop-in buffer.
+            //   HIGH (q ≥ 80)  → 300 px : same as original desktop behaviour.
+            var q = _mbGetQual();
+            var margin = q < 40 ? 0 : q < 80 ? 150 : 300;
 
             // Camera bounds in world space
             var left   = camera.x - margin;
@@ -1471,6 +1556,268 @@ function _mb16_viewportPreCull() {
         _pollN++;
         _tryWrap();
         if (typeof drawBattleUnits === 'function') clearInterval(_pollId);
+        if (_pollN > 100) clearInterval(_pollId);
+    }, 300);
+
+    _tryWrap();
+}
+
+
+// ══════════════════════════════════════════════════════════════════════
+// MB17  ZOOM RESTRICTION — LOW (tight) + MED (slight) — HIGH UNRESTRICTED
+// ══════════════════════════════════════════════════════════════════════
+//
+// On LOW, forces the player to stay zoomed in (sees a smaller world slice).
+// This directly multiplies the effectiveness of MB16 (viewport cull) and
+// MB2 (LOD dot zone) — a tighter view means fewer units survive the cull,
+// fewer draw calls, and more units get the dot treatment.
+//
+// On MED, a much wider — but not unlimited — range applies: enough headroom
+// for normal tactical zooming, just not the full extreme desktop range that
+// could otherwise pull in far more units at once than a mid-tier phone
+// should be asked to render.
+//
+// HIGH gets zero restriction — identical to desktop.
+//
+// Range: zoom must stay between _MIN and _MAX for the active tier.
+// Default zoom in battles is ~0.8–1.0; MB17_LOW_MIN = 0.7 means you can
+// zoom out a little but not far enough to see the whole battlefield at once.
+// MB17_LOW_MAX = 2.5 matches the normal close-up zoom cap.
+//
+// Implementation: a setInterval that clamps `window.zoom` and
+// `window.camera.zoom` every frame while on LOW or MED. It also monkey-
+// patches the mouse-wheel / pinch handler in sandboxmode_update / RTSControls
+// by overriding the global zoom variable so subsequent clamp checks agree.
+// ──────────────────────────────────────────────────────────────────────
+
+var MB17_LOW_MIN = 0.7;  // <<< minimum zoom on LOW (can't zoom out much)
+var MB17_LOW_MAX = 2.5;  // <<< maximum zoom on LOW (can zoom in further)
+var MB17_MED_MIN = 0.5;  // <<< minimum zoom on MED (slight — more room than LOW)
+var MB17_MED_MAX = 3.0;  // <<< maximum zoom on MED (slight — more room than LOW)
+
+function _mb17_zoomRestrict() {
+    // Only enforces anything on LOW/MED; silently no-ops on HIGH.
+    // Checked every frame via rAF so it responds to quality-tier changes.
+    var _raf17 = null;
+
+    function _clamp() {
+        var q = _mbGetQual();
+
+        if (q >= 80) {
+            // HIGH — no restriction whatsoever
+            _raf17 = requestAnimationFrame(_clamp);
+            return;
+        }
+
+        var lo = (q < 40) ? MB17_LOW_MIN : MB17_MED_MIN;
+        var hi = (q < 40) ? MB17_LOW_MAX : MB17_MED_MAX;
+
+        // LOW or MED: clamp global zoom to the active tier's range
+        if (typeof zoom !== 'undefined') {
+            if (zoom < lo) {
+                // Assign through window so the outer scope variable is updated
+                // in browsers where `zoom` is declared with `var` in global scope.
+                window.zoom = lo;
+            } else if (zoom > hi) {
+                window.zoom = hi;
+            }
+        }
+        if (typeof camera !== 'undefined' && camera) {
+            if (camera.zoom != null) {
+                camera.zoom = Math.max(lo, Math.min(hi, camera.zoom));
+            }
+            if (camera.scale != null) {
+                camera.scale = Math.max(lo, Math.min(hi, camera.scale));
+            }
+        }
+        _raf17 = requestAnimationFrame(_clamp);
+    }
+
+    _raf17 = requestAnimationFrame(_clamp);
+    console.log('[OPT-MOBILE-BATTLES MB17] Zoom restriction active — LOW (' +
+                MB17_LOW_MIN + '–' + MB17_LOW_MAX + '), MED (' +
+                MB17_MED_MIN + '–' + MB17_MED_MAX + '), HIGH unrestricted.');
+}
+
+
+// ══════════════════════════════════════════════════════════════════════
+// MB18  PROJECTILE VIEWPORT CULL — LOW QUALITY ONLY  ★★★★☆
+// ══════════════════════════════════════════════════════════════════════
+//
+// On LOW, skips drawing projectiles that are more than MB18_RADIUS world-px
+// from the player. troop_draw.js already has a 600px distance cull, but
+// that's applied AFTER ctx.save/translate — still spending canvas state
+// overhead on every projectile. MB18 wraps the projectiles array with a
+// tighter pre-filtered view so the forEach in troop_draw never sees them.
+//
+// Implementation: wraps drawBattleUnits to temporarily replace
+// battleEnvironment.projectiles with a filtered subset, restoring it
+// after the draw call — same pattern as MB16 for units.
+// ──────────────────────────────────────────────────────────────────────
+
+var MB18_RADIUS = 500; // <<< world-px radius around player for projectile draw on LOW
+
+function _mb18_projectileCull() {
+    var _pollN = 0;
+    var _pollId = null;
+    var _visProj = [];
+    var _savedProj = null;
+
+    var _tryWrap = function () {
+        if (typeof drawBattleUnits !== 'function') return;
+        clearInterval(_pollId);
+
+        var _origDraw = window.drawBattleUnits;
+
+        window.drawBattleUnits = function (ctx) {
+            // Only on LOW and only in land battles (naval/siege draw paths differ)
+            if (_mbGetQual() >= 40 ||
+                typeof inBattleMode === 'undefined' || !inBattleMode ||
+                typeof battleEnvironment === 'undefined' ||
+                !Array.isArray(battleEnvironment.projectiles) ||
+                typeof player === 'undefined') {
+                return _origDraw.apply(this, arguments);
+            }
+
+            var all = battleEnvironment.projectiles;
+            var px = player.x, py = player.y;
+            var rSq = MB18_RADIUS * MB18_RADIUS;
+
+            _visProj.length = 0;
+            for (var i = 0; i < all.length; i++) {
+                var p = all[i];
+                if (!p) continue;
+                var dx = p.x - px, dy = p.y - py;
+                if (dx * dx + dy * dy <= rSq) _visProj.push(p);
+            }
+
+            _savedProj = battleEnvironment.projectiles;
+            battleEnvironment.projectiles = _visProj;
+
+            var result;
+            try {
+                result = _origDraw.apply(this, arguments);
+            } finally {
+                battleEnvironment.projectiles = _savedProj;
+                _savedProj = null;
+            }
+            return result;
+        };
+
+        console.log('[OPT-MOBILE-BATTLES MB18] Projectile cull active (LOW only, ' +
+                    MB18_RADIUS + 'px radius around player, no-op on MED/HIGH).');
+    };
+
+    _pollId = setInterval(function () {
+        _pollN++;
+        _tryWrap();
+        if (_pollN > 100) clearInterval(_pollId);
+    }, 300);
+
+    _tryWrap();
+}
+
+
+// ══════════════════════════════════════════════════════════════════════
+// MB19  OFF-SCREEN AI TICK SKIP — LOW QUALITY ONLY  ★★★★☆
+// ══════════════════════════════════════════════════════════════════════
+//
+// On LOW, units far outside the camera viewport don't run their per-unit
+// AI/physics tick. MB16 already skips DRAWING them; MB19 skips the
+// SIMULATION work too (target selection, pathfinding nudges, state
+// machine transitions). Off-screen units instead run a reduced-rate tick
+// (1-in-8 frames) so they still eventually find targets and don't freeze
+// permanently — they just do it less urgently.
+//
+// Implementation: wraps updateBattleUnits (which iterates all units) by
+// temporarily hiding the off-screen subset from battleEnvironment.units
+// on 7 of every 8 frames.  On the 8th frame all units run normally.
+// Siege / naval are always excluded (their formations depend on global
+// unit awareness).
+// ──────────────────────────────────────────────────────────────────────
+
+var MB19_OFFSCREEN_PAD = 300; // <<< world-px beyond camera before a unit is considered off-screen
+var MB19_TICK_DIVISOR  = 8;   // <<< off-screen units run full AI 1 in this many frames
+
+function _mb19_offscreenAISkip() {
+    var _pollN  = 0;
+    var _pollId = null;
+    var _tick19 = 0;
+    var _onScreenUnits  = [];
+    var _savedUnitsRef19 = null;
+
+    var _tryWrap = function () {
+        if (typeof updateBattleUnits !== 'function') return;
+        clearInterval(_pollId);
+
+        var _origUpdate = window.updateBattleUnits;
+
+        window.updateBattleUnits = function () {
+            _tick19++;
+
+            // Only on LOW; skip in siege/naval; skip if no camera
+            if (_mbGetQual() >= 40 ||
+                (typeof inSiegeBattle !== 'undefined' && inSiegeBattle) ||
+                (typeof inNavalBattle !== 'undefined' && inNavalBattle) ||
+                typeof battleEnvironment === 'undefined' ||
+                !Array.isArray(battleEnvironment.units) ||
+                typeof camera === 'undefined' || !camera) {
+                return _origUpdate.apply(this, arguments);
+            }
+
+            // Full-rate tick every MB19_TICK_DIVISOR frames — off-screen units included
+            if ((_tick19 % MB19_TICK_DIVISOR) === 0) {
+                return _origUpdate.apply(this, arguments);
+            }
+
+            // Reduced-rate: filter to on-screen units only
+            var pad  = MB19_OFFSCREEN_PAD;
+            var left = camera.x - pad, right  = camera.x + camera.width  + pad;
+            var top  = camera.y - pad, bottom = camera.y + camera.height + pad;
+            var all  = battleEnvironment.units;
+
+            _onScreenUnits.length = 0;
+            for (var i = 0; i < all.length; i++) {
+                var u = all[i];
+                if (!u) continue;
+                // CRITICAL: NEVER skip enemy units — the strategy AI (EnemyLandStrategyAI)
+                // runs on its OWN setInterval and writes orderType / orderTargetPoint to each
+                // unit. Those orders are only CONSUMED inside this forEach via processAction.
+                // If an enemy unit is hidden from the simulation here, its move order never
+                // executes and the unit stands still until the camera moves over it — exactly
+                // the "enemy doesn't advance unless camera is looking at them" bug.
+                // Only player units are safe to cull: the player's orders are issued
+                // interactively (RTSControls / player input) and survive being skipped for
+                // a few frames with no visible consequence.
+                if (u.side === 'enemy') { _onScreenUnits.push(u); continue; }
+                // Always include commanders regardless of position
+                if (u.isCommander) { _onScreenUnits.push(u); continue; }
+                if (u.x >= left && u.x <= right && u.y >= top && u.y <= bottom) {
+                    _onScreenUnits.push(u);
+                }
+            }
+
+            _savedUnitsRef19 = battleEnvironment.units;
+            battleEnvironment.units = _onScreenUnits;
+
+            var result;
+            try {
+                result = _origUpdate.apply(this, arguments);
+            } finally {
+                battleEnvironment.units = _savedUnitsRef19;
+                _savedUnitsRef19 = null;
+            }
+            return result;
+        };
+
+        console.log('[OPT-MOBILE-BATTLES MB19] Off-screen AI skip active ' +
+                    '(LOW only, ' + MB19_OFFSCREEN_PAD + 'px pad, 1/' + MB19_TICK_DIVISOR +
+                    ' rate for off-screen, no-op on MED/HIGH).');
+    };
+
+    _pollId = setInterval(function () {
+        _pollN++;
+        _tryWrap();
         if (_pollN > 100) clearInterval(_pollId);
     }, 300);
 

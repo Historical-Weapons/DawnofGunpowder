@@ -4,6 +4,53 @@
 function processEnemyCommanderAI(cmdr) {
     if (cmdr.hp <= 0 || cmdr.state === "FLEEING") return;
 
+    // ── NAVAL OVERRIDE ────────────────────────────────────────────────────────
+    // During naval battles the commander has zero naval awareness in his normal
+    // land-battle logic — he'd just wander the deck running stay-behind-troops
+    // calculations while ships are still far apart, and never charge because
+    // the distance checks are nonsensical on a moving ship.
+    //
+    // Behaviour mirrors ai_categories.js for other enemy troops (200px threshold):
+    //   Phase A — ships far apart:  freeze on deck, face player ship, don't move.
+    //   Phase B — ships within 200px OR boarding timer has fired:
+    //             fall through to normal last-stand / skirmish AI so he charges.
+    if (typeof inNavalBattle !== 'undefined' && inNavalBattle) {
+        // Check how far the player ship is
+        var _navalCmdrShipDist = Infinity;
+        if (typeof navalEnvironment !== 'undefined' && navalEnvironment.ships) {
+            var _pShipForCmdr = navalEnvironment.ships.find(function(s) { return s.side === 'player'; });
+            if (_pShipForCmdr) {
+                _navalCmdrShipDist = Math.hypot(cmdr.x - _pShipForCmdr.x, cmdr.y - _pShipForCmdr.y);
+            }
+        }
+
+        var _boardingFired = !!window._navalBoardingTimer;
+
+        var _cmdrAggroRange = (window.NAVAL_AI_SETTINGS ? window.NAVAL_AI_SETTINGS.commanderAggroRange : 200);
+        if (!_boardingFired && _navalCmdrShipDist > _cmdrAggroRange) {
+            // Ships still far apart — freeze commander in place.
+            // Threshold is configurable via window.NAVAL_AI_SETTINGS.commanderAggroRange (default 200px).
+            // Face the player ship so he looks alert, not oblivious.
+            if (typeof navalEnvironment !== 'undefined' && navalEnvironment.ships) {
+                var _pShipFace = navalEnvironment.ships.find(function(s) { return s.side === 'player'; });
+                if (_pShipFace) {
+                    cmdr.direction = (_pShipFace.x > cmdr.x) ? 1 : -1;
+                }
+            }
+            cmdr.state    = "idle";
+            cmdr.isMoving = false;
+            cmdr.vx       = 0;
+            cmdr.vy       = 0;
+            cmdr.targetVx = 0;
+            cmdr.targetVy = 0;
+            if (cmdr.cooldown > 0) cmdr.cooldown--;
+            return; // Skip all land-battle logic until ships are close
+        }
+        // Ships are close (or boarding fired) — fall through to normal AI below.
+        // The existing last-stand / skirmish logic will now engage correctly.
+    }
+    // ── END NAVAL OVERRIDE ────────────────────────────────────────────────────
+
     // --- PHASE 0: COMMANDER / TACTICAL COWARD PHASE ---
     // The commander will stay behind his living units and will NOT attack
     // until his entire army is dead.
@@ -112,6 +159,27 @@ if (allies.length > 0) {
     // Mark the exact millisecond the commander charges (only sets once troops die)
     cmdr.skirmishStartTime = cmdr.skirmishStartTime || Date.now();
     let elapsed = Date.now() - cmdr.skirmishStartTime;
+
+    // --- NEW: 3-SECOND LONE-COMMANDER DEATH (all battle types) ---
+    // Applies universally the instant a commander's allies are all dead,
+    // regardless of siege/land/naval/river — this is what starts
+    // cmdr.skirmishStartTime above, so it's the same clock. Purpose: stop
+    // the old 20s skirmish-then-melee-rush from turning into an annoying,
+    // droned-out kite once a commander is genuinely alone. This check runs
+    // before, and supersedes, the skirmish/melee-rush phase logic below —
+    // once 3s elapse alone, he just dies instead of fighting on.
+    const LONE_COMMANDER_DEATH_MS = 3000;
+    if (elapsed >= LONE_COMMANDER_DEATH_MS) {
+        cmdr.hp = 0; // existing per-frame death sweep (battlefield_logic.js)
+                     // picks this up and calls handleUnitDeath() as normal.
+        cmdr.state = "idle";
+        cmdr.isMoving = false;
+        cmdr.targetVx = 0;
+        cmdr.targetVy = 0;
+        return;
+    }
+    // --- END 3-SECOND LONE-COMMANDER DEATH ---
+
     let isSkirmishPhase = elapsed < 20000; // 20 seconds
 const ammoLeft = Math.max(cmdr.ammo ?? 0, cmdr.stats?.ammo ?? 0);
 const canSkirmish = isSkirmishPhase && ammoLeft > 0;
@@ -250,6 +318,30 @@ function applySkirmishPhysics(cmdr) {
 
     cmdr.x += cmdr.vx;
     cmdr.y += cmdr.vy;
+
+    // ── HORSE LEG HYSTERESIS ──────────────────────────────────────────────
+    // Without this, the commander oscillates between state="moving" and
+    // state="idle" every frame when near his target (velocity lerps toward
+    // zero slowly but state flips at an exact distance threshold).
+    // cavscript reads isMoving = (unit.state === "moving") to gate leg
+    // animation — so rapid state toggling directly causes twitchy legs.
+    //
+    // Fix: only set isMoving=false when actual velocity drops below a
+    // meaningful threshold (0.25 px/frame), regardless of the orderType
+    // state set by the AI logic above. The AI may set state="idle" but
+    // if the horse is still coasting, keep legs moving until it truly stops.
+    const speed = Math.hypot(cmdr.vx, cmdr.vy);
+    if (speed > 0.25) {
+        cmdr.isMoving = true;
+        // Don't override state="attacking" — that drives the ranged animation.
+        if (cmdr.state !== 'attacking') cmdr.state = 'moving';
+    } else if (speed < 0.08) {
+        // Fully stopped — safe to go idle.
+        cmdr.isMoving = false;
+        if (cmdr.state === 'moving') cmdr.state = 'idle';
+    }
+    // Between 0.08 and 0.25: hold current state (hysteresis dead-band).
+    // ──────────────────────────────────────────────────────────────────────
 
     let margin = 60;
     const worldH = (typeof BATTLE_WORLD_HEIGHT !== "undefined") ? BATTLE_WORLD_HEIGHT : 2600;

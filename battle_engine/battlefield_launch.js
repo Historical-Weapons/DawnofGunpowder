@@ -1,8 +1,18 @@
 // ============================================================================
 // EMPIRE OF THE 13TH CENTURY - BATTLEFIELD TACTICAL ENGINE
 // ============================================================================
-let BATTLE_WORLD_WIDTH = 2400; 
-let BATTLE_WORLD_HEIGHT = 3600; //3600 BEFORE
+// ★ FIX: declared with `var` (not `let`) specifically so window.BATTLE_WORLD_WIDTH
+// and window.BATTLE_WORLD_HEIGHT automatically track every reassignment of these
+// values anywhere in the codebase (river/naval/siege battles all reassign these
+// plain identifiers below and in optimization-battles.js). A top-level `let` only
+// creates a window property for its INITIAL value -- it would silently go stale
+// the moment any battle-type-specific code reassigns BATTLE_WORLD_WIDTH/HEIGHT,
+// which is exactly what was happening: code that explicitly checks
+// window.BATTLE_WORLD_WIDTH/HEIGHT (enemyLandStrategyAI.js's clampToMap(),
+// enemyCommanderAI.js's siege Y-cap) was always seeing the ORIGINAL declared
+// value, never whatever the actual current battle's map size was.
+var BATTLE_WORLD_WIDTH = 2400; 
+var BATTLE_WORLD_HEIGHT = 3600; //3600 BEFORE
 const BATTLE_TILE_SIZE = 8;
 let BATTLE_COLS = Math.floor(BATTLE_WORLD_WIDTH / BATTLE_TILE_SIZE);
 let BATTLE_ROWS = Math.floor(BATTLE_WORLD_HEIGHT / BATTLE_TILE_SIZE);
@@ -29,12 +39,24 @@ let savedWorldPlayerState_Battle = { x: 0, y: 0 };
 let battleEnvironment = {
     bgCanvas: null,
     fgCanvas: null, 
+    treeFrontCanvas: null,
     grid: [],
     units: [],
     projectiles: [], 
     groundEffects: [],
     cityGates: [] 
 };
+// ★ FIX: top-level `let` does NOT create a `window.battleEnvironment` property
+// the way `var` would in a classic (non-module) script -- it only creates a
+// script-scope binding. Every plain `battleEnvironment` reference elsewhere
+// in this codebase still works (sibling classic scripts share that scope),
+// but any code that explicitly checks `window.battleEnvironment` (e.g.
+// enemyLandStrategyAI.js's isLandBattle()/getEnemyUnits()/getPlayerUnits())
+// was seeing `undefined` forever, even mid-battle with units on the field.
+// This object is only ever MUTATED (.units.push, etc.) elsewhere in the
+// codebase, never reassigned to a new object, so a one-time copy here stays
+// valid for the whole page lifetime -- confirmed via full-codebase search.
+window.battleEnvironment = battleEnvironment;
 
 function isExitAllowed() {
     if (!inBattleMode || !isBattlefieldReady) return false;  
@@ -65,7 +87,45 @@ function generateBattleOrganicFeatures(grid, typeValue, count, maxSize) {
     }
 }
 
-function generateBattlefield(worldTerrainType) {
+// ── SMALL-FEATURE QUALITY GATE ──────────────────────────────────────────────
+// Mirrors _bptQL() in battlefield_procedural_terrain.js exactly (same tier
+// reads, same thresholds) so the new small decorative terrain assets below
+// (grid types 5 and 11, and the shrunk 8/9 mountain/karst features) follow
+// the identical LOW/MED/HIGH/MAX convention already used by the procedural
+// ground pass: LOW -> none of these cosmetic features at all, MED/HIGH/MAX ->
+// scaled counts. River water itself (grid type 4) is NEVER gated -- it is
+// drawn unconditionally in the grid loop regardless of tier.
+// Land/river battles only -- siege and naval have their own terrain systems
+// and are untouched by this gate or by grid types 5/8/9/11.
+function _blSmallFeatureTier() {
+    const tier = window.currentGraphicsQualityTier;
+    if (tier === "MAX")                      return 3;
+    if (tier === "HIGH")                     return 2;
+    if (tier === "MED" || tier === "MEDIUM") return 1;
+    if (!window._SETTINGS_IS_MOBILE)         return 2;   // desktop default = HIGH
+    const mq = (typeof window.mobileBattleQuality === "number") ? window.mobileBattleQuality : 0;
+    return mq >= 100 ? 2 : mq >= 50 ? 1 : 0;
+}
+// Scales a base cluster count by tier: LOW=0, MED=~55%, HIGH=100%, MAX=~140%.
+function _blFeatureScale(baseCount) {
+    const ql = _blSmallFeatureTier();
+    if (ql < 1) return 0;
+    if (ql === 1) return Math.max(1, Math.round(baseCount * 0.55));
+    if (ql === 2) return baseCount;
+    return Math.round(baseCount * 1.4);
+}
+
+// v4.7.0: optional onComplete callback. When omitted, behaves EXACTLY as
+// before — fully synchronous, same return, same timing, zero behavioural
+// change for any existing caller. When provided, the heavy column loop
+// (the real bottleneck — see _gbfProcessColumn) runs in time-sliced chunks
+// via setTimeout instead of one continuous block, so the browser gets to
+// paint (and the loading screen's progress bar gets to genuinely animate)
+// between chunks. onComplete(grid) fires once every column has been
+// processed and all of the function's tail bookkeeping (tactical boundary,
+// battleEnvironment.bgCanvas/grid/etc.) has run — i.e. exactly the point at
+// which the old synchronous generateBattlefield() would have returned.
+function generateBattlefield(worldTerrainType, onComplete) {
     const grid = Array.from({ length: BATTLE_COLS }, () => Array(BATTLE_ROWS).fill(0));
     // 1. BEFORE your grid loop starts (usually at the top of your draw function)
 let peakAlreadyDrawn = false;
@@ -78,12 +138,18 @@ if (worldTerrainType.includes("Dense Forest")) {
     groundColor = "#3a4228"; // Slightly darker green
     generateBattleOrganicFeatures(grid, 3, 40, 25); // Dense trees
     generateBattleOrganicFeatures(grid, 7, 20, 12); // More undergrowth
+    // NEW: small decorative clutter -- fallen logs, fern clusters, mossy stones.
+    // MED/HIGH/MAX only (LOW gets 0 via _blFeatureScale).
+    window.__blSmallFeatureStyle = "forest_floor";
+    generateBattleOrganicFeatures(grid, 11, _blFeatureScale(18), 6);
 } 
 // Sparse Forest
 else if (worldTerrainType.includes("Forest")) {
     groundColor = "#425232";
     generateBattleOrganicFeatures(grid, 3, 18, 20); // Sparse trees
     generateBattleOrganicFeatures(grid, 7, 12, 10); // Sparse brush
+    window.__blSmallFeatureStyle = "forest_floor";
+    generateBattleOrganicFeatures(grid, 11, _blFeatureScale(12), 6);
 }
 // NEW SURGERY: STEPPE (Dry, Yellow, No Trees)
 else if (worldTerrainType.includes("Steppe")) {
@@ -91,6 +157,9 @@ else if (worldTerrainType.includes("Steppe")) {
     // No trees (Type 3 removed)
     generateBattleOrganicFeatures(grid, 10, 60, 10); // Heavy dry grass texture
     generateBattleOrganicFeatures(grid, 7, 30, 8);   // Dry dirt/mud patches
+    // NEW: dry shrub tufts + scattered pale stones, open steppe feel.
+    window.__blSmallFeatureStyle = "steppe_scrub";
+    generateBattleOrganicFeatures(grid, 11, _blFeatureScale(16), 8);
 } 
 // NEW SURGERY: PLAINS (Green, Occasional Rocks)
 else if (worldTerrainType.includes("Plains")) {
@@ -100,7 +169,9 @@ else if (worldTerrainType.includes("Plains")) {
     
     generateBattleOrganicFeatures(grid, 10, 40, 12); // Lush grass texture
     generateBattleOrganicFeatures(grid, 6, 2, 10);   // Occasional rocks
- 
+    // NEW: wildflower clumps + low grass hummocks for visual variety.
+    window.__blSmallFeatureStyle = "plains_wildflowers";
+    generateBattleOrganicFeatures(grid, 11, _blFeatureScale(14), 8);
 }
 else if (worldTerrainType.includes("River")) {
     groundColor = "#6b7a4a";
@@ -109,8 +180,35 @@ else if (worldTerrainType.includes("River")) {
 
     generateBattleOrganicFeatures(grid, 3, 25, 15);
     generateBattleOrganicFeatures(grid, 7, 20, 10);
+    // NEW: reed/riverbank clutter on the grassy banks. Gated by tier like every
+    // other biome here -- but note the river itself (grid type 4, carved below)
+    // is drawn completely unconditionally, at every quality tier including LOW.
+    window.__blSmallFeatureStyle = "riverbank_reeds";
+    generateBattleOrganicFeatures(grid, 11, _blFeatureScale(14), 6);
 
     const riverSeed = Math.random() * 1000;
+
+    // Smooth interpolated value noise for the beach fade below — a raw
+    // hash (sin(x*BIG_CONSTANT)) does NOT produce spatial correlation
+    // between adjacent tiles no matter how small the frequency multiplier
+    // is, since the large fixed constants dominate regardless (verified:
+    // adjacent-tile variance was statistically identical to plain random).
+    // This uses the same lattice-hash + smoothstep-interpolation technique
+    // as _bNoise in battlefield_procedural_terrain.js, so nearby tiles
+    // genuinely blend into each other — that's what turns the fade zone
+    // into coherent sand patches/tendrils instead of per-tile static.
+    const _bankHash = (x, y) => {
+        const n = Math.sin(x * 12.9898 + y * 78.233 + riverSeed) * 43758.5453123;
+        return n - Math.floor(n);
+    };
+    const _bankNoise = (x, y) => {
+        const ix = Math.floor(x), iy = Math.floor(y);
+        const fx = x - ix, fy = y - iy;
+        const ux = fx*fx*(3-2*fx), uy = fy*fy*(3-2*fy); // smoothstep
+        const a = _bankHash(ix,   iy),   b = _bankHash(ix+1, iy);
+        const c = _bankHash(ix,   iy+1), d = _bankHash(ix+1, iy+1);
+        return a*(1-ux)*(1-uy) + b*ux*(1-uy) + c*(1-ux)*uy + d*ux*uy;
+    };
 
     for (let x = 0; x < BATTLE_COLS; x++) {
         
@@ -133,25 +231,63 @@ else if (worldTerrainType.includes("River")) {
             let edgeNoise = 0;
             edgeNoise += Math.sin(x * 0.1 + y * 0.1 + riverSeed) * 0.6;   // Low jitter
             edgeNoise += Math.cos(x * 0.02 + y * 0.02) * 1.4;            // Soft rolling bank
-            
+
+            // Extra long-wavelength wobble on TOP of edgeNoise, sampled at a
+            // lower frequency than edgeNoise's tight jitter — this is what
+            // gives the beach's OUTER edge (the grass-ward side) its own
+            // gentle wander independent of the tight waterline wobble, so
+            // the beach doesn't just trace a fixed-width offset of the
+            // water's edge. Real coastlines are wider in some stretches
+            // than others; this is what produces that.
+            // FIX: original frequency (0.006) only completed a fraction of
+            // one cycle within a normal on-screen camera view (~30-60
+            // tiles), so in practice the wander was invisible during play
+            // even though it existed across the full map width. Raised so
+            // the wobble completes a few cycles within a typical view.
+            let beachWander = Math.sin(x * 0.035 + riverSeed * 1.7) * 3.5
+                             + Math.cos(x * 0.08 + riverSeed * 0.6) * 1.8;
+
             let d = distY - riverWidth + edgeNoise;
 
             if (d < 0) {
                 grid[x][y] = 4; // Water
-            } else if (d < 1.5) {
-                // 4. THE SHORE: TIGHTER MUD LINE
-                // Reduced the mud thickness so it doesn't look like a swamp.
-                grid[x][y] = 7; 
-            } else if (d < 6) {
-                // 5. THE BLEED: LESS "SPECKLED"
-                // Increased the threshold and reduced the search area 
-                // so you get occasional smooth patches of mud rather than "static noise."
-                let bleedNoise = Math.sin(x * 0.3) * Math.cos(y * 0.3);
-                let distanceFactor = d / 6;
-                let threshold = 0.6 + (distanceFactor * 0.5) + (bleedNoise * 0.1);
+            } else if (d < 4.0) {
+                // 4. THE BEACH: WIDE SOLID SAND BAND
+                // Widened from a 1.5-tile "shore line" to a full 4-tile sand
+                // strip right at the waterline — this is the main visible
+                // beach transition, deterministic (always present, not
+                // speckled) so there's a real, reliable band of sand rather
+                // than an inconsistent scatter of mud dots.
+                grid[x][y] = 7;
+            } else if (d < (14.0 + beachWander)) {
+                // 5. THE FADE: LONG GRADUAL DISSOLVE INTO GRASS
+                // Widened from 6 to ~14(±beachWander) tiles, and switched
+                // from Math.random() static to deterministic noise sampled
+                // at multiple frequencies, so the fade reads as an organic
+                // coastline losing itself into the grass gradually rather
+                // than a speckled mud scatter with a hard cutoff.
+                //
+                // FIX: the noise frequency here was originally 0.9/0.23 —
+                // close to per-tile, which meant neighbouring tiles didn't
+                // correlate and the fade rendered as isolated single-tile
+                // sand specks poking into grass (visibly "noisy", not
+                // coastline-like). Lowered by roughly 10x so the noise
+                // field varies smoothly across several tiles at once,
+                // producing coherent sand patches/tendrils that dissolve
+                // into grass, the way a real tideline does, rather than
+                // static.
+                let fadeSpan = 14.0 + beachWander;
+                let distanceFactor = Math.max(0, (d - 4.0)) / Math.max(1, (fadeSpan - 4.0));
+                let fadeNoiseA = _bankNoise(x * 0.15, y * 0.22);
+                let fadeNoiseB = _bankNoise(x * 0.05 + 50, y * 0.07 + 50);
+                let fadeNoise = fadeNoiseA * 0.6 + fadeNoiseB * 0.4;
+                // Probability of sand falls off as distanceFactor climbs
+                // toward 1 — dense right after the solid band, sparse by
+                // the outer edge.
+                let threshold = distanceFactor * distanceFactor;
 
-                if (Math.random() > threshold) {
-                    grid[x][y] = 7; 
+                if (fadeNoise > threshold) {
+                    grid[x][y] = 7;
                 }
             }
         }
@@ -163,6 +299,9 @@ else if (worldTerrainType.includes("Desert") || worldTerrainType.includes("Dunes
         // REVISED: Lowered count from 20 to 2, lowered maxSize from 250 to 15
         generateBattleOrganicFeatures(grid, 6, 2, 15);  
         generateBattleOrganicFeatures(grid, 7, 40, 10);  
+        // NEW: dune ripple lines + sun-bleached scrub, breaks up the flat sand.
+        window.__blSmallFeatureStyle = "desert_dunes";
+        generateBattleOrganicFeatures(grid, 11, _blFeatureScale(14), 10);
     } 
 	
 // 1. HIGHLANDS: Rocky and brown, sparse vegetation
@@ -173,6 +312,9 @@ else if (worldTerrainType.includes("Highlands")) {
     // Lower rock density for clusters
     generateBattleOrganicFeatures(grid, 6, 1, 12); // Fewer, smaller rock clusters
     generateBattleOrganicFeatures(grid, 3, 6, 10);  // Very few trees
+    // NEW: dry gorse tufts + loose scree flecks scattered on the rocky brown ground.
+    window.__blSmallFeatureStyle = "highland_scree";
+    generateBattleOrganicFeatures(grid, 11, _blFeatureScale(16), 8);
 }
 
 
@@ -180,22 +322,38 @@ else if (worldTerrainType.includes("Highlands")) {
 else if (worldTerrainType.includes("Large Mountains")) {
     groundColor = "#7B5E3F"; // dark ground
     rockColor = "#2a2a2a";   // Dark grey for exposed rock faces
-    
-    // --- SURGERY: MOUNTAIN RANGE CLUSTERING ---
-    
-generateBattleOrganicFeatures(
-    grid,
-    8,
-    3 + Math.floor(Math.random() * 2), // 4–6 clusters
-    1 + Math.floor(Math.random() *2)  // 1–3 spread
-);
-    // 3. Exposed Rock Formations (Large Boulders/Cliffs)
-    // Increased count and size to represent rocky outcrops in the snow
+
+    // --- REVISED: armies are already standing ON the snowy peak, so the
+    // old massive Himalayan-range silhouettes (grid type 8) don't belong
+    // here anymore -- they read as scenery floating above the battle rather
+    // than terrain the troops are fighting across. Type 8 is kept but now
+    // draws a MUCH smaller single "high outcrop" (see draw loop below), and
+    // it appears far less often. Most of the visual variety instead comes
+    // from the new small features: jagged ice ridges (type 5) and general
+    // snow-biome clutter (type 11) -- boulders, wind-scoured rock, drifts.
+    generateBattleOrganicFeatures(
+        grid,
+        8,
+        Math.max(0, _blFeatureScale(2)), // was 4-6 clusters of full mountains; now 0-3 small outcrops
+        1 + Math.floor(Math.random() * 2)
+    );
+
+    // NEW: Ice ridges -- small jagged rock-and-ice spines, human/unit scale,
+    // the kind of terrain feature you'd actually walk around, not over.
+    window.__blSmallFeatureStyle = "snow_ice_ridge";
+    generateBattleOrganicFeatures(grid, 5, _blFeatureScale(20), 5);
+
+    // 3. Exposed Rock Formations (Boulders) -- unchanged, these were already small.
     generateBattleOrganicFeatures(grid, 6, 23, 3); 
 
     // 4. Textured Snow Drifts
     // Using Type 7 (Mud/Brush logic) but it will render as soft shadows on white ground
     generateBattleOrganicFeatures(grid, 7, 10, 12); 
+
+    // NEW: general snow-biome clutter -- wind-scoured stones, frost-cracked
+    // ground, sparse frozen scrub. Way more small assets scattered around
+    // so the peak doesn't feel empty between the boulders/drifts.
+    generateBattleOrganicFeatures(grid, 11, _blFeatureScale(22), 6);
 }
 	
 // 2. TROPICAL HIGHLANDS (Jungle Karst): Steep, mossy, and humid
@@ -204,11 +362,13 @@ else if (worldTerrainType.includes("Mountain") && !worldTerrainType.includes("La
     // Tropical Palette: Bright Limes, Deep Ferns, and Jungle Teals
     treeColorPool = ["#2d5a27", "#4a7c38", "#1e3d1a", "#5c913c"]; 
     rockColor = "#7a7a7a"; // Limestone grey
-    
-    // --- CLUSTERING LOGIC ---
-    // Tile Type 9: New Tropical Karst Peak (We'll define the draw logic below)
-    // We use a higher count (5) but smaller maxSize (35) to create many "Pillars"
-    generateBattleOrganicFeatures(grid, 9, 3, 35); 
+
+    // --- REVISED: karst pillars (type 9) shrunk further and appear less
+    // densely -- keep a few as real hero terrain features (still bigger
+    // than ground clutter, per design), but rely on the new small clutter
+    // pass (type 11) for the "way more assets" variety: moss-slick boulders,
+    // fern clumps, jungle leaf litter.
+    generateBattleOrganicFeatures(grid, 9, Math.max(1, _blFeatureScale(2)), 30);
 
     // Dense Jungle Foliage
     generateBattleOrganicFeatures(grid, 3, 25, 15); 
@@ -218,12 +378,21 @@ else if (worldTerrainType.includes("Mountain") && !worldTerrainType.includes("La
     
     // Muddy patches/Dense undergrowth
     generateBattleOrganicFeatures(grid, 7, 15, 10);
+
+    // NEW: jungle-floor clutter -- fern clumps, moss-slick stones, fallen
+    // fronds -- scattered much more liberally than the pillars themselves.
+    window.__blSmallFeatureStyle = "karst_jungle_floor";
+    generateBattleOrganicFeatures(grid, 11, _blFeatureScale(24), 6);
 }
 	
 	else {
         generateBattleOrganicFeatures(grid, 3, 60, 15);  
         generateBattleOrganicFeatures(grid, 4, 20, 12);  
         generateBattleOrganicFeatures(grid, 7, 30, 10);  
+        // NEW: default clutter pass for any unrecognized terrain type string,
+        // same as every named biome above.
+        window.__blSmallFeatureStyle = "generic_clutter";
+        generateBattleOrganicFeatures(grid, 11, _blFeatureScale(14), 8);
     }
 
     // --- SURGERY: CANVAS EXPANSION ---
@@ -239,7 +408,15 @@ const ctx = canvas.getContext('2d');
 const fgCanvas = document.createElement('canvas');
 fgCanvas.width = BATTLE_WORLD_WIDTH + (VISUAL_PADDING * 2);
 fgCanvas.height = BATTLE_WORLD_HEIGHT + (VISUAL_PADDING * 2);
-const fgCtx = fgCanvas.getContext('2d'); // We will use this to draw trees!
+const fgCtx = fgCanvas.getContext('2d'); // small bushes/grass/leaf-litter — stays UNDER units
+
+// 2b. NEW: Tree Canopy Front Canvas — tall tree canopies ONLY. Drawn on top
+// of units/projectiles (unlike fgCanvas above), so trees visually overhang
+// troops walking underneath, matching real top-down forest canopy look.
+const treeFrontCanvas = document.createElement('canvas');
+treeFrontCanvas.width = BATTLE_WORLD_WIDTH + (VISUAL_PADDING * 2);
+treeFrontCanvas.height = BATTLE_WORLD_HEIGHT + (VISUAL_PADDING * 2);
+const treeFrontCtx = treeFrontCanvas.getContext('2d');
 	
  
 // 1. Paint the "Infinite" Floor / Abyss
@@ -285,9 +462,73 @@ const fgCtx = fgCanvas.getContext('2d'); // We will use this to draw trees!
     ctx.translate(VISUAL_PADDING, VISUAL_PADDING);
 	fgCtx.save();
 	fgCtx.translate(VISUAL_PADDING, VISUAL_PADDING);
+	treeFrontCtx.save();
+	treeFrontCtx.translate(VISUAL_PADDING, VISUAL_PADDING);
+
+    // ── HIGH/MAX ONLY: Procedural terrain ground pass ─────────────────────────
+    // Applies subtle ridge noise, domain-warped FBM, and crossing ridge fields
+    // over the flat ground fill to produce organic terrain variation.
+    // Has an internal quality gate — returns immediately on LOW/MED.
+    // Also skips siege and naval (guarded inside applyProceduralGroundPass).
+    //
+    // SEED: derived from the terrain type string (stable within a session for
+    // the same map type) XOR'd with a per-battle random offset so each fight
+    // on the same map type still looks different.
+    //
+    // v4.7.0 CHUNKING: at HIGH/MAX with the new sub-tile resolution (_bSubN
+    // in battlefield_procedural_terrain.js), this pass alone is now heavy
+    // enough to matter (benchmarked several seconds of raw compute at MAX
+    // across a full battlefield). When generateBattlefield is running
+    // chunked (onComplete given), this pass also runs chunked via its own
+    // onComplete, and the rest of this function (_gbfProcessColumn/column
+    // chunker) only starts once it's fully done. Everything below this call
+    // is unchanged either way — function declarations are hoisted, so
+    // _gbfProcessColumn and _restOfGenerateBattlefield can be called from
+    // inside the async callback even though they're defined later in the
+    // textual source.
+    window.__battleTerrainProcApplied = false;
+    const _bptBase = (typeof _bptStringSeed === "function") ? _bptStringSeed(worldTerrainType) : 0;
+    const _bptSeed = (_bptBase + ((Math.random() * 9000) | 0)) % 10000;
+
+    function _runProceduralPass(cb, chunked) {
+        if (typeof applyProceduralGroundPass !== "function") { cb(); return; }
+        if (chunked) {
+            applyProceduralGroundPass(
+                ctx, fgCtx, worldTerrainType, groundColor, _bptSeed,
+                BATTLE_COLS, BATTLE_ROWS, BATTLE_TILE_SIZE, grid,
+                cb   // chunked: applyProceduralGroundPass defers via setTimeout, calls cb when fully done
+            );
+        } else {
+            // FIX: omit the callback arg entirely so applyProceduralGroundPass
+            // takes its own synchronous branch (see its "typeof onComplete
+            // !== 'function'" check) instead of being forced onto the chunked
+            // setTimeout path just because *some* function was passed. Without
+            // this, generateBattlefield's "synchronous, unchanged" branch would
+            // silently return before the procedural pass had actually painted.
+            applyProceduralGroundPass(
+                ctx, fgCtx, worldTerrainType, groundColor, _bptSeed,
+                BATTLE_COLS, BATTLE_ROWS, BATTLE_TILE_SIZE, grid
+            );
+            cb();
+        }
+    }
+
+    if (typeof onComplete !== "function") {
+        // Synchronous path: run the procedural pass synchronously right now
+        // (exactly as before), then fall through to the rest of the function
+        // below, which itself also takes the synchronous branch.
+        _runProceduralPass(function(){}, false);
+    }
+    // ── END procedural pass dispatch ───────────────────────────────────────────
 
     // --- YOUR ORIGINAL GRID DRAWING LOOP (DO NOT DELETE) ---
-    for (let i = 0; i < BATTLE_COLS; i++) {
+    // v4.7.0 CHUNKING: the loop body below is 100% unchanged from before —
+    // only the outer "for (let i...)" iteration mechanism changed, so this
+    // function can process the grid in time-sliced batches instead of one
+    // uninterrupted block (see _gbfProcessColumns / the chunked driver at
+    // the end of generateBattlefield). _gbfProcessColumn(i) does exactly
+    // what one iteration of the old "for (let i...)" loop did.
+    function _gbfProcessColumn(i) {
         for (let j = 0; j < BATTLE_ROWS; j++) {
 							let px = i * BATTLE_TILE_SIZE;
 							let py = j * BATTLE_TILE_SIZE;
@@ -313,7 +554,18 @@ const fgCtx = fgCanvas.getContext('2d'); // We will use this to draw trees!
 									const isSnowyConifer = worldTerrainType.includes("Snowy") || (worldTerrainType.includes("Mountain") && worldTerrainType.includes("North"));
 									const isHighland = worldTerrainType.includes("Mountain") && !worldTerrainType.includes("Snowy");
 
-									const drawCtx = fgCtx; 
+									// FRONT/BACK LAYER SPLIT: sizeMult is uniformly 2-14. The
+									// larger ~80% of canopies (sizeMult > 4.4) read as full
+									// trees and draw to treeFrontCtx, which renders AFTER units
+									// so canopy visually overhangs troops underneath — matching
+									// real top-down forest occlusion. The smaller ~20%
+									// (sizeMult <= 4.4) read as low bushes/shrubs and stay on
+									// fgCtx, which renders BEFORE units (stays under), same as
+									// grass tufts/leaf litter/pebbles. This is a size-driven
+									// split off the SAME existing random roll — no new RNG call,
+									// so it doesn't change which tiles get which sizeMult.
+									const isBigTree = sizeMult > 4.4;
+									const drawCtx = isBigTree ? treeFrontCtx : fgCtx;
 									drawCtx.fillStyle = treeColor;
 
 									if (isSnowyConifer) {
@@ -421,147 +673,110 @@ else if (grid[i][j] === 6) { // Rocks / Boulders
     }
 }
 							
-else if (grid[i][j] === 7) { // Mud/Brush
+else if (grid[i][j] === 7) { // Beach / sand transition band
     // 1. Deterministic Seed for consistent ground noise
     const brushSeed = (i * 1337 + j * 7331);
     const bRand = (n) => ((Math.abs(Math.sin(brushSeed * n)) * 1000) % 1);
 
-    // 2. Muddy Base (Slightly smaller than tile to avoid grid lines)
-    ctx.fillStyle = "rgba(40, 30, 20, 0.12)"; 
-    ctx.beginPath();
-    ctx.arc(px + BATTLE_TILE_SIZE/2, py + BATTLE_TILE_SIZE/2, BATTLE_TILE_SIZE * 0.4, 0, Math.PI * 2);
-    ctx.fill();
+    // 2. Sand base — this used to be a small, nearly-invisible dark mud
+    // arc (rgba(40,30,20,0.12), radius 0.4 tiles) sitting on top of the
+    // full green groundColor fill underneath, which is why the beach
+    // never actually read as sand. This is now a full-tile warm sand fill
+    // so LOW/MED (which never run the HIGH/MAX procedural _bBeachPass)
+    // still show a real beach, not grass with faint dark specks.
+    const sandShade = 0.85 + bRand(9) * 0.3;
+    const sr = (168 * sandShade) | 0, sg = (138 * sandShade) | 0, sb = (92 * sandShade) | 0;
+    ctx.fillStyle = "rgb(" + sr + "," + sg + "," + sb + ")";
+    ctx.fillRect(px, py, BATTLE_TILE_SIZE, BATTLE_TILE_SIZE);
 
-    // 3. "Speckle" Detail (Small organic clumps)
-    ctx.fillStyle = "rgba(0, 0, 0, 0.08)";
-    for (let s = 0; s < 2; s++) {
+    // 3. Grain speckle — small darker/lighter flecks for texture, same
+    // idea as before but now visible against a sand base instead of a
+    // green one.
+    for (let s = 0; s < 3; s++) {
         const ox = bRand(s + 1) * BATTLE_TILE_SIZE;
         const oy = bRand(s + 2) * BATTLE_TILE_SIZE;
-        const r = 0.5 + bRand(s + 3) * 1.5; // Very small radius
-        
+        const r = 0.5 + bRand(s + 3) * 1.4;
+        const darker = bRand(s + 6) > 0.5;
+        ctx.fillStyle = darker ? "rgba(90,68,42,0.18)" : "rgba(214,196,158,0.20)";
+
         ctx.beginPath();
         ctx.arc(px + ox, py + oy, r, 0, Math.PI * 2);
         ctx.fill();
     }
 }
  
-else if (grid[i][j] === 8) { // BIG MOUNTAIN - HIMALAYAN RANGE
+else if (grid[i][j] === 8) { // HIGH OUTCROP -- shrunk from the old "BIG MOUNTAIN Himalayan range".
+    // REVISED: the army is already standing on the mountain, so a
+    // screen-filling multi-peak range doesn't belong here anymore. This is
+    // now a single, much smaller rocky/snow outcrop -- big enough to read as
+    // a real terrain feature (bigger than the ground clutter in type 11),
+    // but nowhere near the old "mountain range towering over the battle"
+    // scale. Roughly 1/8th the old width and height.
     const peakSeed = (i * 1337 + j * 7331);
     const rand = (n) => ((Math.abs(Math.sin(peakSeed * n)) * 1000) % 1);
 
     const cx = px + BATTLE_TILE_SIZE / 2;
     const cy = py + BATTLE_TILE_SIZE / 2;
 
-    // Each tile becomes a mini mountain RANGE (3–4 peaks)
-    const peakCount = 3 + Math.floor(rand(1) * 2);
+    // Single outcrop per tile now (was 3-4 peaks forming a whole range).
+    const baseWidth = BATTLE_TILE_SIZE * (3 + rand(5) * 3);   // was 28-58
+    const height = baseWidth * (0.8 + rand(8) * 0.6);          // was up to 1.7x width
+    const peakX = cx + (rand(2) - 0.5) * (BATTLE_TILE_SIZE * 1.5);
+    const baseY = cy + BATTLE_TILE_SIZE;
 
-    for (let p = 0; p < peakCount; p++) {
+    ctx.save();
 
-        const xOffset = (rand(p + 2) - 0.5) * (BATTLE_TILE_SIZE * 14);
+    // 1. Dark rock base
+    ctx.fillStyle = "#4b5563";
+    ctx.beginPath();
+    ctx.moveTo(peakX - baseWidth, baseY);
+    ctx.lineTo(peakX - baseWidth * (0.7 + rand(11) * 0.2), cy - height * (0.2 + rand(12) * 0.2));
+    ctx.lineTo(peakX - baseWidth * (0.3 + rand(13) * 0.2), cy - height * (0.7 + rand(14) * 0.2));
+    ctx.lineTo(peakX, cy - height); // summit
+    ctx.lineTo(peakX + baseWidth * (0.3 + rand(15) * 0.2), cy - height * (0.7 + rand(16) * 0.2));
+    ctx.lineTo(peakX + baseWidth * (0.7 + rand(17) * 0.2), cy - height * (0.2 + rand(18) * 0.2));
+    ctx.lineTo(peakX + baseWidth, baseY);
+    ctx.closePath();
+    ctx.fill();
 
-        const baseWidth = BATTLE_TILE_SIZE * (28 + rand(p + 5) * 30);
-        const height = baseWidth * (0.9 + rand(p + 8) * 0.8);
+    // 2. Mid rock shadow
+    ctx.fillStyle = "#6b7280";
+    ctx.beginPath();
+    ctx.moveTo(peakX - baseWidth * 0.6, baseY);
+    ctx.lineTo(peakX - baseWidth * 0.3, cy - height * 0.5);
+    ctx.lineTo(peakX, cy - height);
+    ctx.lineTo(peakX + baseWidth * 0.3, cy - height * 0.5);
+    ctx.lineTo(peakX + baseWidth * 0.6, baseY);
+    ctx.closePath();
+    ctx.fill();
 
-        const peakX = cx + xOffset;
-        const baseY = cy + (BATTLE_TILE_SIZE * 6);
+    // 3. Small snow cap
+    ctx.fillStyle = "#f8fafc";
+    ctx.beginPath();
+    ctx.moveTo(peakX, cy - height);
+    ctx.lineTo(peakX - baseWidth * 0.15, cy - height * (0.75 + rand(21) * 0.1));
+    ctx.lineTo(peakX - baseWidth * 0.05, cy - height * (0.7 + rand(22) * 0.1));
+    ctx.lineTo(peakX + baseWidth * 0.08, cy - height * (0.78 + rand(23) * 0.1));
+    ctx.lineTo(peakX + baseWidth * 0.18, cy - height * (0.72 + rand(24) * 0.1));
+    ctx.closePath();
+    ctx.fill();
 
-        ctx.save();
-
-        // =========================================================
-        // 1. DARK ROCK BASE (Himalayan granite tone)
-        // =========================================================
-        ctx.fillStyle = "#4b5563"; // slate rock base
-
-        ctx.beginPath();
-        ctx.moveTo(peakX - baseWidth, baseY);
-
-        // jagged left ridge
-        ctx.lineTo(
-            peakX - baseWidth * (0.7 + rand(p + 11) * 0.2),
-            cy - height * (0.2 + rand(p + 12) * 0.2)
-        );
-
-        ctx.lineTo(
-            peakX - baseWidth * (0.3 + rand(p + 13) * 0.2),
-            cy - height * (0.7 + rand(p + 14) * 0.2)
-        );
-
-        // main summit (sharp peak)
-        ctx.lineTo(peakX, cy - height);
-
-        // right ridge (also jagged)
-        ctx.lineTo(
-            peakX + baseWidth * (0.3 + rand(p + 15) * 0.2),
-            cy - height * (0.7 + rand(p + 16) * 0.2)
-        );
-
-        ctx.lineTo(
-            peakX + baseWidth * (0.7 + rand(p + 17) * 0.2),
-            cy - height * (0.2 + rand(p + 18) * 0.2)
-        );
-
-        ctx.lineTo(peakX + baseWidth, baseY);
-        ctx.closePath();
-        ctx.fill();
-
-        // =========================================================
-        // 2. MID ROCK SHADOW (depth layer)
-        // =========================================================
-        ctx.fillStyle = "#6b7280";
-
-        ctx.beginPath();
-        ctx.moveTo(peakX - baseWidth * 0.6, baseY);
-        ctx.lineTo(peakX - baseWidth * 0.3, cy - height * 0.5);
-        ctx.lineTo(peakX, cy - height);
-        ctx.lineTo(peakX + baseWidth * 0.3, cy - height * 0.5);
-        ctx.lineTo(peakX + baseWidth * 0.6, baseY);
-        ctx.closePath();
-        ctx.fill();
-
-        // =========================================================
-        // 3. SNOW CAP (broken Himalayan snow layering)
-        // =========================================================
-        ctx.fillStyle = "#f8fafc";
-
-        ctx.beginPath();
-        ctx.moveTo(peakX, cy - height);
-
-        ctx.lineTo(
-            peakX - baseWidth * 0.15,
-            cy - height * (0.75 + rand(p + 21) * 0.1)
-        );
-
-        ctx.lineTo(
-            peakX - baseWidth * 0.05,
-            cy - height * (0.7 + rand(p + 22) * 0.1)
-        );
-
-        ctx.lineTo(
-            peakX + baseWidth * 0.08,
-            cy - height * (0.78 + rand(p + 23) * 0.1)
-        );
-
-        ctx.lineTo(
-            peakX + baseWidth * 0.18,
-            cy - height * (0.72 + rand(p + 24) * 0.1)
-        );
-
-        ctx.closePath();
-        ctx.fill();
-
-        ctx.restore();
-    }
+    ctx.restore();
 }
 else if (grid[i][j] === 9) { // Tropical Karst Pillars (Hmong Highland Style)
     const peakSeed = (i * 1337 + j * 7331);
     const rand = (n) => ((Math.abs(Math.sin(peakSeed * n)) * 1000) % 1);
     
-    // Draw 2-3 tightly packed pillars per tile
-    for (let p = 0; p < 2; p++) {
-        const xOffset = (rand(p + 5) - 0.5) * (BATTLE_TILE_SIZE * 8);
-        const pWidth = BATTLE_TILE_SIZE * (15 + rand(p + 10) * 15); 
-        
-        // REDUCED HEIGHT BY 60%: Original (1.2 + rand * 0.8) -> New (0.48 + rand * 0.32)
+    // Draw 1-2 tightly packed pillars per tile (was 2-3, and each pillar is
+    // itself smaller now -- REVISED per the same "smaller but more numerous
+    // small features" pass as the snowy peak outcrops above).
+    const pillarCount = rand(3) > 0.5 ? 2 : 1;
+    for (let p = 0; p < pillarCount; p++) {
+        const xOffset = (rand(p + 5) - 0.5) * (BATTLE_TILE_SIZE * 5);
+        const pWidth = BATTLE_TILE_SIZE * (7 + rand(p + 10) * 7);  // was 15-30
+
+        // Height ratio unchanged (already reduced 60% previously); shrinking
+        // pWidth alone brings absolute pillar size down by more than half again.
         const pHeight = pWidth * (0.48 + rand(p + 15) * 0.32); 
         
         const cx = px + (BATTLE_TILE_SIZE / 2) + xOffset;
@@ -603,6 +818,197 @@ else if (grid[i][j] === 9) { // Tropical Karst Pillars (Hmong Highland Style)
     }
 }
 
+else if (grid[i][j] === 5) { // NEW: Small Ice Ridge (snowy mountain ground-scale feature)
+    // Jagged rock-and-ice spine, unit scale -- something troops walk around,
+    // not a scenic backdrop. Replaces most of the old towering type-8 range
+    // as the primary visual feature on snowy peaks.
+    const ridgeSeed = (i * 1337 + j * 7331);
+    const rRand = (n) => ((Math.abs(Math.sin(ridgeSeed * n)) * 1000) % 1);
+
+    const cx = px + BATTLE_TILE_SIZE / 2;
+    const cy = py + BATTLE_TILE_SIZE / 2;
+    const rWidth = BATTLE_TILE_SIZE * (1.4 + rRand(2) * 1.6);
+    const rHeight = rWidth * (0.7 + rRand(4) * 0.5);
+    const tilt = (rRand(6) - 0.5) * 0.6;
+
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(tilt);
+
+    // 1. Rock base (dark slate, same family as the outcrop above)
+    ctx.fillStyle = "#525b66";
+    ctx.beginPath();
+    ctx.moveTo(-rWidth * 0.5, rHeight * 0.35);
+    ctx.lineTo(-rWidth * 0.25, -rHeight * 0.5);
+    ctx.lineTo(0, -rHeight * 0.65);
+    ctx.lineTo(rWidth * 0.3, -rHeight * 0.45);
+    ctx.lineTo(rWidth * 0.5, rHeight * 0.35);
+    ctx.closePath();
+    ctx.fill();
+
+    // 2. Ice glaze along the upper edge (catches the light)
+    ctx.fillStyle = "rgba(226, 240, 245, 0.85)";
+    ctx.beginPath();
+    ctx.moveTo(-rWidth * 0.22, -rHeight * 0.48);
+    ctx.lineTo(0, -rHeight * 0.65);
+    ctx.lineTo(rWidth * 0.28, -rHeight * 0.43);
+    ctx.lineTo(rWidth * 0.1, -rHeight * 0.3);
+    ctx.lineTo(-rWidth * 0.08, -rHeight * 0.32);
+    ctx.closePath();
+    ctx.fill();
+
+    // 3. Shadow side
+    ctx.fillStyle = "rgba(0,0,0,0.18)";
+    ctx.beginPath();
+    ctx.moveTo(-rWidth * 0.5, rHeight * 0.35);
+    ctx.lineTo(-rWidth * 0.25, -rHeight * 0.5);
+    ctx.lineTo(0, -rHeight * 0.2);
+    ctx.lineTo(-rWidth * 0.1, rHeight * 0.35);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.restore();
+}
+
+else if (grid[i][j] === 11) { // NEW: General small-feature clutter, biome-styled
+    // Shared "way more assets" clutter tile used by every biome above (Dense
+    // Forest, Forest, Steppe, Plains, River, Desert/Dunes, Highlands, Large
+    // Mountains, Karst, and the fallback). window.__blSmallFeatureStyle is
+    // set right before each generateBattleOrganicFeatures(grid, 11, ...) call
+    // so this one draw branch can render a biome-appropriate small asset
+    // without needing a dozen new grid-type numbers. Land/river only -- this
+    // whole branch is unreachable from siege/naval since generateBattlefield
+    // is never called for those modes.
+    const style = window.__blSmallFeatureStyle || "generic_clutter";
+    const cSeed = (i * 1337 + j * 7331);
+    const cRand = (n) => ((Math.abs(Math.sin(cSeed * n)) * 1000) % 1);
+    const cx = px + BATTLE_TILE_SIZE / 2 + (cRand(1) - 0.5) * BATTLE_TILE_SIZE * 0.6;
+    const cy = py + BATTLE_TILE_SIZE / 2 + (cRand(2) - 0.5) * BATTLE_TILE_SIZE * 0.6;
+    const s = BATTLE_TILE_SIZE * (0.5 + cRand(3) * 0.6); // small asset scale
+
+    ctx.save();
+
+    if (style === "forest_floor") {
+        // Fallen log + tiny fern tuft
+        ctx.fillStyle = "rgba(60, 42, 24, 0.5)";
+        ctx.beginPath();
+        ctx.ellipse(cx, cy, s * 1.1, s * 0.35, cRand(4) * Math.PI, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = "#3a5f27";
+        for (let f = 0; f < 3; f++) {
+            const fx = cx + (cRand(f + 5) - 0.5) * s;
+            const fy = cy + (cRand(f + 6) - 0.5) * s * 0.6;
+            ctx.beginPath();
+            ctx.ellipse(fx, fy, s * 0.25, s * 0.1, cRand(f + 7), 0, Math.PI * 2);
+            ctx.fill();
+        }
+    } else if (style === "steppe_scrub") {
+        // Dry shrub tuft: a few thin pale strokes fanning from a base point
+        ctx.strokeStyle = "rgba(120, 110, 60, 0.5)";
+        ctx.lineWidth = 1;
+        for (let b = 0; b < 4; b++) {
+            const ang = (b / 4) * Math.PI - Math.PI / 2 + (cRand(b + 8) - 0.5) * 0.6;
+            ctx.beginPath();
+            ctx.moveTo(cx, cy);
+            ctx.lineTo(cx + Math.cos(ang) * s, cy + Math.sin(ang) * s - s * 0.3);
+            ctx.stroke();
+        }
+    } else if (style === "plains_wildflowers") {
+        // Small cluster of colored flower dots over a grass hummock
+        ctx.fillStyle = "rgba(70, 100, 40, 0.35)";
+        ctx.beginPath();
+        ctx.ellipse(cx, cy, s * 0.9, s * 0.4, 0, 0, Math.PI * 2);
+        ctx.fill();
+        const flowerColors = ["#e8d24a", "#e0e0e0", "#c86dd7"];
+        for (let f = 0; f < 3; f++) {
+            ctx.fillStyle = flowerColors[Math.floor(cRand(f + 9) * flowerColors.length)];
+            const fx = cx + (cRand(f + 10) - 0.5) * s;
+            const fy = cy + (cRand(f + 11) - 0.5) * s * 0.5;
+            ctx.beginPath();
+            ctx.arc(fx, fy, s * 0.12, 0, Math.PI * 2);
+            ctx.fill();
+        }
+    } else if (style === "riverbank_reeds") {
+        // Thin green reed blades near the water
+        ctx.strokeStyle = "rgba(45, 90, 39, 0.6)";
+        ctx.lineWidth = 1.2;
+        for (let r = 0; r < 4; r++) {
+            const bx = cx + (cRand(r + 12) - 0.5) * s;
+            const bend = (cRand(r + 13) - 0.5) * s * 0.4;
+            ctx.beginPath();
+            ctx.moveTo(bx, cy + s * 0.4);
+            ctx.quadraticCurveTo(bx + bend, cy - s * 0.2, bx + bend * 1.4, cy - s * 0.9);
+            ctx.stroke();
+        }
+    } else if (style === "desert_dunes") {
+        // Sand ripple arcs + a sparse pale scrub
+        ctx.strokeStyle = "rgba(140, 110, 70, 0.3)";
+        ctx.lineWidth = 1;
+        for (let r = 0; r < 2; r++) {
+            ctx.beginPath();
+            ctx.arc(cx, cy + r * s * 0.3, s * (0.7 + r * 0.3), Math.PI * 0.15, Math.PI * 0.85);
+            ctx.stroke();
+        }
+        if (cRand(14) > 0.5) {
+            ctx.strokeStyle = "rgba(139, 126, 113, 0.5)";
+            ctx.beginPath();
+            ctx.moveTo(cx, cy + s * 0.3);
+            ctx.lineTo(cx, cy - s * 0.4);
+            ctx.stroke();
+        }
+    } else if (style === "highland_scree") {
+        // Loose scree flecks + a single dry gorse tuft
+        ctx.fillStyle = "rgba(90, 90, 90, 0.4)";
+        for (let sc = 0; sc < 3; sc++) {
+            const sx = cx + (cRand(sc + 15) - 0.5) * s;
+            const sy = cy + (cRand(sc + 16) - 0.5) * s * 0.7;
+            ctx.beginPath();
+            ctx.arc(sx, sy, s * 0.12, 0, Math.PI * 2);
+            ctx.fill();
+        }
+        ctx.strokeStyle = "rgba(90, 90, 58, 0.5)";
+        ctx.beginPath();
+        ctx.moveTo(cx, cy + s * 0.3);
+        ctx.lineTo(cx - s * 0.15, cy - s * 0.4);
+        ctx.moveTo(cx, cy + s * 0.3);
+        ctx.lineTo(cx + s * 0.15, cy - s * 0.35);
+        ctx.stroke();
+    } else if (style === "snow_ice_ridge") {
+        // (Not normally reached -- snow biome uses grid type 5 for its
+        // signature feature. Kept as a safe fallback: small frost-cracked
+        // stone if this style tag is ever set without a type-5 tile.)
+        ctx.fillStyle = "rgba(120, 130, 140, 0.5)";
+        ctx.beginPath();
+        ctx.arc(cx, cy, s * 0.4, 0, Math.PI * 2);
+        ctx.fill();
+    } else if (style === "karst_jungle_floor") {
+        // Fern clump + moss-slick stone
+        ctx.fillStyle = "rgba(60, 60, 55, 0.5)";
+        ctx.beginPath();
+        ctx.ellipse(cx, cy + s * 0.2, s * 0.5, s * 0.25, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = "#4a7c38";
+        for (let fr = 0; fr < 4; fr++) {
+            const ang = (fr / 4) * Math.PI * 2 + cRand(fr + 17);
+            ctx.beginPath();
+            ctx.ellipse(
+                cx + Math.cos(ang) * s * 0.3,
+                cy + Math.sin(ang) * s * 0.3 - s * 0.15,
+                s * 0.35, s * 0.12, ang, 0, Math.PI * 2
+            );
+            ctx.fill();
+        }
+    } else {
+        // generic_clutter fallback: small neutral stone
+        ctx.fillStyle = "rgba(90, 90, 90, 0.4)";
+        ctx.beginPath();
+        ctx.ellipse(cx, cy, s * 0.5, s * 0.3, cRand(18), 0, Math.PI * 2);
+        ctx.fill();
+    }
+
+    ctx.restore();
+}
+
 else if (grid[i][j] === 10) { // GRASS TEXTURE
     const grassSeed = (i * 1337 + j * 7331);
     const gRand = (n) => ((Math.abs(Math.sin(grassSeed * n)) * 1000) % 1);
@@ -630,25 +1036,102 @@ else if (grid[i][j] === 10) { // GRASS TEXTURE
 }
 			
 				
-        }
+        } // end for(j)
+    } // end _gbfProcessColumn
+
+    // Shared tail bookkeeping — identical to what always ran right after the
+    // old synchronous "for (let i...)" loop finished. Factored into a
+    // function so both the synchronous and chunked paths below call the
+    // exact same code instead of duplicating it.
+    function _gbfFinish() {
+        // 4. SURGERY: The Red Tactical Boundary
+        ctx.strokeStyle = "rgba(255, 0, 0, 0.6)";
+        ctx.lineWidth = 8;
+        ctx.setLineDash([15, 15]); // Makes it look like a tactical UI line
+        ctx.strokeRect(0, 0, BATTLE_WORLD_WIDTH, BATTLE_WORLD_HEIGHT);
+        ctx.setLineDash([]); // Reset for other drawings
+
+        ctx.restore(); // Back to global canvas space
+
+        // Store state
+        battleEnvironment.bgCanvas = canvas;
+        battleEnvironment.fgCanvas = fgCanvas; // <--- ADD THIS LINE
+        battleEnvironment.treeFrontCanvas = treeFrontCanvas; // big tree canopies — drawn OVER units
+        battleEnvironment.grid = grid;
+        battleEnvironment.groundColor = "#000000";
+        battleEnvironment.visualPadding = VISUAL_PADDING; // Store this for the camera!
+
+        // SURGERY: Capture the real terrain name + computed ground tone for the
+        // minimap (minimap.js). Does NOT touch the existing groundColor line above
+        // (kept as-is to avoid changing the "infinite floor" abyss rendering that
+        // already depends on it) — these are separate, additive properties.
+        battleEnvironment.terrainType  = worldTerrainType;
+        battleEnvironment.minimapColor = groundColor;
     }
 
-    // 4. SURGERY: The Red Tactical Boundary
-    ctx.strokeStyle = "rgba(255, 0, 0, 0.6)";
-    ctx.lineWidth = 8;
-    ctx.setLineDash([15, 15]); // Makes it look like a tactical UI line
-    ctx.strokeRect(0, 0, BATTLE_WORLD_WIDTH, BATTLE_WORLD_HEIGHT);
-    ctx.setLineDash([]); // Reset for other drawings
-    
-    ctx.restore(); // Back to global canvas space
+    if (typeof onComplete !== "function") {
+        // ── SYNCHRONOUS PATH (default, unchanged) ──────────────────────────
+        // No callback given → run every column right now, exactly as the
+        // original single "for (let i...)" loop always did. Any existing
+        // caller that doesn't pass a callback sees byte-for-byte identical
+        // timing and behaviour to before this change.
+        for (let i = 0; i < BATTLE_COLS; i++) {
+            _gbfProcessColumn(i);
+        }
+        _gbfFinish();
+        return grid;
+    }
 
-    // Store state
-    battleEnvironment.bgCanvas = canvas;
-	battleEnvironment.fgCanvas = fgCanvas; // <--- ADD THIS LINE
-    battleEnvironment.grid = grid;
-    battleEnvironment.groundColor = "#000000";
-    battleEnvironment.visualPadding = VISUAL_PADDING; // Store this for the camera!
+    // ── CHUNKED PATH (opt-in via onComplete) ────────────────────────────────
+    // v4.7.0 FIX: generateBattlefield's column loop (and, at HIGH/MAX, the
+    // procedural terrain pass above) are the biggest costs in battle setup
+    // (up to 300x450+ tiles, and at MAX a 4x4 sub-tile shading grid on top).
+    // Run either as one continuous block and the loading screen's progress
+    // bar cannot animate — the main thread can't paint or fire any timer
+    // callback mid-block (see the _wrapLaunchFn comments in
+    // battle-loading-screen.js for the full writeup). Processing a handful
+    // of columns per setTimeout tick lets the browser paint between chunks,
+    // so the percentage the player sees is now tied to real, ongoing work
+    // instead of jumping 0%→100% in one tick.
+    //
+    // window.__gbfProgress is read by _battleIsReady()/_runLoadingGate() in
+    // battle-loading-screen.js to drive the visible percentage while THIS
+    // function is still running (i.e. before battleEnvironment.units even
+    // exists yet, which is what the old readiness check depended on).
+    // Weighted 40/60 between the procedural pass and the tile loop — the
+    // procedural pass is the heavier of the two at MAX, but skipped
+    // entirely at LOW/MED (applyProceduralGroundPass's own internal gate),
+    // so the weighting only matters when it's actually running.
+    window.__gbfProgress = { done: false, pct: 0 };
+
+    _runProceduralPass(function () {
+        window.__gbfProgress.pct = 40;
+
+        const COLS_PER_CHUNK = Math.max(1, Math.round(BATTLE_COLS / 40)); // ~40 chunks total
+        let _col = 0;
+
+        function _gbfChunk() {
+            const end = Math.min(BATTLE_COLS, _col + COLS_PER_CHUNK);
+            for (; _col < end; _col++) {
+                _gbfProcessColumn(_col);
+            }
+            const tileFrac = BATTLE_COLS > 0 ? (_col / BATTLE_COLS) : 1;
+            window.__gbfProgress.pct = Math.round(40 + tileFrac * 60);
+
+            if (_col < BATTLE_COLS) {
+                setTimeout(_gbfChunk, 0);
+            } else {
+                _gbfFinish();
+                window.__gbfProgress.done = true;
+                window.__gbfProgress.pct  = 100;
+                try { onComplete(grid); } catch (e) { console.error("[generateBattlefield] onComplete threw:", e); }
+            }
+        }
+        _gbfChunk();
+    }, true);
+    // No return value on the chunked path — callers MUST use onComplete(grid).
 }
+
 
 function enterBattlefield(enemyNPC, playerObj, currentWorldMapTile) {
     if (inCityMode) return; 
@@ -676,6 +1159,7 @@ function enterBattlefield(enemyNPC, playerObj, currentWorldMapTile) {
     const panel = document.getElementById('parle-panel');
     if (panel) panel.style.display = 'none';
     inBattleMode = true;
+    window.inBattleMode = true;  // explicit for mobile_ui / BLS checks (mirrors custom_naval_launcher.js)
 
     // 2. Setup Battle Data
     currentBattleData = {
@@ -688,9 +1172,11 @@ function enterBattlefield(enemyNPC, playerObj, currentWorldMapTile) {
     };
 
 	// 3. Initialize the Naval Map
-	 
-	 BATTLE_WORLD_WIDTH = 4800; 
-	 BATTLE_WORLD_HEIGHT = 3200;
+	// === NAVAL BATTLEFIELD 10x LARGER ===
+	// 50000×32000 = 1.6 billion sq units — vast ocean for sailing.
+	// Identical to custom_naval_launcher map dimensions.
+	 BATTLE_WORLD_WIDTH = 50000; 
+	 BATTLE_WORLD_HEIGHT = 32000;
 	 
 	 // Prevents the physical grid array from cutting off at the center of the ship
 	 BATTLE_COLS = Math.floor(BATTLE_WORLD_WIDTH / BATTLE_TILE_SIZE);
@@ -703,7 +1189,17 @@ function enterBattlefield(enemyNPC, playerObj, currentWorldMapTile) {
     // 4. DEPLOY THE TROOPS
     let playerTroopCount = playerObj.troops || 0; 
     let totalCombatants = playerTroopCount + enemyNPC.count;
-    window.GLOBAL_BATTLE_SCALE = totalCombatants > 400 ? Math.ceil(totalCombatants / 300) : 1;
+    // ── FIX 4: Per-side cap with ratio preservation ─────────────────────────
+    // Sandbox/story: each side is capped at window.maxSandboxBattleTroops (default 100).
+    // Larger side hits the cap exactly; smaller side scales down by the same factor so
+    // the ratio (e.g. 20 vs 400 → 5 vs 100) is preserved. Custom battles bypass.
+    if (window.__IS_CUSTOM_BATTLE__) {
+        window.GLOBAL_BATTLE_SCALE = totalCombatants > 400 ? Math.ceil(totalCombatants / 300) : 1;
+    } else {
+        const _cap = Math.max(20, Math.min(300, window.maxSandboxBattleTroops || 100));
+        const _largerSide = Math.max(playerTroopCount, enemyNPC.count || 0);
+        window.GLOBAL_BATTLE_SCALE = (_largerSide > _cap) ? (_largerSide / _cap) : 1;
+    }
     
     deployNavalArmy(currentBattleData.playerFaction, playerTroopCount, "player"); 
     deployNavalArmy(enemyNPC.faction, enemyNPC.count, "enemy");
@@ -732,6 +1228,26 @@ function enterBattlefield(enemyNPC, playerObj, currentWorldMapTile) {
     if (typeof triggerEpicZoom === 'function') {
         triggerEpicZoom(0.6, 1.5, 3500);
     }
+
+    // Show ship joysticks — sandbox/parle naval path must call this explicitly.
+    // The battle-loading-screen wrapper adds ~1120ms of screen + fade delay before
+    // the battle goes live. The single 400ms retry fires during that window, and
+    // if NavalHelmUI isn't ready yet it silently fails with no further fallback.
+    // Mirror custom_naval_launcher.js: call immediately + 3 deferred retries so
+    // at least the 1000ms or 1500ms shot lands after both the loading screen clears
+    // AND NavalHelmUI is guaranteed to exist.
+    (function _sandboxForceHelmWithFallbacks() {
+        function _tryForce() {
+            if (window.NavalHelmUI && window.inNavalBattle) {
+                window.NavalHelmUI.forceNavalHelm();
+            }
+        }
+        _tryForce();             // immediate
+        setTimeout(_tryForce, 100);   // after first rAF
+        setTimeout(_tryForce, 400);   // parity with old single retry
+        setTimeout(_tryForce, 1000);  // after BLS loading screen (~1120ms) clears
+        setTimeout(_tryForce, 1500);  // belt-and-suspenders final shot
+    })();
      
     return; // Stop the regular land/siege battle generator from running!
 }
@@ -793,16 +1309,33 @@ if (typeof inSiegeBattle !== 'undefined' && inSiegeBattle) {
 
 		};
 
-    generateBattlefield(currentWorldMapTile.name || "Plains");
+    // v4.7.0 CHUNKING: generateBattlefield now takes an optional onComplete
+    // callback. Everything that used to run immediately after this call
+    // (troop scaling, deployArmy, abyss-safety scan, camera anchor, AI
+    // start) is now the _afterGenerate continuation below — 100% unchanged
+    // code, just moved into a function so it can run once the (possibly
+    // chunked) grid generation actually finishes instead of assuming it's
+    // already done on the very next line.
+    generateBattlefield(currentWorldMapTile.name || "Plains", _afterGenerate);
 
+    function _afterGenerate() {
 
 let playerTroopCount = playerObj.troops || 0; 
     let playerUniqueType = playerObj.uniqueUnit || null; 
     
     // ---> NEW: GLOBAL BATTLE SCALE <---
     let totalCombatants = playerTroopCount + enemyNPC.count;
-    // If total troops exceed 400, dynamically scale them down together
-    window.GLOBAL_BATTLE_SCALE = totalCombatants > 400 ? Math.ceil(totalCombatants / 300) : 1;
+    // ── FIX 4: Per-side cap with ratio preservation ─────────────────────────
+    // Sandbox/story: each side is capped at window.maxSandboxBattleTroops (default 100).
+    // Larger side hits the cap exactly; smaller side scales down by the same factor so
+    // the ratio (e.g. 20 vs 400 → 5 vs 100) is preserved. Custom battles bypass.
+    if (window.__IS_CUSTOM_BATTLE__) {
+        window.GLOBAL_BATTLE_SCALE = totalCombatants > 400 ? Math.ceil(totalCombatants / 300) : 1;
+    } else {
+        const _cap = Math.max(20, Math.min(300, window.maxSandboxBattleTroops || 100));
+        const _largerSide = Math.max(playerTroopCount, enemyNPC.count || 0);
+        window.GLOBAL_BATTLE_SCALE = (_largerSide > _cap) ? (_largerSide / _cap) : 1;
+    }
 
     deployArmy(currentBattleData.playerFaction, playerTroopCount, "player"); 
     deployArmy(enemyNPC.faction, enemyNPC.count, "enemy");
@@ -839,16 +1372,25 @@ let playerTroopCount = playerObj.troops || 0;
     // =========================================================
     // ---> SURGERY: LAZY GENERAL AUTO-CHARGE (5 + Q BY DEFAULT)
     // =========================================================
-    battleEnvironment.units.forEach(u => {
-        // Target player troops (ignoring the player/commander avatar)
-        if (u.side === "player" && !u.isCommander && !u.disableAICombat) {
-            u.selected = true;           // Simulates '5' (Select All)
-            u.hasOrders = true;          // Activates the command state
-            u.orderType = "seek_engage"; // Simulates 'Q' (Seek & Engage)
-            u.orderTargetPoint = null;   // Clears waypoints so they use dynamic enemy pathing
-            u.formationTimer = 120;      // Brief buffer to orient before breaking line
-        }
-    });
+    // GUARD: skip entirely during a siege. This used to run unconditionally,
+    // force-setting every player unit to seek_engage (land-battle "charge
+    // nearest enemy") the instant deployment finished — including custom-battle
+    // sieges, which never routed through executeSiegeAssaultAI here. That left
+    // ram_pusher/ladder_carrier units fighting between two orders (seek_engage
+    // vs whatever siege_assault assignment ran later), which reads as units
+    // wobbling left-right instead of committing to either behavior.
+    if (typeof inSiegeBattle === 'undefined' || !inSiegeBattle) {
+        battleEnvironment.units.forEach(u => {
+            // Target player troops (ignoring the player/commander avatar)
+            if (u.side === "player" && !u.isCommander && !u.disableAICombat) {
+                u.selected = true;           // Simulates '5' (Select All)
+                u.hasOrders = true;          // Activates the command state
+                u.orderType = "seek_engage"; // Simulates 'Q' (Seek & Engage)
+                u.orderTargetPoint = null;   // Clears waypoints so they use dynamic enemy pathing
+                u.formationTimer = 120;      // Brief buffer to orient before breaking line
+            }
+        });
+    }
 
 
   if (typeof AudioManager !== 'undefined') {
@@ -871,6 +1413,7 @@ let playerTroopCount = playerObj.troops || 0;
     if (typeof EnemyTacticalAI !== 'undefined') EnemyTacticalAI.start();
 	
 	isBattlefieldReady = true;
+    } // end _afterGenerate
 }
  
  
@@ -908,11 +1451,15 @@ function findValidShipDeckPosition(ship, role, side) {
 
         // If distance <= 0.85, they are safely inside the solid deck floor area
         if (distance <= 0.85) {
-            return { x: ship.x + dx, y: ship.y + dy };
+            // === ROTATION FIX: rotate local offset by ship heading ===
+            // dx/dy are in ship-local space (bow = +X). Rotate to world space.
+            const _h = ship.heading || 0;
+            const _c = Math.cos(_h), _s = Math.sin(_h);
+            return { x: ship.x + dx * _c - dy * _s, y: ship.y + dx * _s + dy * _c };
         }
     }
     
-    // Fallback: If 500 attempts fail (due to massive armies), drop them dead center
+    // Fallback: dead center on the ship
     return { x: ship.x, y: ship.y };
 }
  

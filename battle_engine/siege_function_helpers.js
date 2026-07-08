@@ -1,4 +1,3 @@
-
 function checkAssaultLadders(unit) {
   if (!inSiegeBattle || unit.hp <= 0 || unit.onWall) return;
     if (unit.side !== "player" || unit.y < SiegeTopography.wallPixelY) return;
@@ -324,83 +323,15 @@ function triggerGateBreach(gate) {
         }
     }
 	
-	// --- AUTO-RETREAT TIMER AFTER BREACH ---
-if (!window.__SIEGE_AUTO_RETREAT_TRIGGERED__) {
-    window.__SIEGE_AUTO_RETREAT_TRIGGERED__ = true;
-
-setTimeout(() => {
-        console.log("AUTO-RETREAT: Gate breach timer completed.");
-
-        if (!inSiegeBattle) return;
-
-        // 1. Force state reset so the engine stops trying to run siege AI
-        inSiegeBattle = false; 
-        if (typeof inBattleMode !== 'undefined') inBattleMode = false;
-
-        battleEnvironment.units.forEach(u => {
-            if (u.side === "enemy" && u.hp > 0) {
-                u.state = "FLEEING";
-                u.target = null;
-                u.retreatToPlaza = true;
-            }
-        });
-
-// 2.1. Check the global flag
-// 2.2. Check if the city object is totally missing
-// 2.3. Check if the city object is a "Dummy" (missing campaign stats like militaryPop)
-const isCustom = window.__CUSTOM_BATTLE_MODE__ || 
-                 !currentSiegeCity || 
-                 (currentSiegeCity && typeof currentSiegeCity.militaryPop === 'undefined');
-
-console.log(`[SIEGE SYSTEM] Battle Mode Detected: ${isCustom ? "CUSTOM" : "CAMPAIGN"}`);
-if (isCustom) {
-    console.log("Cleaning up Custom Siege Battle...");
-
-    // SNAPSHOT THE FINAL SIEGE STATE BEFORE CLEARING ANYTHING
-    window.__CUSTOM_SIEGE_RESULT__ = "victory";
-    window.__CUSTOM_SIEGE_COUNTS__ = {
-        pAlive: battleEnvironment.units.filter(u => u.side === "player" && u.hp > 0).length,
-        eAlive: battleEnvironment.units.filter(u => u.side === "enemy" && u.hp > 0).length
-    };
-
-    // Clear runtime objects
-    battleEnvironment.units = [];
-    battleEnvironment.projectiles = [];
-    battleEnvironment.groundEffects = [];
-
-    // Trigger the UI menu return cleanly
-    if (typeof window.leaveBattlefield === 'function') {
-        window.leaveBattlefield(typeof player !== 'undefined' ? player : null);
-    }
-}
-		
-else {
-            console.log("Concluding Campaign Siege...");
-            
-            // SURGERY: Bulletproof fallback chain for both Campaign and Custom Battles
-            let pObj = null;
-            if (typeof playerObj !== 'undefined' && playerObj) {
-                pObj = playerObj; // Takes priority if passed into the function
-            } else if (typeof player !== 'undefined' && player) {
-                pObj = player;    // Grabs the Campaign 'let' variable
-            } else if (window.player) {
-                pObj = window.player; // Grabs the Custom Battle mock object
-            }
-            
-            let victory = (typeof forceVictory !== 'undefined') ? forceVictory : false;
-
-            if (typeof concludeSiegeBattlefield === 'function') {
-                concludeSiegeBattlefield(pObj, victory);
-            }
-        }
-        // 3. WIPE TOPOGRAPHY: Prevents the next battle from using old gate/wall positions
-        for (let key in SiegeTopography) {
-            SiegeTopography[key] = 0;
-        }
-
-    }, 5000);
-}
-
+    // OBSOLETE AUTO-RETREAT/AUTO-CONCLUDE TIMER REMOVED.
+    // This used to force the ENTIRE siege to end 5 seconds after the gate
+    // broke - flipping every surviving defender to FLEEING and calling
+    // concludeSiegeBattlefield() regardless of how the fight was actually
+    // going. Breaching the gate should open the way in, not auto-resolve
+    // the battle. The siege now plays out for real: defenders retreat
+    // toward the plaza (already handled above) and the battle concludes
+    // normally once one side is actually defeated (see concludeSiegeBattlefield
+    // and its real callers) rather than on a hidden timer.
 }
 
 function prepareLadderLanding(ladder, wallTileY) {
