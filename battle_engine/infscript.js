@@ -1,3 +1,102 @@
+// =========================================================================
+// SURGERY: 4-DIRECTIONAL CENTROID-BASED AIM LOCK
+// Used by the Repeater Crossbowman and Rocket cart below (and mirrored
+// 1:1 in cavscript.js for the camel-cannon). Replaces the earlier
+// battleSpawnAssignment.forward-based guess, which only ever picked
+// up/down — per direct request, corner spawns can now put both armies
+// side-by-side (east/west) instead of north/south, so a vertical-only
+// lock could aim at empty sky in that layout. Looks at where the ENEMY
+// SIDE's units currently are ON AVERAGE (their centroid) and locks
+// toward whichever axis (X or Y) has the bigger gap: far apart
+// vertically -> lock up/down as before; far apart horizontally -> stay
+// in the normal side view, but pointed (via unit.facingDir, see each
+// call site) at the correct side. battleSpawnAssignment.forward is kept
+// only as the last-resort fallback for the practically-never-reached
+// case where there are no living enemy units to read a position from.
+// =========================================================================
+function _computeCentroidLock(unit, side) {
+    let fallbackUp = (side === "player");
+    if (window.battleSpawnAssignment && window.battleSpawnAssignment[side]) {
+        fallbackUp = window.battleSpawnAssignment[side].forward.y < 0;
+    }
+    if (!unit || typeof unit.x !== 'number' || typeof unit.y !== 'number' ||
+        typeof battleEnvironment === 'undefined' || !battleEnvironment.units) {
+        return { axis: 'y', dir: fallbackUp ? -1 : 1 };
+    }
+    const enemySide = (side === "player") ? "enemy" : "player";
+    let sumX = 0, sumY = 0, n = 0;
+    for (let i = 0; i < battleEnvironment.units.length; i++) {
+        const u = battleEnvironment.units[i];
+        if (u.side === enemySide && u.hp > 0) { sumX += u.x; sumY += u.y; n++; }
+    }
+    if (n === 0) return { axis: 'y', dir: fallbackUp ? -1 : 1 };
+    const deltaX = (sumX / n) - unit.x;
+    const deltaY = (sumY / n) - unit.y;
+    // ADDITIVE — per direct request ("NE/NW/SE/SW quadrants... rotate
+    // the weapon based on which quadrant", later widened to "no longer
+    // restricted to 8 quadrants... rotate relative to what they're
+    // aiming"). Everything above this point is 100% unchanged; these
+    // two extra fields are appended to the SAME return object so every
+    // existing consumer (Repeater/Rocket here, the Cannon in
+    // cavscript.js) that only destructures {axis, dir} is completely
+    // unaffected — only new call sites that read .angle/.quadrant see
+    // this.
+    //
+    // .angle — continuous signed aim angle in radians, NOT bucketed.
+    // atan2 with a non-negative x argument always returns a value in
+    // [-PI/2, PI/2], so this is "perpendicular-clamped" by construction
+    // (0 = level/side, +PI/2 = straight down, -PI/2 = straight up) with
+    // no extra clamping code needed. Used by the continuous-rotation
+    // weapons (crossbow/cannon — see _easeAimAngle just below).
+    // .quadrant — coarse 8-way bucket (N/S/E/W or NE/NW/SE/SW), kept
+    // for the weapons that still snap between a small set of named
+    // poses (Rocket's tube) rather than rotating continuously.
+    // DIAG_BAND: ratio (smaller delta / larger delta) above which the
+    // aim counts as "genuinely diagonal" rather than axis-dominant —
+    // 0.5 means the minor axis has to be at least half the major axis,
+    // a middling choice with no in-game reference to tune against yet.
+    const angle = Math.atan2(deltaY, Math.abs(deltaX));
+    let quadrant;
+    const DIAG_BAND = 0.5;
+    const adx = Math.abs(deltaX), ady = Math.abs(deltaY);
+    if (adx < 1e-6 && ady < 1e-6) {
+        quadrant = fallbackUp ? 'N' : 'S';
+    } else {
+        const ratio = Math.min(adx, ady) / (Math.max(adx, ady) || 1e-6);
+        const ns = deltaY < 0 ? 'N' : 'S';
+        const ew = deltaX < 0 ? 'W' : 'E';
+        quadrant = (ratio >= DIAG_BAND) ? (ns + ew) : ((adx > ady) ? ew : ns);
+    }
+    if (Math.abs(deltaX) > Math.abs(deltaY)) {
+        return { axis: 'x', dir: deltaX < 0 ? -1 : 1, deltaX, deltaY, angle, quadrant }; // -1 = west/left, 1 = east/right
+    }
+    return { axis: 'y', dir: deltaY < 0 ? -1 : 1, deltaX, deltaY, angle, quadrant }; // -1 = up (north), 1 = down (south)
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// CONTINUOUS AIM-ANGLE EASING — added per direct request: bows/
+// crossbows and cannons should rotate freely toward wherever they're
+// actually aiming rather than snapping between fixed quadrant poses,
+// turning at a capped angular speed so heavier weapons visibly lag
+// and catch up instead of instantly snapping frame-to-frame ("a slow
+// speed buffer based on mass"). Persists the currently-rendered angle
+// on the unit under `stateKey` (a distinct property per weapon system
+// sharing a unit, e.g. "_crossbowAimAngle" vs cavscript.js's
+// "_cannonAimAngle") and steps it toward `targetAngle` by at most
+// `maxStep` radians/frame. Both angles are already confined to
+// [-PI/2, PI/2] by _computeCentroidLock's atan2 construction, so the
+// difference here is always the short way round — no modular
+// wraparound handling needed.
+// ─────────────────────────────────────────────────────────────────────
+function _easeAimAngle(unit, stateKey, targetAngle, maxStep) {
+    if (!unit) return targetAngle;
+    if (typeof unit[stateKey] !== 'number' || isNaN(unit[stateKey])) unit[stateKey] = targetAngle;
+    const diff = targetAngle - unit[stateKey];
+    const step = Math.max(-maxStep, Math.min(maxStep, diff));
+    unit[stateKey] += step;
+    return unit[stateKey];
+}
+
 function drawInfantryUnit(ctx, x, y, moving, frame, factionColor, type, isAttacking, side, unitName, isFleeing, cooldown, unitAmmo, unit, reloadProgress) {
 	
 	if (!unit || !unit.stats) {
@@ -134,14 +233,26 @@ function drawInfantryUnit(ctx, x, y, moving, frame, factionColor, type, isAttack
     //     also ported now (same Math.PI trick as archer's).
     //   • rocket cart / Hwacha — NOT a rotation, a genuine RE-LAYOUT per
     //     explicit user request ("wheels and handle appropriately
-    //     placed"): wheels spread side-by-side instead of the side
-    //     view's front/back framing, launch box repositioned below the
-    //     operator (toward the viewer), rockets pointing down. All key
-    //     offsets pulled into named constants (CART_DOWN_Y etc.) so a
-    //     future pass can tune the layout without re-deriving the
-    //     geometry. cavscript.js's camel-cannon got the same re-layout
-    //     treatment — good side-by-side reference if this needs
-    //     revisiting.
+    //     placed"). REVISED again this session: facingUp is now a real
+    //     pose too (previously missing entirely — it fell through to
+    //     the side view), sharing one drawVerticalCart(signY) renderer
+    //     with facingDown so the two can't drift apart. Also fixed:
+    //     the stray hand that used to float at the box's center, the
+    //     handle (now real geometry with a bigger operator-to-cart
+    //     gap, CART_GAP_Y), the wheels (bird's-eye tread rectangles for
+    //     both facings), and the rocket grid (both loop axes now move,
+    //     so ammo count reads as a real grid instead of ~6 overlapping
+    //     marks). Also new: while isLaunching (attacking with ammo)
+    //     the cart is locked to the up/down pose only, never the side
+    //     view, until ammo runs out; firing now has a distinct
+    //     ignition-spark phase before the flame, and smoke drifts as
+    //     several fading puffs instead of one static circle, recurring
+    //     every fire pulse. All key offsets are still named constants
+    //     (CART_GAP_Y, CART_BOX_H/W, CART_WHEEL_W/IN, FIRE_CYCLE_MS) so
+    //     a future pass can tune without re-deriving the geometry.
+    //     cavscript.js's camel-cannon got the earlier re-layout
+    //     treatment — good side-by-side reference if that one needs
+    //     the same up-facing/bugfix pass someday.
     //
     // SHIELD PRIORITY (sword_shield, peasant weaponType 4/5/8) — per
     // user feedback, shields now draw AFTER their weapon (visual
@@ -331,6 +442,10 @@ function drawInfantryUnit(ctx, x, y, moving, frame, factionColor, type, isAttack
     // above for full context. Read by every ported melee/ranged branch
     // below (search "facingDown" to find them all).
     const facingDown = (unit && unit.facingDirY === 1);
+    // Declared here (rather than down near UP_QUADRANT_ANGLE, where it
+    // used to live) because the head-pivot fix right below now needs it
+    // too — see BUGFIX note under headBowOffset/headBowRot.
+    const facingUp = (unit && unit.facingDirY === -1);
 
     // ═══════════════════════════════════════════════════════════════
     // SHARED DOWN-AIM CONSTANTS — archer's bow, arrow, hand, AND head
@@ -351,19 +466,38 @@ function drawInfantryUnit(ctx, x, y, moving, frame, factionColor, type, isAttack
     // a near-diagonal one, keeping the assembly closer to the body so
     // it doesn't read as detached.
     // ═══════════════════════════════════════════════════════════════
-    const DOWN_AIM_OFFSET = 15;             // shared px offset (was 30 for bow / 10 for head)
-    const DOWN_AIM_ROT    = 0.4 * (Math.PI / 2); // shared cant angle (was 45° for bow, 0° for head)
+    const DOWN_AIM_OFFSET = 5;              // was 15 — pulled 10px closer to the body per report; used by the bow/arrow/hand only now
+    const DOWN_AIM_ROT    = 0.4 * (Math.PI / 2); // shared cant angle, used by the bow/arrow/hand only now
 
-    // Archer-only head dip: shifts head+headgear down AND rotates them
-    // around the SAME pivot the bow/arrow/hand use below, so the whole
-    // assembly (head included) moves as one rigid unit and can't drift
-    // apart again. Deliberately narrow (type==="archer" only) so it
-    // can't affect any other unit's rendering. Wraps section 4+5 below
-    // (Head Base + all headgear variants) in one translate+rotate —
-    // every headgear branch keeps its existing relative coordinates and
-    // needs no individual changes, since they all move together.
-    const headBowOffset = (type === "archer" && facingDown) ? DOWN_AIM_OFFSET : 0;
-    const headBowRot    = (type === "archer" && facingDown) ? DOWN_AIM_ROT : 0;
+    // NEW — per direct follow-up request ("check... archers... yes do
+    // it all"): AIM_OFFSET/AIM_ROT below used to be a fixed facingDown/
+    // facingUp (movement-based) switch, computed unconditionally here
+    // for every unit type even though only the archer branch actually
+    // reads them. They're now `let`, defaulting to 0, and reassigned
+    // to a continuous, target-tracked value INSIDE the archer branch
+    // itself (search "CONTINUOUS AIM" in the archer section below) —
+    // both so the aim math only ever runs for archers (the same
+    // "aiming/shooting pays for atan2, nothing else does" optimization
+    // used throughout this file) and because computing a live target
+    // angle needs `unit.target`, which isn't meaningfully checked this
+    // early for every unit type.
+    let AIM_OFFSET = 0;
+    let AIM_ROT    = 0;
+
+    // BUGFIX (archer head detaches / "falls off"): headBowOffset/Rot
+    // used to shift+rotate the head to follow the bow's AIM_OFFSET/
+    // AIM_ROT, on the theory that head and bow needed a shared pivot so
+    // neither drifted from the other. In practice this reads as the
+    // head itself leaving the neck and traveling off with the bow,
+    // which looks worse than the original disconnect it was meant to
+    // fix — a head has no visible "joint" geometry to sell a 36° swing
+    // away from the torso the way a hand or arrow can. Per direct
+    // report, the head now stays put at its normal position for BOTH
+    // facings; only the bow/arrow/hand (via AIM_OFFSET/AIM_ROT below)
+    // aim down or up. No other unit type ever moved its head to aim —
+    // archers shouldn't either.
+    const headBowOffset = 0;
+    const headBowRot    = 0;
 
     // ═══════════════════════════════════════════════════════════════
     // BACKSHOT / UP (facingDirY===-1) — infrastructure, this session.
@@ -409,7 +543,8 @@ function drawInfantryUnit(ctx, x, y, moving, frame, factionColor, type, isAttack
     // attempts. Flagged here rather than silently accepted — worth
     // revisiting once the low-tier back view has been seen in-game.
     // ═══════════════════════════════════════════════════════════════
-    const facingUp = (unit && unit.facingDirY === -1);
+    // facingUp itself is now declared up near facingDown (needed
+    // earlier by the head-pivot fix) — just useBackView lives here.
     // BACKSHOT COVERAGE UPDATE (this session): previously gated to
     // armorVal < 8 because only the low-tier "plain tunic / simple
     // hair" body had no front-only detail. Real back-helmet art now
@@ -1569,18 +1704,28 @@ else if (type === "spearman") {
         const V_START_Y = 3;   // hand height, near the hip
         const V_REACH   = 24;  // idle reach down-screen before thrust/wobble is applied
 
-        const shaftStartX = facingDown ? (V_START_X * dir) : (-7 * dir);
-        const shaftStartY = facingDown ? V_START_Y          : 4;
+        // BUGFIX (facingUp — spear/glaive didn't point up): shaftStartX/Y
+        // and baseEndX/Y used to only branch on facingDown vs side-view,
+        // so a facingUp spearman/glaiveman fell through to the SIDE-VIEW
+        // numbers and kept thrusting sideways instead of up-screen. The
+        // facingUp branch below mirrors the facingDown one vertically —
+        // same V_START_X/V_START_Y/V_REACH constants, just negated on Y
+        // (hand sits just above the hip instead of below it, tip reaches
+        // up past the head instead of down past the feet) — using the
+        // same reasoning peasant's pivotY already uses (thrust subtracts
+        // instead of adds when facing away from the camera).
+        const shaftStartX = facingDown ? (V_START_X * dir) : (facingUp ? (V_START_X * dir) : (-7 * dir));
+        const shaftStartY = facingDown ? V_START_Y          : (facingUp ? -V_START_Y : 4);
 
         // Base coordinates before rotation
         // side view : baseEndX carries the dir-reach + thrust; baseEndY carries the lift wobble.
-        // down view : baseEndY carries the down-screen reach + thrust; baseEndX carries the lift wobble.
+        // down/up view : baseEndY carries the reach (down- or up-screen) + thrust; baseEndX carries the lift wobble.
         const baseEndX = facingDown
             ? (lift * dir)
-            : ((28 + wBobSpear + thrust) * dir);
+            : (facingUp ? (lift * dir) : ((28 + wBobSpear + thrust) * dir));
         const baseEndY = facingDown
             ? (V_REACH + wBobSpear + thrust)
-            : (-24 + wBobSpear + lift);
+            : (facingUp ? -(V_REACH + wBobSpear + thrust) : (-24 + wBobSpear + lift));
 
         // NOTE (glaive, facingDown only): swingAngleOffset's amplitude
         // (±0.6 rad, set in step 1 above) was tuned by eye against the
@@ -2086,13 +2231,54 @@ else if (type === "two_handed") {
 	// body (15px vs 30px) and using the same pivot math (see
 	// rotateAroundPivot below, and the head wrapper up in drawBody)
 	// prevents any piece from drifting out of sync with the others
-	// again. DOWN_AIM_ANGLE/DOWN_Y_OFFSET below are kept as local
-	// aliases (not duplicated numbers) specifically so this branch's
-	// own math below doesn't need to be hand-edited in more than one
-	// place if the shared constants change again.
-	const DOWN_AIM_ANGLE = DOWN_AIM_ROT;   // alias — shared with head (see top-of-function)
-	const DOWN_Y_OFFSET = DOWN_AIM_OFFSET; // alias — shared with head (see top-of-function)
-	const pivotY = facingDown ? (handY + DOWN_Y_OFFSET) : handY;
+	// again.
+	// BUGFIX (facingUp — "detached head"): this branch used to check
+	// facingDown ONLY, so a facingUp archer got a flat 0 here and drew
+	// its normal SIDE-VIEW bow/arrow/hand — while the head (elsewhere
+	// in this function) rendered in its correct back-view spot. Those
+	// two uncorrelated poses is exactly what produced the stray
+	// skin-tone "second head" floating near the real one. AIM_ANGLE/
+	// AIM_Y_OFFSET below now read from the shared AIM_ROT/AIM_OFFSET
+	// (declared near the top of this function alongside headBowOffset/
+	// headBowRot), which already mirror negative for facingUp — so bow,
+	// arrow, hand, and head all move as one rigid unit for BOTH facings
+	// now, not just facingDown.
+	//
+	// CONTINUOUS AIM — per direct follow-up request ("check... archers
+	// ... yes do it all"): AIM_ROT/AIM_OFFSET (declared as `let 0` near
+	// the top of this function) are reassigned here to a continuous,
+	// speed-buffered angle tracked off this archer's own live target —
+	// same atan2/_easeAimAngle approach as the gun (individual
+	// unit.target, not a side-wide centroid), but SCALED down to this
+	// bow's own already-tuned maximum (36°/5px — chosen, see the
+	// comment block near DOWN_AIM_ROT's declaration, specifically
+	// because a full 90° swing read as disconnected) instead of the
+	// ±90° range those other weapons use directly. No reload exclusion
+	// is needed — like the javelin, a bow has no disconnected reload
+	// phase to exclude; nock/draw/hold/loose are all part of the aiming
+	// act itself. This still only pays for atan2 when there's an actual
+	// target (the check below), same optimization as everywhere else.
+	const ARCHER_AIM_TURN_RATE = 0.09; // radians/frame, in the FULL ±PI/2 range below (scaled down after easing) — same rate as the gun, another light one-person weapon
+	let archerTargetAngle = 0;
+	if (unit && unit.target && typeof unit.x === 'number' && typeof unit.target.x === 'number'
+		&& typeof unit.y === 'number' && typeof unit.target.y === 'number') {
+		const _adx = unit.target.x - unit.x;
+		const _ady = unit.target.y - unit.y;
+		archerTargetAngle = Math.atan2(_ady, Math.abs(_adx));
+		if (Math.abs(_adx) > 0.0001) unit.facingDir = _adx < 0 ? -1 : 1;
+	}
+	const archerAimAngleFull = unit ? _easeAimAngle(unit, '_archerAimAngle', archerTargetAngle, ARCHER_AIM_TURN_RATE) : archerTargetAngle;
+	const archerAimFraction = archerAimAngleFull / (Math.PI / 2); // -1 (full up) .. 0 (level) .. 1 (full down)
+	AIM_OFFSET = archerAimFraction * DOWN_AIM_OFFSET;
+	AIM_ROT    = archerAimFraction * DOWN_AIM_ROT;
+
+	const AIM_ANGLE = AIM_ROT;      // alias — shared with head (see top-of-function)
+	const AIM_Y_OFFSET = AIM_OFFSET; // alias — shared with head (see top-of-function)
+	// No longer gated on facingDown||facingUp — AIM_Y_OFFSET is now
+	// continuous and already ~0 for a level target, so applying it
+	// unconditionally is safe and correctly covers the diagonal case
+	// that binary gate used to miss entirely.
+	const pivotY = handY + AIM_Y_OFFSET;
 
 	// rotateAroundPivot replaces the old rotate90AroundHand: same idea
 	// (manually rotate a point drawn OUTSIDE the bow's own rotation
@@ -2113,7 +2299,7 @@ else if (type === "two_handed") {
 
 	ctx.save();
 	ctx.translate(handX, pivotY); 
-	ctx.rotate(bowKhatra + (facingDown ? DOWN_AIM_ANGLE : 0)); 
+	ctx.rotate(bowKhatra + AIM_ANGLE); 
 	ctx.translate(-handX, -pivotY);
 	
 	// Bow Body
@@ -2146,10 +2332,16 @@ else if (type === "two_handed") {
 
 	// --- ARROW RENDERING ---
 	if (hasArrow) {
-		const arrowPt = facingDown ? rotateAroundPivot(drawHandX, drawHandY, DOWN_AIM_ANGLE) : { x: drawHandX, y: drawHandY };
+		// Gate changed from the old (facingDown || facingUp) to a direct
+		// AIM_ANGLE check — now that AIM_ANGLE is continuous (target-
+		// based) rather than tied to those movement-based flags, a unit
+		// can have a meaningful diagonal AIM_ANGLE while facingDown AND
+		// facingUp are both false, and the old gate would have skipped
+		// the rotation entirely in exactly that case.
+		const arrowPt = (AIM_ANGLE !== 0) ? rotateAroundPivot(drawHandX, drawHandY, AIM_ANGLE) : { x: drawHandX, y: drawHandY };
 		ctx.save();
 		ctx.translate(arrowPt.x, arrowPt.y);
-		ctx.rotate(arrowAngle + (facingDown ? DOWN_AIM_ANGLE : 0));
+		ctx.rotate(arrowAngle + AIM_ANGLE);
 		
 		ctx.fillStyle = "#8d6e63"; ctx.fillRect(0, -0.5, 14, 1); // Shaft
 		ctx.fillStyle = "#9e9e9e"; ctx.beginPath(); ctx.moveTo(14, -1); ctx.lineTo(18, 0); ctx.lineTo(14, 1); ctx.fill(); // Head
@@ -2158,7 +2350,8 @@ else if (type === "two_handed") {
 	}
 
 	// --- DRAWING HAND ---
-	const handPt = facingDown ? rotateAroundPivot(drawHandX, drawHandY, DOWN_AIM_ANGLE) : { x: drawHandX, y: drawHandY };
+	// Same gate fix as arrowPt above.
+	const handPt = (AIM_ANGLE !== 0) ? rotateAroundPivot(drawHandX, drawHandY, AIM_ANGLE) : { x: drawHandX, y: drawHandY };
 	ctx.fillStyle = "#ffccbc";
 	ctx.beginPath();
 	ctx.arc(handPt.x, handPt.y, 2, 0, Math.PI * 2);
@@ -2269,7 +2462,14 @@ else if (type === "throwing") {
         }
    else { //  JAVELINIER
      // 1. Context & State Retrieval
-        let currentAmmo = (typeof unit !== 'undefined' && unit.ammo !== undefined) ? unit.ammo : 4;
+        // BUGFIX: was reading unit.ammo (a spawn-time snapshot that never
+        // updates — real combat only decrements unit.stats.ammo, see
+        // ai_categories.js's _handleCombatExecution). Same bug already
+        // found and fixed in this file's Rocket and Bomb branches — read
+        // the live stat first.
+        let currentAmmo = (typeof unit !== 'undefined' && unit.stats && typeof unit.stats.ammo === 'number')
+            ? unit.stats.ammo
+            : ((typeof unit !== 'undefined' && unit.ammo !== undefined) ? unit.ammo : 4);
         let isMelee = false;
         
         // Distance Check for Melee Stabbing vs Throwing
@@ -2427,39 +2627,42 @@ else if (type === "throwing") {
 
         // --- DRAW ACTIVE JAVELIN ---
         // ═══════════════════════════════════════════════════════════
-        // DOWNWARD FACING (facingDirY===1) — ported this session, per
-        // explicit user request: the thrown/held javelin should aim
-        // perpendicular to the X axis (i.e. purely vertical) when
-        // facing down, rather than at the small side-view throw angles
-        // javRotation normally cycles through (wind-up/snap/follow-
-        // through, roughly ±30-90°).
+        // CONTINUOUS AIM — per direct follow-up request ("check
+        // javelinmen... aiming and shooting phase... yes do it all"),
+        // replacing the old binary "facingDown ? Math.PI : 0" (which
+        // only ever handled straight-down and nothing else — no
+        // facingUp case existed at all) with the same continuous,
+        // speed-buffered atan2 tracking used for the gun/crossbows/
+        // rocket/cannon elsewhere in this file. javBaseRot is ADDED to
+        // the existing javRotation (the wind-up/snap/follow-through
+        // throw motion, or the melee stab lean — both left completely
+        // unchanged in magnitude/timing) rather than replacing it,
+        // same "aim + motion combine additively" pattern as the gun's
+        // ctx.rotate(gunRot + shakeRot + gunBaseRot).
         //
-        // This is cheap because the shaft's LOCAL rest orientation is
-        // already vertical before any rotation is applied — moveTo(0,10)
-        // to lineTo(0,-12), head at the negative end — javRotation just
-        // tilts that vertical shaft to the various side-view throw
-        // angles. For facingDown, replacing javRotation with a fixed
-        // Math.PI (regardless of throw phase) keeps the shaft on that
-        // same local Y-axis but flips it from pointing up-screen (the
-        // rotation=0 default) to down-screen (perpendicular to X,
-        // toward the viewer) — same "local rest is already the right
-        // axis, just needs a half-turn" situation as the shortsword-
-        // style blades elsewhere in this file.
-        //
-        // The reach itself (thrustX in the original side-view code —
-        // the arm pulling back then snapping forward, shared by both
-        // the isMelee stab and the throwing wind-up/snap above) is
-        // redirected from the X translate component to the Y translate
-        // component, since "forward" is now down-screen instead of
-        // sideways — same axis-swap idea as spearman's thrust. This
-        // applies uniformly to both isMelee and throwing, since they
-        // share this exact render block; a down-facing melee stab
-        // reads correctly with the same fix.
-        // ═══════════════════════════════════════════════════════════
-        const javDownRotation = Math.PI;
-        const activeJavX = facingDown ? handX : (handX + (thrustX * dir));
-        const activeJavY = facingDown ? (handY + thrustX) : (handY + thrustY);
-        const activeJavRotation = facingDown ? javDownRotation : javRotation;
+        // No separate "reload" exclusion is needed here — unlike a
+        // gun/cannon, a thrown javelin has no disconnected reload
+        // sequence to exclude from tracking; isAttacking's whole cycle
+        // (wind-up through follow-through, or the melee stab) IS the
+        // aiming/throwing act, so tracking stays on throughout it
+        // (and while idle-but-targeted, matching the gun's same
+        // choice for its own idle/ready phase). This still satisfies
+        // the "only aiming/shooting pays for atan2" optimization: with
+        // no target, the check below short-circuits before Math.atan2
+        // ever runs.
+        const JAVELIN_AIM_TURN_RATE = 0.09; // radians/frame — light thrown weapon, same brisk rate as the hand cannon
+        let javTargetAngle = 0;
+        if (unit && unit.target && typeof unit.x === 'number' && typeof unit.target.x === 'number'
+            && typeof unit.y === 'number' && typeof unit.target.y === 'number') {
+            const _jdx = unit.target.x - unit.x;
+            const _jdy = unit.target.y - unit.y;
+            javTargetAngle = Math.atan2(_jdy, Math.abs(_jdx));
+            if (Math.abs(_jdx) > 0.0001) unit.facingDir = _jdx < 0 ? -1 : 1;
+        }
+        const javBaseRot = unit ? _easeAimAngle(unit, '_javAimAngle', javTargetAngle, JAVELIN_AIM_TURN_RATE) : javTargetAngle;
+        const activeJavX = handX + (thrustX * dir);
+        const activeJavY = handY + thrustY;
+        const activeJavRotation = javRotation + javBaseRot;
 
         if (isVisible || !isAttacking) {
             ctx.save();
@@ -2661,38 +2864,426 @@ else if (type === "crossbow") {
             }
 
             // ═══════════════════════════════════════════════════════
-            // DOWNWARD FACING (facingDirY===1) — ported this session,
-            // per explicit user clarification: reloading (the box-mag
-            // drop-in above, AND the lever push/pull cycling that
-            // chambers each bolt) can ONLY ever be shown side-on — it
-            // never redirects, regardless of facing. Only "shooting"
-            // (holding the weapon aimed/idle, and the brief snap/recoil
-            // right as a bolt releases) redirects down.
+            // BIRD'S-EYE SHOOTING POSE (facingDirY===±1, not reloading)
+            // — REVISED this session, per explicit report that rotating
+            // the side-view silhouette 90° doesn't read as a top-down
+            // view: the magazine and lever are asymmetric parts (mag on
+            // top of the receiver, lever off to one side), so spinning
+            // the whole side silhouette swings them out to the side
+            // instead of showing what a repeater crossbow actually looks
+            // like from directly above — stock running straight along
+            // the aim axis, bow limbs splayed symmetrically LEFT/RIGHT
+            // at the muzzle (perpendicular to the aim axis, per the
+            // earlier perpendicular-angle fix), magazine centered ON the
+            // stock's centerline, lever kept to one side of the stock.
+            // This is now a real second geometry, not a rotation of the
+            // first — drawRepeaterTopDown(signY) below is the single
+            // shared renderer for both facingDown (signY=1) and facingUp
+            // (signY=-1), so they can't drift out of sync the way two
+            // hand-maintained copies could.
             //
-            // isRepeaterReloading below is true for exactly the two
-            // states that must stay side-view: box-mag reload
-            // (loadingMag), and the push+pull chambering portion of the
-            // burst (isRepeaterBurst && p<0.95) — deliberately NOT true
-            // for idle (handOnLever alone doesn't distinguish idle from
-            // actively cycling, which is why this exists instead of
-            // reusing handOnLever) or for the final p>=0.95 snap/recoil,
-            // both of which count as "shooting" and are allowed to
-            // redirect.
+            // Reload (box-mag drop-in AND lever push/pull chambering)
+            // still ONLY ever renders side-on, unchanged from before —
+            // isRepeaterReloading below gates which geometry is used,
+            // it doesn't change.
             //
-            // The fix is ONE new rotation added right after the
-            // existing translate, before the "100% UNTOUCHED" rendering
-            // begins — nothing inside that block (body/bow, magazine,
-            // lever, bolt, hand) is touched at all, only wrapped.
+            // ANCHOR DISTANCE FIX: the old rotate-in-place approach
+            // anchored at a fixed (0, 8) and then rotated the ENTIRE
+            // side silhouette (whose horizontal reach — stock body all
+            // the way out to the bow tip — is ~18-24px) into a vertical
+            // reach, so the weapon ended up floating far below/above the
+            // body. The new geometry anchors much tighter to the body
+            // (TOPDOWN_ANCHOR_Y below, close to the hands) with its own
+            // muzzle/limb reach tuned for a top-down silhouette instead
+            // of inheriting the side view's horizontal proportions.
             // ═══════════════════════════════════════════════════════
-            let isRepeaterReloading = loadingMag || (isRepeaterBurst && p < 0.95);
-            const repeaterDownRot = (facingDown && !isRepeaterReloading) ? DOWN_QUADRANT_ANGLE : 0;
+            // FLICKER FIX: isRepeaterReloading used to also include
+            // `isRepeaterBurst && p < 0.95`, which is TRUE for 95% of
+            // EVERY individual bolt-fire cycle within an active burst
+            // (lever push/pull/snap while the magazine still has
+            // rounds loaded) — not just the real box-magazine reload.
+            // That routed almost the entire burst to the side-view
+            // geometry, with the top-down pose only flashing in for the
+            // last 5% of each shot's cycle — read as constant
+            // side-view with brief up/down flicker, the exact opposite
+            // of the spec. Per explicit spec, side-view should ONLY
+            // ever appear during the real 10-round box-magazine reload
+            // (loadingMag, cdown>50) — the lever-cycling motion between
+            // shots (isRepeaterBurst, cdown<=50) is NOT reloading and
+            // must stay in the top-down pose for its entire cycle.
+            let isRepeaterReloading = loadingMag;
 
-            // --- RENDERING --- (100% UNTOUCHED below this point, aside
-            // from the one added ctx.rotate(repeaterDownRot) line)
-			
+            // ═══════════════════════════════════════════════════════
+            // PERSISTENT FIRING LOCK (this session, per explicit report
+            // that the up/down pose only held for a few frames before
+            // reverting to side view — read as glitchy instead of smooth).
+            //
+            // ROOT CAUSE: repeaterShootingDown/Up were driven straight off
+            // facingDown/facingUp (unit.facingDirY), which is a MOVEMENT
+            // hysteresis signal computed in troop_draw.js — it tracks
+            // which way the unit was recently WALKING, not which way
+            // it's actually AIMING. Two separate failures fall out of
+            // that:
+            //   1. A unit that approached its firing spot via horizontal
+            //      or diagonal movement may never accumulate the 3
+            //      consecutive dominant-vertical frames troop_draw.js
+            //      requires to set facingDirY at all — so it's stuck in
+            //      side view the whole time it's stationary and firing,
+            //      no matter where the target actually is.
+            //   2. Even once facingDirY IS set, troop_draw.js's "cancel
+            //      to horizontal" path (|dx| >= H_DOMINANT_THRESH) has NO
+            //      hysteresis — a single frame of jostling from a packed
+            //      formation snaps it back to 0 instantly, and
+            //      re-committing needs another 3 consecutive frames of
+            //      real vertical movement that a stationary, firing unit
+            //      will rarely produce again. That's the "only a few
+            //      frames" flicker.
+            //
+            // FIX: same persistent-lock pattern already used for the
+            // Rocket's tube (unit._rocketLocked/_rocketAimAngle, above in
+            // this file) — decoupled from movement entirely. The lock
+            // ENGAGES the instant the unit is actively firing (ranged
+            // stance + ammo, not reloading), picks up/down from the
+            // TARGET's actual position (falling back to the movement
+            // hint only when no target y is available), then HOLDS that
+            // direction for the unit's entire firing engagement. It only
+            // RELEASES when the unit truly stops firing (target lost,
+            // ammo out, switched to melee, or a real magazine reload
+            // starts) — never mid-burst, never from a stray jostle.
+            // ═══════════════════════════════════════════════════════
+            if (unit) {
+                // "HAS FIRED" GATE — per explicit report, the lock was
+                // engaging the moment the unit entered ranged combat
+                // (state==="attacking" + statusrange), which can go true
+                // as soon as a target is acquired — BEFORE the very
+                // first bolt has actually fired (e.g. still closing
+                // distance, or waiting out the first reload). That
+                // showed the hand+lever+top-down pose while the unit
+                // was only just moving into position, not yet shooting.
+                // isAttacking (the narrow per-shot windup flash) is a
+                // reliable "a real shot is happening RIGHT NOW" signal —
+                // used here as a one-time trigger to mark that this
+                // engagement has genuinely started firing, then held for
+                // the rest of the engagement so it doesn't need to
+                // re-fire every individual shot (which would reintroduce
+                // the original per-shot flicker this lock exists to
+                // prevent).
+                if (isAttacking && unit.stats && unit.stats.currentStance === "statusrange") {
+                    unit._repeaterHasFired = true;
+                }
+                if (unit.stats && unit.stats.currentStance !== "statusrange") {
+                    unit._repeaterHasFired = false; // fully disengaged — next engagement starts clean
+                }
+
+                const isRepeaterFiring = unit._repeaterHasFired &&
+                    unit.state === "attacking" &&
+                    unit.stats && unit.stats.currentStance === "statusrange" &&
+                    !isRepeaterReloading;
+
+                // DEBOUNCE — per explicit report ("prevent sudden
+                // switches... too frequently... humans cannot rotate
+                // that quickly"), require a short minimum hold before
+                // flipping the lock in EITHER direction, so a one-frame
+                // blip in the underlying signals can't cause a rapid
+                // re-flicker between side and top-down.
+                const REPEATER_LOCK_DEBOUNCE_MS = 300;
+                if (typeof unit._repeaterLockChangeAt !== 'number') unit._repeaterLockChangeAt = 0;
+                const sinceRepeaterChange = Date.now() - unit._repeaterLockChangeAt;
+
+                if (isRepeaterFiring && !unit._repeaterLocked && sinceRepeaterChange >= REPEATER_LOCK_DEBOUNCE_MS) {
+                    // ENGAGE — SURGERY: direction now comes from the ENEMY
+                    // SIDE's live centroid (see _computeCentroidLock at the
+                    // top of this file) instead of a spawn-corner guess,
+                    // and can now lock horizontal (side-by-side spawns)
+                    // as well as vertical. Re-rolled fresh every reload,
+                    // since RELEASE below already fires on every reload start.
+                    const _repLock = _computeCentroidLock(unit, side);
+                    unit._repeaterFacingY = (_repLock.axis === 'y') ? _repLock.dir : 0;
+                    unit._repeaterFacingX = (_repLock.axis === 'x') ? _repLock.dir : 0;
+                    unit._repeaterLocked = true;
+                    unit._repeaterLockChangeAt = Date.now();
+                } else if (!isRepeaterFiring && unit._repeaterLocked && sinceRepeaterChange >= REPEATER_LOCK_DEBOUNCE_MS) {
+                    // RELEASE — stopped firing (reload started, ammo out, target lost, melee)
+                    unit._repeaterLocked = false;
+                    unit._repeaterLockChangeAt = Date.now();
+                }
+            }
+
+            // CONTINUOUS AIM ROTATION — per direct follow-up request
+            // ("no longer restricted to 8 quadrants... rotate relative
+            // to what they aiming... with a slow speed buffer based on
+            // mass"), replacing the old snapshot-once-at-ENGAGE axis/dir
+            // with a live-tracked, speed-capped angle recomputed every
+            // frame while locked (see _easeAimAngle up top). The
+            // ENGAGE/RELEASE gate above still decides WHETHER the
+            // repeater is currently redirecting at all — unchanged
+            // reasoning, avoids flicker of entering/leaving the
+            // redirected pose entirely; this only changes WHAT ANGLE it
+            // eases toward while that's true. Eases back toward 0 (side
+            // rest) at the same capped rate when not locked instead of
+            // snapping straight back, same "no instant pose changes"
+            // reasoning extended consistently.
+            //
+            // CROSSBOW_AIM_TURN_RATE — a repeater's stock+magazine
+            // assembly is a held weapon, lighter than the wagon-mounted
+            // Cannon (see CANNON_AIM_TURN_RATE in cavscript.js), so it's
+            // given a brisker turn rate. Best-judgment value — no
+            // in-game reference to calibrate against; tune here if it
+            // reads too fast/slow.
+            const CROSSBOW_AIM_TURN_RATE = 0.06; // radians/frame
+            let repeaterAimAngle = 0;
+            if (unit) {
+                let repTargetAngle = 0;
+                if (unit._repeaterLocked) {
+                    const _repLive = _computeCentroidLock(unit, side);
+                    repTargetAngle = _repLive.angle;
+                    // SURGERY (kept): force the mirror toward the enemy's
+                    // live horizontal side every frame while locked, same
+                    // as before, just no longer gated to the axis==='x'
+                    // case only — a continuously-tracked diagonal needs
+                    // this exactly as much as a pure horizontal lock did.
+                    if (Math.abs(_repLive.deltaX) > 0.0001) {
+                        unit.facingDir = _repLive.deltaX < 0 ? -1 : 1;
+                    }
+                }
+                repeaterAimAngle = _easeAimAngle(unit, '_repeaterAimAngle', repTargetAngle, CROSSBOW_AIM_TURN_RATE);
+            }
+
+            // REPEATER_TOPDOWN_ZONE — the hand-built top-down pose below
+            // (magazine/lever/bow re-anchored, not a rotation of shared
+            // geometry — see TOPDOWN_ANCHOR_Y a few lines down) can't
+            // be built from scratch at every angle, so it's still
+            // reserved for steep aims only; anything shallower rotates
+            // the ordinary side-view geometry continuously instead (see
+            // the `else` branch below). Set to exactly 45° per direct
+            // clarification ("if the enemy is around 45 degrees from u,
+            // ur not aiming sideways or upwards, ur aiming 45 degrees")
+            // — the side pose's own continuous rotation (repeaterSideRot
+            // below) already reaches exactly that far, so the handoff
+            // point matches the example precisely.
+            const REPEATER_TOPDOWN_ZONE = Math.PI / 4; // radians (45°)
+            const repeaterInTopdownZone = !isRepeaterReloading && Math.abs(repeaterAimAngle) >= REPEATER_TOPDOWN_ZONE;
+            const repeaterShootingDown = repeaterInTopdownZone && repeaterAimAngle > 0;
+            const repeaterShootingUp   = repeaterInTopdownZone && repeaterAimAngle < 0;
+            // Applied to the side-view wrapper in the `else` branch below;
+            // explicitly zeroed during reload so reload stays side-on
+            // regardless of where the eased angle currently sits (belt-
+            // and-suspenders with the lock's own !isRepeaterReloading
+            // gating above, same style already used at the Cannon's
+            // ammo-out release check in cavscript.js).
+            const repeaterSideRot = isRepeaterReloading ? 0 : repeaterAimAngle;
+            // NEW — per direct follow-up request: "the weapon can rotate
+            // within 90 degrees as long as its within that quadrant...
+            // make the weapon continue to rotate" even once the
+            // animation has switched to this top-down pose. Since the
+            // pose itself can't be rebuilt continuously, this is a small
+            // EXTRA rotation layered on top of it (applied right after
+            // the ctx.translate below) equal to how far past exactly
+            // ±90° the live eased angle actually is — 0 right at the
+            // 45°→pose handoff (where this pose's "canonical" ±90° lean
+            // would otherwise be too steep) and growing toward 0 again
+            // as the aim approaches true vertical.
+            const repeaterTopdownResidualRot = repeaterInTopdownZone
+                ? (repeaterAimAngle - (repeaterShootingDown ? 1 : -1) * (Math.PI / 2))
+                : 0;
+
+            if (repeaterShootingDown || repeaterShootingUp) {
+                const signY = repeaterShootingDown ? 1 : -1;
+                // Anchor gap tuning (see TOPDOWN_ANCHOR_Y just below for
+                // the actual per-direction values and why they differ).
+                // ANCHOR: split by direction. A single numeric value (3)
+                // was tried for both, but the VISUAL gap isn't symmetric
+                // even at equal numbers: facingUp draws the body/hat
+                // AFTER this weapon block (useBackView z-order), so the
+                // hat visually overlaps/covers the near end of the
+                // weapon, shortening the apparent gap. facingDown draws
+                // the body FIRST (normal z-order) — nothing covers the
+                // near end, so the full anchor distance reads as open
+                // space between the body and the visible stock. Per
+                // explicit report that the up gap is now perfect and the
+                // down gap is way too large by comparison, the down
+                // anchor is pulled in tighter to compensate for that
+                // z-order difference rather than matching the up value.
+                //
+                // BUGFIX 2: that first tightening pass (1) was still wrong
+                // by an order of magnitude — it only pulled the origin down
+                // to just below the HIP (abs Y=1), so with stockNearY added
+                // the grip sat at abs Y=3 and the muzzle end reached all
+                // the way to abs Y=19, well past the feet (drawBody's legs
+                // end around Y=9, see the rocket tube's own scale-reference
+                // comment). None of that is anywhere near the chest. The
+                // side-view geometry, for comparison, sits the weapon
+                // cluster at roughly abs Y=-10 (magazine) to Y=-3 (bow) —
+                // chest/shoulder height. -8 anchors the down-facing grip at
+                // abs Y=-6 (chest) while the muzzle still correctly reaches
+                // down toward the feet, matching what "aiming down at a
+                // target below" should look like without floating the
+                // whole weapon off the body. Per screenshot report.
+                const TOPDOWN_ANCHOR_Y = repeaterShootingUp ? 3 : -8;
+
+                // WALK BOB: previously this mount stayed perfectly static
+                // while the unit walked, even though the body itself bobs
+                // up/down each step (see `b`, drawBody's own walk-cycle
+                // bob a few hundred lines up). That mismatch is what read
+                // as "the repeater is still sideways while human walks" —
+                // the weapon wasn't tracking the same per-step vertical
+                // motion as the rest of the body. Adding `b` here makes
+                // the top-down-mounted repeater ride the body's bob just
+                // like the side-view weapon block already does (see
+                // `ctx.translate(wobbleX, 8 + wobbleY)` a bit further down
+                // for the side-view sibling — that one never had this gap
+                // since 8+wobbleY there is layered under drawBody's own
+                // translate elsewhere; here the weapon block sits in its
+                // own coordinate space so `b` has to be added explicitly).
+                ctx.save();
+                ctx.translate(wobbleX, TOPDOWN_ANCHOR_Y * signY + wobbleY + b);
+                ctx.rotate(repeaterTopdownResidualRot);
+
+                // COORDINATE CONVENTION: signY=+1 means facingDown — "far"
+                // is positive y (below the shooter on screen). signY=-1 means
+                // facingUp — "far" is negative y (above the shooter on screen).
+                // Every "far" coordinate must therefore be signY * +16 (positive
+                // constant), so it correctly flips direction with signY.
+                //
+                // BUGFIX: the original code had muzzleY = signY * -16, which
+                // gives muzzleY = +16 (below) when signY=-1 (upward) — the exact
+                // opposite of what "up" means. The bow limbs were therefore drawn
+                // ~16px BELOW the body origin when the unit faced up, then
+                // drawBody() (deferred via useBackView) would paint the body and
+                // hat on top of that — the limbs appeared to poke through BELOW
+                // the hat, not behind it. Changing to signY * +16 puts the muzzle
+                // at y=+16 when facingDown and y=-16 when facingUp, matching the
+                // established convention. Every dependent calculation (limbForwardY,
+                // magFarY, leverPivotY) was identically broken and is fixed here
+                // with the same sign correction.
+                const stockNearY = signY * 2;    // butt end, near the shooter's hands
+                // BUGFIX: was signY*18, stretching stock+limbs+magazine
+                // across a full 16-unit span from chest almost to the
+                // feet. Per explicit report + the "Gemini" reference
+                // image (compact, tightly-held crossbow, weapon mass
+                // essentially AT the chest, bow-limbs providing the
+                // visual "crossbow" read via their LEFT/RIGHT spread
+                // rather than the stock's length): a true bird's-eye
+                // view foreshortens length ALONG the aim axis (we're
+                // looking almost straight down the barrel), while the
+                // perpendicular bow-limb spread stays fully visible —
+                // the old design did the opposite, stretching the
+                // foreshortened axis and leaving the limb spread
+                // unchanged. 7 keeps a short, still-legible stock
+                // (5 wide, per MAG_W/stock-width comments below, so
+                // 7-2=5 long keeps it roughly square rather than
+                // either a thin rod or a tiny dot) with everything —
+                // stock, limb attachment, magazine — landing within a
+                // few px of the chest instead of reaching toward the
+                // feet.
+                const muzzleY    = signY * 7;    // muzzle end, far from the shooter — WAS signY * 18 (way too long for a foreshortened bird's-eye view)
+
+                // Stock — runs from near to far along the aim axis
+                ctx.fillStyle = "#4e342e";
+                ctx.fillRect(-2.5, Math.min(stockNearY, muzzleY), 5, Math.abs(muzzleY - stockNearY));
+
+                // Bow limbs + string — splayed symmetrically left/right at the
+                // muzzle, perpendicular to the aim axis.
+                const limbSpread    = 6.5;
+                // BOW LENGTH +40%: J asked for the up/down (top-down-facing)
+                // repeater's bow to reach 40% further along the aim axis —
+                // sideways (limbSpread, left/right) explicitly left alone.
+                // Both Y-axis offsets that define how far the limb curve
+                // reaches from the muzzle are scaled by 1.4 so the bow reads
+                // as visibly longer without touching its left/right spread.
+                const limbForwardY  = muzzleY + signY * 1.5 * 1.4; // WAS signY * -1.5 (inverted); *1.4 = +40% length
+                ctx.strokeStyle = "#000"; ctx.lineWidth = 1;
+                ctx.beginPath();
+                ctx.moveTo(-limbSpread, limbForwardY);
+                ctx.quadraticCurveTo(0, muzzleY + signY * 3.5 * 1.4, limbSpread, limbForwardY); // WAS signY * -3.5; *1.4 = +40% length
+                ctx.stroke();
+                ctx.strokeStyle = "rgba(255,255,255,0.7)"; ctx.lineWidth = 0.6;
+                ctx.beginPath();
+                ctx.moveTo(-limbSpread, limbForwardY);
+                ctx.lineTo(0, muzzleY - signY * stringPull * 0.5); // WAS + (inverted pull)
+                ctx.lineTo(limbSpread, limbForwardY);
+                ctx.stroke();
+
+                // Magazine — centered on the stock's centerline, slides fore/aft
+                // with magOffset as the lever cycles.
+                // SIZE: shrunk in two passes — 10x7 (original) → 7x5 →
+                // now 6x4, per a follow-up report that 7x5 still read too
+                // wide even after the first shrink. Sized against the
+                // stock's own width (5px, see fillRect(-2.5,...,5,...)
+                // above) instead of guessing further — a box magazine
+                // should sit close to the width of the receiver it clips
+                // onto, just slightly wider to read as a distinct part,
+                // not dominate the whole silhouette.
+                const MAG_W = 6, MAG_H = 4;
+                const magFarY = muzzleY - signY * 5 + signY * magOffset; // WAS wrong signs
+                const magTop  = Math.min(magFarY, magFarY + signY * MAG_H);
+                ctx.fillStyle = "#5d4037";
+                ctx.fillRect(-MAG_W / 2, magTop, MAG_W, MAG_H);
+                // BUGFIX: wall thickness halved per explicit spec (0.8 -> 0.4)
+                ctx.strokeStyle = "#2b1b17"; ctx.lineWidth = 0.4;
+                ctx.strokeRect(-MAG_W / 2, magTop, MAG_W, MAG_H);
+
+                // Lever — offset to one side of the stock, swings along the aim
+                // axis as it cycles.
+                // BUGFIX: a +6 offset from stockNearY put the lever/hand
+                // ~40% of the way toward the muzzle for BOTH directions.
+                // Combined with the old too-low anchor that read as roughly
+                // body-adjacent by accident for facingUp, but for
+                // facingDown it put the hand out past the body entirely.
+                // Per screenshot report ("lever and hand should be...
+                // closer to the body"), tightened the down case to +2 so
+                // it sits right next to the grip near the chest instead of
+                // out toward the limbs. facingUp keeps the original +6,
+                // unchanged, since that direction was already confirmed
+                // correct.
+                const leverPivotY = stockNearY + signY * (repeaterShootingUp ? 6 : 2);
+                const leverSwing  = handOnLever ? (leverMove / 5) : 0;
+                // BUGFIX: fixed +4 put the lever on the wrong side for
+                // facingDown specifically ("flipped... off the guy's
+                // arm"). facingUp renders via useBackView (the
+                // character's BACK), facingDown via the normal front
+                // view -- front vs back mirrors on-screen left/right for
+                // the SAME physical hand. Per report that up already
+                // reads correctly, down needs the opposite sign to track
+                // that same hand instead of drifting to the anatomically
+                // wrong side once the view flips.
+                const leverSideX = repeaterShootingUp ? 4 : -4;
+                ctx.save();
+                ctx.translate(leverSideX, leverPivotY);
+                ctx.strokeStyle = "#3e2723"; ctx.lineWidth = 3; ctx.lineCap = "round";
+                ctx.beginPath();
+                ctx.moveTo(0, 0);
+                ctx.lineTo(3, signY * 9 * (1 - leverSwing * 0.5)); // WAS signY * -9 (inverted)
+                ctx.stroke();
+                ctx.restore();
+
+                // No bolt-in-tray: the bolt sits inside the box magazine and is
+                // not externally visible in this top-down view.
+
+                // Hand — same side-flip as the lever above (leverSideX),
+                // so it stays visually on the lever instead of drifting
+                // to the opposite side once the lever itself flipped.
+                ctx.fillStyle = "#ffccbc";
+                if (handOnLever) {
+                    ctx.beginPath();
+                    ctx.arc(Math.sign(leverSideX) * (3 + 3 * (1 - leverSwing * 0.3)),
+                            leverPivotY + signY * 9 * (1 - leverSwing * 0.5), // WAS signY * -9
+                            1.5, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+
+                ctx.restore();
+            } else {
+    // --- RENDERING --- (below this point is the original side-view
+    // geometry, used for the default side-on facing AND for both reload
+    // phases regardless of facing, per spec above — genuinely untouched
+    // except for the one new ctx.rotate() line just below, which
+    // continuously tilts this SAME unmodified geometry toward the live
+    // aim angle rather than redrawing anything; see repeaterSideRot
+    // above for why it's forced to 0 during reload)
     ctx.save();
     ctx.translate(wobbleX, 8 + wobbleY);
-    ctx.rotate(repeaterDownRot);
+    ctx.rotate(repeaterSideRot);
 
     // Body & Bow
     ctx.fillStyle = "#4e342e"; ctx.fillRect(3, -11, 18, 3);
@@ -2729,6 +3320,7 @@ else if (type === "crossbow") {
         ctx.beginPath(); ctx.arc(arcX, arcY, 1.5, 0, Math.PI * 2); ctx.fill(); 
     }
     ctx.restore(); 
+            }
 }
     else {
         // --- STANDARD / POISON / HEAVY: FOOT-STIRRUP SPANNING ---
@@ -2808,14 +3400,51 @@ else {
         // is already ~0 (the two aimed/recoil bookends).
         // ═══════════════════════════════════════════════════════════
         let isAimedState = (p < 0.05) || (p >= 0.90);
-        const crossbowDownRot = (facingDown && isAimedState) ? DOWN_QUADRANT_ANGLE : 0;
+
+        // CONTINUOUS AIM ROTATION — per direct follow-up request ("no
+        // longer restricted to 8 quadrants... rotate relative to what
+        // they aiming... slow speed buffer based on mass"), replacing
+        // the movement-based facingDown/facingUp + fixed 45°/90° split
+        // above with a live-tracked, speed-capped angle off the enemy
+        // centroid — same _computeCentroidLock/_easeAimAngle the
+        // Repeater above now uses, so every crossbow variant tracks the
+        // enemy consistently instead of just the last walked direction.
+        // isAimedState still gates this to the two aim/recoil bookends
+        // exactly as before — reload still animates through weaponRot
+        // alone, completely untouched.
+        // CROSSBOW_AIM_TURN_RATE — same value as the Repeater's own
+        // (see that section, same file, above): both are held crossbow
+        // mechanisms, so given the same "mass" for this pass rather
+        // than inventing an unjustified difference between variants.
+        const CROSSBOW_AIM_TURN_RATE = 0.06; // radians/frame
+        let crossbowAimAngle = 0;
+        if (unit) {
+            let cbTargetAngle = 0;
+            if (isAimedState) {
+                const _cbLive = _computeCentroidLock(unit, side);
+                cbTargetAngle = _cbLive.angle;
+                if (Math.abs(_cbLive.deltaX) > 0.0001) {
+                    unit.facingDir = _cbLive.deltaX < 0 ? -1 : 1;
+                }
+            }
+            // Eases toward 0 during spanning/reload too (cbTargetAngle
+            // left at 0 above), so the next aimed bookend doesn't
+            // inherit a stale tilt from several phases ago.
+            crossbowAimAngle = _easeAimAngle(unit, '_crossbowAimAngle', cbTargetAngle, CROSSBOW_AIM_TURN_RATE);
+        }
+        const crossbowDownRot = isAimedState ? crossbowAimAngle : 0;
+        // Folded into crossbowDownRot above (now one continuous signed
+        // angle covering both directions) — kept as a named 0 rather
+        // than removed so the ctx.rotate(weaponRot + crossbowDownRot +
+        // crossbowUpRot) sum just below needs no restructuring.
+        const crossbowUpRot = 0;
 
         ctx.save();
         // APPLY SHIFT: The man now "steps up" into the stirrup
         ctx.translate(0, bodyDip + b + bodyShift); 
         
         ctx.save();
-      ctx.translate(weaponX, weaponY - 10); ctx.rotate(weaponRot + crossbowDownRot); ctx.translate(0, 10);
+      ctx.translate(weaponX, weaponY - 10); ctx.rotate(weaponRot + crossbowDownRot + crossbowUpRot); ctx.translate(0, 10);
 	  // --- STOCK ---
         ctx.fillStyle = "#5d4037"; 
         ctx.fillRect(0, -10, 16, 3); // The wooden body
@@ -3047,8 +3676,15 @@ const isHeavy = unitName.includes("Heavy");
     // other "pure 90°" weapon this session — search this file for
     // DOWN_QUADRANT_ANGLE to find them all.
     // ═══════════════════════════════════════════════════════════════
+    // ═══════════════════════════════════════════════════════════════
+    // BUGFIX (facingUp — firelance didn't point up): same gap as gun/
+    // spearman — only facingDown was ever checked, so a facingUp
+    // firelancer kept aiming in the default side-view direction.
+    // UP_QUADRANT_ANGLE is the facingUp counterpart to
+    // DOWN_QUADRANT_ANGLE (declared alongside it near the top of this
+    // function) — same reasoning, same quadrant-consistent lean.
     ctx.save();
-    ctx.rotate(facingDown ? DOWN_QUADRANT_ANGLE : 0);
+    ctx.rotate(facingDown ? DOWN_QUADRANT_ANGLE : (facingUp ? UP_QUADRANT_ANGLE : 0));
 
     // Draw the Wooden Shaft
     ctx.strokeStyle = "#5d4037"; 
@@ -3175,7 +3811,32 @@ if (isAttacking && hasAmmo && fuseIsActive && cycle < 1.0) {
 
 	else if (type === "gun") {
         // SURGERY: Complete Hand Cannon Reload Cycle & Direct Ignition
-        let maxCd = 300;
+        // SANYANCHONG (Ming triple-barrel hand cannon) — added this
+        // session for the new unit of the same name (see
+        // units_expansion.js). Reuses this whole branch like Tanegashima
+        // does, but needs more than a cosmetic re-skin: the getReloadTime()
+        // special case in troop_system.js gives it a quick 60-tick cycle
+        // between its 3 pre-loaded barrels and a much longer 420-tick
+        // cycle once all three are spent (mirrored here via the SAME
+        // ammo%3 check, since this render code has no direct call into
+        // that function) — so maxCd, and the phase animation it drives,
+        // both need to branch on which of those two states this is.
+        const isSanyanchong = (unitName === "Sanyanchong");
+        const sanyanchongAmmo = (isSanyanchong && unit && unit.stats && typeof unit.stats.ammo === 'number') ? unit.stats.ammo : null;
+        // Mirrors troop_system.js's getReloadTime() check exactly — true
+        // for the quick between-barrels reload, false for the full
+        // 3-barrel reload (or for any non-Sanyanchong gun).
+        const isSanyanchongBarrelCycle = isSanyanchong && sanyanchongAmmo !== null && ((sanyanchongAmmo % 3) !== 0);
+        // Which barrel (0/1/2, top/mid/bottom in the geometry below) is
+        // currently loaded and about to fire — counts shots already
+        // taken out of the current group of 3 by reading ammo's own
+        // position within that group, so it stays correct without any
+        // separate counter to keep in sync.
+        const sanyanchongBarrelIndex = isSanyanchong && sanyanchongAmmo !== null
+            ? ((3 - (((sanyanchongAmmo % 3) + 3) % 3)) % 3)
+            : 0;
+
+        let maxCd = isSanyanchong ? (isSanyanchongBarrelCycle ? 60 : 420) : 300;
         let cd = cooldown || 0;
         let cycle = isAttacking ? (maxCd - cd) / maxCd : 1.0;
 
@@ -3185,9 +3846,35 @@ if (isAttacking && hasAmmo && fuseIsActive && cycle < 1.0) {
 
         // Determine Gun Angle & Shake based on specific reload phase
         if (isAttacking && cd > 0) {
-            if (cycle < 0.05) {
-                // 0% - 5%: FIRING! (Heavy recoil, shaking only happens here)
-                gunRot = (-Math.PI / 10) * dir;
+            if (isSanyanchong && isSanyanchongBarrelCycle) {
+                // QUICK BARREL-CYCLE (60 ticks) — the next barrel is
+                // already loaded, so there's no powder/ball/wadding/
+                // ramrod sequence to animate at all here (that only
+                // happens once all three are spent — see the FULL
+                // RELOAD phases below, shared with the elaborate
+                // sequence other guns use). Just a firing flash, then a
+                // brief settle as the gunner's grip shifts to bring the
+                // next barrel to bear.
+                if (cycle < 0.15) {
+                    gunRot = 0;
+                    shakeRot = (Math.random() - 0.5) * 0.2;
+                    recoilX = -3 * dir;
+                } else {
+                    gunRot = 0;
+                }
+            } else if (cycle < 0.05) {
+                // 0% - 5%: FIRING! Per report, the barrel should be
+                // perfectly straight at the moment of the shot — this
+                // used to add a (-π/10)*dir cant here, which is now
+                // removed. shakeRot (recoil jitter) and recoilX (kickback)
+                // are left as-is, since those read as the shot's kick
+                // rather than a held aim angle. Because gunRot is shared
+                // by all three aim poses (up/down/side — see gunBaseRot
+                // below, now target-based rather than facingDown/
+                // facingUp-based, but the sharing itself is unchanged),
+                // zeroing it here makes ALL THREE poses shoot straight,
+                // not just the side view.
+                gunRot = 0;
                 shakeRot = (Math.random() - 0.5) * 0.2; 
                 recoilX = -4 * dir;
             } else if (cycle < 0.15) {
@@ -3206,79 +3893,282 @@ if (isAttacking && hasAmmo && fuseIsActive && cycle < 1.0) {
         }
 
         // ═══════════════════════════════════════════════════════════
-        // DOWNWARD FACING (facingDirY===1) — ported this session.
-        // This is the SIMPLE case, same single-rotation-wrapper pattern
-        // as two_handed/peasant/the cavalry lance: the tiller, barrel,
-        // every reload-phase hand position, AND the muzzle flash/smoke
-        // are ALL drawn inside this one ctx.rotate(gunRot+shakeRot)
-        // wrapper (confirmed by reading to its ctx.restore() — nothing
-        // in this branch is drawn outside it, unlike archer/horse_archer
-        // which needed a second manual-rotation technique for their
-        // arrow+hand). So a single +90° base offset redirects the whole
-        // reload animation — barrel angle, every reach-for-powder/ball/
-        // wadding/ramrod/fuse hand position, and the muzzle flash — at
-        // once. recoilX (the firing-phase kickback) is left as a
-        // dir-based X offset unchanged; like the melee weapons' small
-        // handedness offsets, the global ctx.scale(facingDir) still
-        // mirrors it sensibly and it reads as a minor, plausible wobble
-        // either way rather than needing its own axis swap.
+        // AIM DIRECTION & ANGLE — per direct follow-up request,
+        // REPLACED again this session: "all ranged weapons when aiming
+        // and shooting (not reloading) should aim at the exact angle
+        // ...at the target" — continuous tracking, not a fixed 0°/45°/
+        // 90° snap. Gun only ever had ONE rotation wrapper for its
+        // whole weapon (ctx.rotate(gunRot + shakeRot + gunBaseRot)
+        // below) — there's no separate up/down "pose" to switch
+        // between, so unlike the Repeater/Cannon (which have genuinely
+        // different hand-built geometry for steep angles) gun needs no
+        // quadrant/zone logic at all: the same rotated geometry works
+        // at any angle from -90° to +90°, so gunBaseRot can just BE
+        // the live tracked angle directly.
+        //
+        // isGunReloading — the four sub-phases above (roughly 5%-75%
+        // of the cycle) where gunRot is actively animating its own
+        // reload motion (barrel swung up to load, lowered to prime,
+        // etc.). Aim tracking is suspended for exactly this window per
+        // "not reloading" — forcing gunBaseRot to a hard 0 rather than
+        // layering a leftover aim angle on top of gunRot's own big
+        // reload-phase rotation, which would fight with it visually.
+        // The persisted _gunAimAngle itself is left untouched (not
+        // decayed) during this window, so aim doesn't have to re-earn
+        // the angle from scratch once reload finishes.
+        //
+        // GUN_AIM_TURN_RATE — a hand cannon is a light, one-handed-
+        // braced weapon, so it's given the brisker end of the turn
+        // rates used across these weapons (compare CROSSBOW_AIM_
+        // TURN_RATE = 0.06 and CANNON_AIM_TURN_RATE = 0.02 in
+        // cavscript.js). Best-judgment value, no in-game reference to
+        // calibrate against yet.
         // ═══════════════════════════════════════════════════════════
-        const gunBaseRot = facingDown ? DOWN_QUADRANT_ANGLE : 0;
+        const GUN_AIM_TURN_RATE = 0.09; // radians/frame
+        const isGunReloading = isAttacking && cd > 0 && cycle >= 0.05 && cycle < 0.75;
+
+        let gunTargetAngle = 0;
+        // OPTIMIZATION — per direct warning: reload phases must not
+        // compute atan2 at all (not just discard its result); aiming/
+        // shooting is the only state that needs it. The Math.atan2
+        // call (and the facingDir mirror update next to it) is now
+        // INSIDE the !isGunReloading check, not just the easing call
+        // below it.
+        if (!isGunReloading && unit && unit.target && typeof unit.x === 'number' && typeof unit.target.x === 'number'
+            && typeof unit.y === 'number' && typeof unit.target.y === 'number') {
+            const _gdx = unit.target.x - unit.x;
+            const _gdy = unit.target.y - unit.y;
+            gunTargetAngle = Math.atan2(_gdy, Math.abs(_gdx));
+            if (Math.abs(_gdx) > 0.0001) {
+                unit.facingDir = _gdx < 0 ? -1 : 1;
+            }
+        }
+        if (unit && !isGunReloading) {
+            _easeAimAngle(unit, '_gunAimAngle', gunTargetAngle, GUN_AIM_TURN_RATE);
+        }
+        const gunBaseRot = (!isGunReloading && unit && typeof unit._gunAimAngle === 'number')
+                          ? unit._gunAimAngle
+                          : 0;
 
         ctx.save();
-        ctx.translate(recoilX, weaponBob); // Removed random bobbing; keeping it smooth
+        ctx.translate(0, weaponBob); // Removed random bobbing; keeping it smooth. recoilX no longer applied here — see below.
         ctx.rotate(gunRot + shakeRot + gunBaseRot);
 
+        // RECOIL — per direct request, REVISED this session to be
+        // axis-aware ("realistic based on quadrant and tube angle").
+        // Previously recoilX (-4*dir at the firing instant) was applied
+        // via the ctx.translate ABOVE, i.e. BEFORE ctx.rotate — a flat
+        // screen-space X shift. That's correct only for the side pose
+        // (barrel along screen-X, so a backward-X kick reads as
+        // "kicks back toward the gunner"). Once gunBaseRot can be a
+        // true ±90° (see AIM DIRECTION & ANGLE above), the barrel's own
+        // axis is screen-Y at the up/down poses, so the same flat
+        // screen-X shift read as an unrelated sideways jiggle instead
+        // of a kickback — exactly the bug flagged after the perpendicular-
+        // aim fix.
+        //
+        // FIX: recoil is now a translate along LOCAL +X — the same axis
+        // the barrel itself is drawn along (Barrel: moveTo(6*dir,-5) ->
+        // lineTo(16*dir,-5), i.e. local +X is always "toward the
+        // muzzle," regardless of pose) — applied AFTER ctx.rotate, so
+        // it inherits whichever pose's rotation is active automatically,
+        // the same way the barrel/hands/muzzle-flash already do. A
+        // backward kick is local -X (opposite the muzzle), same sign/
+        // magnitude/timing as the original (-4*dir at the firing
+        // instant, 0 otherwise) — only which axis it travels along has
+        // changed. Verified: at gunBaseRot=0 (side) this reduces to the
+        // exact same screen-space (-4*dir, 0) as before, so the side
+        // pose's feel is unchanged; at ±90° it now lands purely on
+        // screen-Y (up for the down pose, down for the up pose) —
+        // backward along the barrel in both cases, with no diagonal
+        // bleed into the other axis.
+        ctx.translate(recoilX, 0);
+
+        // TANEGASHIMA (Japanese matchlock) — visual variant added this
+        // session for the new unit of the same name (see
+        // units_expansion.js). Reuses this ENTIRE branch — aim system,
+        // reload timing/phase structure, hand positions — unchanged;
+        // only the stock/barrel proportions+colors and the ignition
+        // detail differ, gated on unitName so the vanilla Hand
+        // Cannoneer is completely unaffected.
+        const isMatchlock = (unitName === "Tanegashima");
+        // Shared "where is the muzzle" x-coordinate — the reload phases
+        // below (powder/ball/wadding/ramrod) all anchor to this instead
+        // of a hardcoded 16, so the matchlock's longer barrel doesn't
+        // reintroduce the "hand floats past the gun's own tip" bug that
+        // was fixed for the hand cannon (see the BUGFIX comments on
+        // those phases below — they predate this variable but the fix
+        // they describe is exactly why this exists). Sanyanchong's
+        // triple barrels run a little SHORTER per-tube than the hand
+        // cannon's single one (historically stubbier, bundled for
+        // volume of fire rather than one long reach), at 14 — but see
+        // stickBackX just below for where its OWN distinguishing length
+        // actually goes.
+        const muzzleX = isMatchlock ? 22 : (isSanyanchong ? 14 : 16);
+        // Where the stock/barrel join (touchhole/pan position) sits —
+        // the hand cannon's plain breech-priming spot, the matchlock's
+        // serpentine pan, and the point the 3 barrels above bundle
+        // together for Sanyanchong. Matches the Tiller draw's own
+        // length below.
+        const breechX = isMatchlock ? 5 : 6;
+        // SANYANCHONG ONLY — how far the haft protrudes BEHIND the grip
+        // (negative local x, i.e. away from the muzzle), per direct
+        // request ("triple barreled hand cannon with a stick
+        // protruding"). The hand cannon/matchlock stocks above both run
+        // from x=0 (the grip) forward to the breech; this adds a second
+        // stretch running backward from x=0, long enough for a two-
+        // handed grip and for the whole thing to double as a
+        // quarterstaff once all three barrels are spent (see the
+        // shortsword-fallback dispatch elsewhere in this file for how
+        // out-of-ammo gunners switch weapons — Sanyanchong instead
+        // keeps and swings this same haft, drawn once below).
+        const stickBackX = -11;
+
         // Tiller (Wooden Stock) - NO TRIGGER
-        ctx.strokeStyle = "#5d4037"; ctx.lineWidth = 3.5;
-        ctx.beginPath(); ctx.moveTo(0, -5); ctx.lineTo(6 * dir, -5); ctx.stroke();
+        // Matchlock stock: shorter and dark-lacquered (same "#1a1a1a"
+        // convention as the archer branch's Yumi bow, elsewhere in this
+        // file) rather than the hand cannon's plain brown, since a
+        // tanegashima's stock is laid along the cheek rather than
+        // gripped like a simple pole — reads better a little shorter
+        // and slimmer relative to its (longer, below) barrel.
+        ctx.strokeStyle = isMatchlock ? "#1a1a1a" : "#5d4037";
+        ctx.lineWidth = isMatchlock ? 3 : 3.5;
+        ctx.beginPath(); ctx.moveTo(0, -5); ctx.lineTo((isMatchlock ? 5 : 6) * dir, -5); ctx.stroke();
+
+        if (isSanyanchong) {
+            // Protruding rear haft — see stickBackX above. Drawn as its
+            // own stroke rather than folded into the Tiller line above
+            // so its color/weight can read as "plain gripping wood"
+            // distinct from the touchhole end.
+            ctx.strokeStyle = "#6d4c41"; ctx.lineWidth = 3;
+            ctx.beginPath(); ctx.moveTo(0, -5); ctx.lineTo(stickBackX * dir, -5); ctx.stroke();
+            // Iron collar binding the haft to the barrel cluster, right
+            // at the grip — reads as "this is one rigid weapon", not a
+            // stick loosely lashed to three separate tubes.
+            ctx.strokeStyle = "#616161"; ctx.lineWidth = 4;
+            ctx.beginPath(); ctx.moveTo(-1 * dir, -7); ctx.lineTo(-1 * dir, -3); ctx.stroke();
+        }
         
         // Barrel (Iron)
-        ctx.strokeStyle = "#424242"; ctx.lineWidth = 3;
-        ctx.beginPath(); ctx.moveTo(6 * dir, -5); ctx.lineTo(16 * dir, -5); ctx.stroke();
+        // Matchlock barrel: noticeably longer than the hand cannon's
+        // (real tanegashima barrels ran proportionally long for
+        // accuracy — the whole point of the serpentine/pan mechanism
+        // below is freeing the gunner's hand to actually sight down
+        // one) and a cooler blued-steel tone rather than plain iron.
+        //
+        // Sanyanchong: THREE parallel barrels bundled at y=-7/-5/-3
+        // instead of the single y=-5 tube every other gun here uses —
+        // the actual defining feature of the weapon per direct request
+        // ("triple barreled hand cannon"). The currently-loaded one
+        // (sanyanchongBarrelIndex, tracked off the unit's own ammo
+        // count — see its declaration above) is drawn brighter/thicker
+        // so it's readable which tube is about to fire; the other two
+        // stay a duller cast-bronze tone.
+        if (isSanyanchong) {
+            for (let bi = 0; bi < 3; bi++) {
+                const by = -7 + bi * 2; // -7, -5, -3
+                const isActiveBarrel = (bi === sanyanchongBarrelIndex);
+                ctx.strokeStyle = isActiveBarrel ? "#8d6e63" : "#5d4e46"; // bronze — brighter for the loaded/firing tube
+                ctx.lineWidth = isActiveBarrel ? 2.4 : 2;
+                ctx.beginPath(); ctx.moveTo(breechX * dir, by); ctx.lineTo(muzzleX * dir, by); ctx.stroke();
+            }
+        } else {
+            ctx.strokeStyle = isMatchlock ? "#37474f" : "#424242";
+            ctx.lineWidth = 3;
+            ctx.beginPath(); ctx.moveTo(breechX * dir, -5); ctx.lineTo(muzzleX * dir, -5); ctx.stroke();
+        }
 
         // Hands & Elaborate Reloading Action
         ctx.fillStyle = "#ffccbc";
-        ctx.beginPath(); ctx.arc(2 * dir, -5, 2, 0, Math.PI*2); ctx.fill(); // Back hand holding tiller
+        ctx.beginPath(); ctx.arc((isSanyanchong ? -6 : 2) * dir, -5, 2, 0, Math.PI*2); ctx.fill(); // Back hand — on the protruding haft for Sanyanchong's two-handed grip, on the tiller otherwise
         
-        if (isAttacking && cd > 0) {
+        if (isSanyanchong && isSanyanchongBarrelCycle) {
+            // QUICK BARREL-CYCLE hand animation — no powder/ball/wadding/
+            // ramrod here (see the gunRot phase block above for why);
+            // just the back hand steadying the haft and the front hand
+            // shifting slightly along the barrel cluster as the gunner's
+            // grip re-settles onto the next tube.
+            const settle = Math.min(1, Math.max(0, (cycle - 0.15) / 0.85));
+            ctx.beginPath(); ctx.arc((6 + settle * 2) * dir, -5 + (sanyanchongBarrelIndex - 1) * 0.6, 2, 0, Math.PI*2); ctx.fill();
+        } else if (isAttacking && cd > 0) {
             if (cycle >= 0.15 && cycle < 0.25) { 
                 // 1. Pouring Powder
+                // BUGFIX (realistic reload): hand/flask/powder used to sit
+                // at x=18*dir, 2 units past the barrel's actual muzzle
+                // (the barrel runs 6*dir->16*dir, per the Barrel draw
+                // above — so 16*dir is the true open end), floating past
+                // the gun's own tip instead of pouring into it. Moved to
+                // x=16*dir, matching the flask (already correctly at
+                // 16*dir) and the muzzle flash fix below.
                 let drop = (cycle - 0.15) * 10; // Animation progress (0 to 1)
-                ctx.beginPath(); ctx.arc(18 * dir, -12, 2, 0, Math.PI*2); ctx.fill(); // Hand
-                ctx.fillStyle = "#795548"; ctx.fillRect(16 * dir, -16, 4 * dir, 6); // Flask
-                ctx.fillStyle = "#212121"; ctx.fillRect(17.5 * dir, -10 + (drop * 4), 1.5 * dir, 2); // Powder falling
+                ctx.beginPath(); ctx.arc(muzzleX * dir, -12, 2, 0, Math.PI*2); ctx.fill(); // Hand
+                ctx.fillStyle = "#795548"; ctx.fillRect(muzzleX * dir, -16, 4 * dir, 6); // Flask
+                ctx.fillStyle = "#212121"; ctx.fillRect((muzzleX - 0.5) * dir, -10 + (drop * 4), 1.5 * dir, 2); // Powder falling
             } 
             else if (cycle >= 0.25 && cycle < 0.32) { 
                 // 2. Inserting Projectile
+                // BUGFIX (realistic reload): same 2-unit muzzle offset as
+                // the powder phase above — moved to the true muzzle
+                // (muzzleX*dir) so the ball actually drops into the
+                // barrel, not beside it.
                 let drop = (cycle - 0.25) * 14; 
-                ctx.beginPath(); ctx.arc(18 * dir, -10, 2, 0, Math.PI*2); ctx.fill(); // Hand
-                ctx.fillStyle = "#424242"; ctx.beginPath(); ctx.arc(18 * dir, -8 + (drop * 3), 1.5, 0, Math.PI*2); ctx.fill(); // Iron ball
+                ctx.beginPath(); ctx.arc(muzzleX * dir, -10, 2, 0, Math.PI*2); ctx.fill(); // Hand
+                ctx.fillStyle = "#424242"; ctx.beginPath(); ctx.arc(muzzleX * dir, -8 + (drop * 3), 1.5, 0, Math.PI*2); ctx.fill(); // Iron ball
             } 
             else if (cycle >= 0.32 && cycle < 0.40) { 
                 // 3. Inserting Wadding
+                // BUGFIX (realistic reload): same fix, true muzzle at
+                // muzzleX*dir.
                 let drop = (cycle - 0.32) * 12; 
-                ctx.beginPath(); ctx.arc(18 * dir, -10, 2, 0, Math.PI*2); ctx.fill(); // Hand
-                ctx.fillStyle = "#d7ccc8"; ctx.beginPath(); ctx.arc(18 * dir, -8 + (drop * 3), 1.5, 0, Math.PI*2); ctx.fill(); // Wadding
+                ctx.beginPath(); ctx.arc(muzzleX * dir, -10, 2, 0, Math.PI*2); ctx.fill(); // Hand
+                ctx.fillStyle = "#d7ccc8"; ctx.beginPath(); ctx.arc(muzzleX * dir, -8 + (drop * 3), 1.5, 0, Math.PI*2); ctx.fill(); // Wadding
             } 
             else if (cycle >= 0.40 && cycle < 0.65) { 
                 // 4. Ramming down the barrel
+                // BUGFIX (realistic reload): ramrod hand start position
+                // moved from 18*dir to 16*dir (true muzzle) to match —
+                // the rod's TRAVEL (down to 8*dir, near the breech) was
+                // already correct, only its starting anchor was off.
                 let ramMove = Math.sin((cycle - 0.40) * Math.PI * 12) * 5; // Up and down motions
-                ctx.beginPath(); ctx.arc((18 + ramMove) * dir, -5, 2, 0, Math.PI*2); ctx.fill(); // Hand
+                ctx.beginPath(); ctx.arc((muzzleX + ramMove) * dir, -5, 2, 0, Math.PI*2); ctx.fill(); // Hand
                 ctx.strokeStyle = "#8d6e63"; ctx.lineWidth = 1.5;
-                ctx.beginPath(); ctx.moveTo((18 + ramMove) * dir, -5); ctx.lineTo((8 + ramMove) * dir, -5); ctx.stroke(); // Ramrod
+                ctx.beginPath(); ctx.moveTo((muzzleX + ramMove) * dir, -5); ctx.lineTo((8 + ramMove) * dir, -5); ctx.stroke(); // Ramrod
             } 
             else if (cycle >= 0.65 && cycle < 0.75) { 
                 // 5. Priming the touchhole
-                ctx.beginPath(); ctx.arc(6 * dir, -8, 2, 0, Math.PI*2); ctx.fill(); // Hand at breech
-                ctx.fillStyle = "#212121"; ctx.fillRect(5.5 * dir, -6, 1.5 * dir, 1.5); // Pinch of powder
+                // breechX (= the stock/barrel joint, where the touchhole/
+                // pan sits) mirrors muzzleX's reasoning above — the
+                // matchlock's shorter stock (5*dir vs 6*dir, see the
+                // Tiller draw) moves this point too.
+                ctx.beginPath(); ctx.arc(breechX * dir, -8, 2, 0, Math.PI*2); ctx.fill(); // Hand at breech
+                ctx.fillStyle = "#212121"; ctx.fillRect((breechX - 0.5) * dir, -6, 1.5 * dir, 1.5); // Pinch of powder
             } 
             else if (cycle >= 0.90 && cycle < 1.0) { 
                 // 6. Lighting the fuse
-                ctx.beginPath(); ctx.arc(6 * dir, -8, 2, 0, Math.PI*2); ctx.fill(); // Hand bringing fuse down
-                ctx.strokeStyle = "#e65100"; ctx.lineWidth = 1;
-                ctx.beginPath(); ctx.moveTo(6 * dir, -8); ctx.lineTo(7 * dir, -5.5); ctx.stroke(); // Slow match
-                ctx.fillStyle = "#ffeb3b"; ctx.beginPath(); ctx.arc(7 * dir, -5.5, 1.5 + Math.random(), 0, Math.PI*2); ctx.fill(); // Sparks!
+                if (isMatchlock) {
+                    // TANEGASHIMA — the defining feature of a matchlock
+                    // over a plain hand cannon: a pivoting serpentine arm
+                    // (holding the lit match) lowers onto the pan by
+                    // itself, rather than a free hand bringing an open
+                    // flame down. Drawn as a small curved metal arm
+                    // pivoting from just behind the pan down onto it,
+                    // with the same spark/glow to sell contact.
+                    const serpAngle = -0.3 + (Math.random() * 0.05); // slight tremor, mostly settled onto the pan by this point in the phase
+                    ctx.save();
+                    ctx.translate(breechX * dir, -9);
+                    ctx.rotate(serpAngle * dir);
+                    ctx.strokeStyle = "#616161"; ctx.lineWidth = 1.2;
+                    ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(3 * dir, 3); ctx.stroke(); // serpentine arm
+                    ctx.fillStyle = "#e65100"; ctx.beginPath(); ctx.arc(3 * dir, 3, 1, 0, Math.PI * 2); ctx.fill(); // match tip
+                    ctx.restore();
+                    ctx.fillStyle = "#ffccbc"; ctx.beginPath(); ctx.arc(2 * dir, -9, 1.6, 0, Math.PI*2); ctx.fill(); // steadying hand near the lock, not on the flame
+                    ctx.fillStyle = "#ffeb3b"; ctx.beginPath(); ctx.arc((breechX + 1) * dir, -6.5, 1.5 + Math.random(), 0, Math.PI*2); ctx.fill(); // Sparks!
+                } else {
+                    ctx.beginPath(); ctx.arc(breechX * dir, -8, 2, 0, Math.PI*2); ctx.fill(); // Hand bringing fuse down
+                    ctx.strokeStyle = "#e65100"; ctx.lineWidth = 1;
+                    ctx.beginPath(); ctx.moveTo(breechX * dir, -8); ctx.lineTo((breechX + 1) * dir, -5.5); ctx.stroke(); // Slow match
+                    ctx.fillStyle = "#ffeb3b"; ctx.beginPath(); ctx.arc((breechX + 1) * dir, -5.5, 1.5 + Math.random(), 0, Math.PI*2); ctx.fill(); // Sparks!
+                }
             } 
             else {
                 // Idle / Resting / Waiting for next phase
@@ -3290,15 +4180,25 @@ if (isAttacking && hasAmmo && fuseIsActive && cycle < 1.0) {
         }
 
         // Muzzle Flash & Smoke (Only triggers in the first 5% of the cooldown cycle)
+        // BUGFIX (realistic reload/firing): flash/flame/smoke used to
+        // erupt from x=18/22/26*dir, all 2 units past the barrel's real
+        // muzzle (16*dir) — same offset as the reload phases above, now
+        // consistently anchored to the true muzzle and its outward
+        // direction from there.
         if (isAttacking && cycle < 0.05) { 
+            // Sanyanchong: flash erupts from whichever of the 3 barrels
+            // is actually loaded/firing (sanyanchongBarrelIndex — see
+            // its declaration above), not the single fixed y=-5 every
+            // other gun here uses.
+            const flashY = isSanyanchong ? (-7 + sanyanchongBarrelIndex * 2) : -5;
             ctx.fillStyle = "#ffeb3b"; // Core flash
-            ctx.beginPath(); ctx.arc(18 * dir, -5, 3 + Math.random() * 2, 0, Math.PI * 2); ctx.fill();
+            ctx.beginPath(); ctx.arc(muzzleX * dir, flashY, 3 + Math.random() * 2, 0, Math.PI * 2); ctx.fill();
             
             ctx.fillStyle = "#ff5722"; // Secondary flame
-            ctx.beginPath(); ctx.arc(22 * dir, -5, 6 + Math.random() * 4, 0, Math.PI * 2); ctx.fill();
+            ctx.beginPath(); ctx.arc((muzzleX + 4) * dir, flashY, 6 + Math.random() * 4, 0, Math.PI * 2); ctx.fill();
             
             ctx.fillStyle = "rgba(140, 140, 140, 0.6)"; // Smoke expanding
-            ctx.beginPath(); ctx.arc(26 * dir, -5, 8 + Math.random() * 5, 0, Math.PI * 2); ctx.fill();
+            ctx.beginPath(); ctx.arc((muzzleX + 8) * dir, flashY, 8 + Math.random() * 5, 0, Math.PI * 2); ctx.fill();
         }
 
         ctx.restore();
@@ -3315,8 +4215,19 @@ if (isAttacking && hasAmmo && fuseIsActive && cycle < 1.0) {
     // don't port by analogy with archer/gun above.
     // ═══════════════════════════════════════════════════════════
     // Ammo lookup
+    // BUGFIX: unit.ammo is a one-time snapshot taken at spawn in
+    // battlefield_launch.js and never updated again — real combat only
+    // ever decrements unit.stats.ammo (see ai_categories.js's
+    // _handleCombatExecution). Reading the stale unit.ammo here made
+    // hasAmmo permanently true regardless of the real ammo pool — same
+    // bug already identified and fixed in this file's Rocket branch
+    // (search "BUGFIX: the `unitAmmo` param"). Read the LIVE value off
+    // unit.stats.ammo when we have a real unit; fall back to the passed
+    // unitAmmo param only for preview/no-unit renders.
     let currentAmmo = 0;
-    if (typeof unit !== 'undefined' && unit.ammo !== undefined) {
+    if (unit && unit.stats && typeof unit.stats.ammo === 'number') {
+        currentAmmo = unit.stats.ammo;
+    } else if (typeof unit !== 'undefined' && unit && unit.ammo !== undefined) {
         currentAmmo = unit.ammo;
     } else if (typeof unitAmmo !== 'undefined') {
         currentAmmo = unitAmmo;
@@ -3505,223 +4416,564 @@ if (isAttacking && hasAmmo && fuseIsActive && cycle < 1.0) {
 }
 
  else if (unitName?.toLowerCase().includes("ocket") || unitName?.includes("Hwacha") || type === "rocket" || type === "hwacha") {
-    // 1. Logic Setup
-    // Use 'unitAmmo' from the function arguments, not 'unit.ammo'
-    const currentAmmo = (typeof unitAmmo !== 'undefined') ? unitAmmo : 0;
+    // ═══════════════════════════════════════════════════════════════
+    // REDESIGNED this session, per explicit request: the wheeled/
+    // handled launch CART (bird's-eye box + wooden push-handle,
+    // launch-locked to up/down-only while firing because a cart drawn
+    // side-on doesn't read as aimed) is replaced entirely with a
+    // hand-held tube launcher — same family as `type === "gun"` (the
+    // hand cannon) just above: a single thick wooden tube gripped in
+    // both hands, no wheels, no handle, no cart body at all.
+    //
+    // WHY THIS REMOVES THE ANGLE-LOCK PROBLEM: the old cart's box/
+    // wheels/handle silhouette only read correctly from directly above
+    // or directly below (hence hwachaShowUp/hwachaShowDown forcing out
+    // the side view entirely while isLaunching). A held tube has no
+    // such restriction — exactly like the hand cannon's barrel, it's a
+    // simple rod shape that reads correctly rotated to ANY angle. So
+    // this uses the same single-rotation-wrapper pattern as
+    // `type === "gun"` (tubeBaseRot = facingDown ? DOWN_QUADRANT_ANGLE
+    // : facingUp ? UP_QUADRANT_ANGLE : 0) — no separate top-down
+    // geometry needed, one drawing rotated for every facing. A
+    // DIRECTION LOCK (see below) still deliberately forces this to
+    // up/down-only WHILE ACTUALLY FIRING, per explicit spec — that's a
+    // gameplay-driven constraint on WHEN tubeBaseRot is allowed to be
+    // the side-view 0, not a limitation of the tube art itself.
+    //
+    // Ignition -> launch flame -> drifting smoke is carried over
+    // unchanged in spirit from the old cart (same 3-phase fireCycle
+    // timing), just re-anchored to the tube's muzzle instead of the
+    // box's mouth.
+    // ═══════════════════════════════════════════════════════════════
+    // BUGFIX: the `unitAmmo` param (unit.ammo) is a one-time snapshot taken
+    // at spawn in battlefield_launch.js and never updated again — real
+    // combat only ever decrements unit.stats.ammo (see ai_categories.js
+    // _handleCombatExecution's "UNIVERSAL MAGAZINE SURGERY"). Reading the
+    // stale unit.ammo here made hasAmmo permanently true, so the launcher
+    // never stopped showing loaded rockets / re-igniting regardless of the
+    // real ammo pool (read as "infinite ammo"). Read the LIVE value off
+    // unit.stats.ammo when we have a real unit; fall back to the passed
+    // unitAmmo param only for preview/no-unit renders.
+    const currentAmmo = (unit && unit.stats && typeof unit.stats.ammo === 'number')
+        ? unit.stats.ammo
+        : ((typeof unitAmmo !== 'undefined') ? unitAmmo : 0);
     const hasAmmo = currentAmmo > 0;
-    const thrust = (isAttacking && hasAmmo) ? (Math.random() * 2) : 0; 
-    let wheelSpin = moving ? (Date.now() / 100) : 0;
 
-    // ═══════════════════════════════════════════════════════════════
-    // DOWNWARD FACING (facingDirY===1) — ported this session, per
-    // explicit user request (a genuine re-layout, not just a rotation
-    // of the side-view art — the user specifically asked for the
-    // wheels and handle to be "appropriately placed").
+    // ── GROUND DROP: the empty tube falls and lingers, then disappears ──
+    // Per explicit spec: once ammo hits 0 the tube shouldn't keep
+    // silently existing in the unit's hands forever, nor pop away
+    // instantly — it drops to the ground and lingers there briefly
+    // before fully disappearing, and only THEN does the unit switch to
+    // its backup axe (see the "Backup weapon" section far below).
     //
-    // This is a PUSHED HANDCART operated by a walking person, not a
-    // mount-integrated vehicle — structurally much simpler than the
-    // camel-cannon's wheeled gun carriage (still deferred, see that
-    // branch's notes: welded to a mount, raises real "does a wheel
-    // read facing the viewer" design questions this handcart mostly
-    // avoids by being small and simple).
+    // ROCKET_DROP_LINGER_MS picked to match the SAME 450ms scale
+    // already used for the backup weapon's own swing cycle just below
+    // in this file, for a consistent feel — "a fraction of a second".
     //
-    // DESIGN, for a future session to tune (all key offsets pulled
-    // into named constants right below, specifically so they're easy
-    // to nudge without re-deriving the geometry):
-    //   - The operator pushes the cart AHEAD of them in their direction
-    //     of travel. Facing down = moving toward the viewer, so the
-    //     cart body sits BELOW the operator (larger Y = closer to
-    //     camera), with the handle (closest to the operator's hands)
-    //     at the smallest Y offset and the launch box/wheels furthest.
-    //   - The two wheels, side-by-side in the side view only by
-    //     accident (the original code's `sideOffset` loop variable is
-    //     never actually used in the translate — both wheels are drawn
-    //     stacked on the same spot; a pre-existing quirk, left
-    //     unchanged there since it's out of scope for this fix), are
-    //     properly spread LEFT and RIGHT here instead, since a cart
-    //     viewed from behind/above as it's pushed away from the
-    //     operator would show both wheels flanking the frame.
-    //   - The launch box sits centered, further down-screen than the
-    //     wheels (the box is at the FRONT of the cart, furthest from
-    //     the operator in the side view's `-12*dir` framing).
-    //   - Rockets point straight down (toward the viewer/target)
-    //     instead of sideways.
-    // ═══════════════════════════════════════════════════════════════
-    const CART_DOWN_Y = 22;        // how far below the operator the whole cart sits
-    const CART_WHEEL_SPAN = 8;     // left/right spread of the two wheels
-    const CART_WHEEL_Y = 6;        // wheels sit slightly behind (above-screen from) the box
-    const CART_BOX_Y = -6;         // launch box's near edge, relative to the cart origin
-    const CART_BOX_H = 14;         // launch box height (matches side-view's box height)
-    const CART_BOX_W = 14;         // launch box width
-
-    if (facingDown) {
-        ctx.save();
-        ctx.translate(0, CART_DOWN_Y);
-
-        // Wheels — side by side instead of the side-view's front/back framing
-        ctx.strokeStyle = "#3e2723"; ctx.lineWidth = 2;
-        for (let wheelX of [-CART_WHEEL_SPAN, CART_WHEEL_SPAN]) {
-            ctx.save();
-            ctx.translate(wheelX, CART_WHEEL_Y);
-            ctx.rotate(wheelSpin); // spin still reads fine without dir mirroring, wheel is centered now
-            ctx.beginPath(); ctx.arc(0, 0, 6, 0, Math.PI * 2); ctx.stroke();
-            ctx.beginPath(); ctx.moveTo(-6, 0); ctx.lineTo(6, 0); ctx.stroke();
-            ctx.beginPath(); ctx.moveTo(0, -6); ctx.lineTo(0, 6); ctx.stroke();
-            ctx.restore();
+    // unit._rocketDropTime / unit._rocketDropped are stamped on the
+    // FIRST frame hasAmmo goes false (an edge-detect, not "ammo is
+    // currently 0", so we don't restart the clock every frame while
+    // depleted). Defensively reset if ammo is ever seen positive again
+    // (no resupply mechanic currently spends it back up, but this
+    // keeps the drop from getting stuck "used up" if one is ever
+    // added later).
+    const ROCKET_DROP_LINGER_MS = 450;
+    if (unit) {
+        if (!hasAmmo && !unit._rocketDropped) {
+            unit._rocketDropTime = Date.now();
+            unit._rocketDropped = true;
+        } else if (hasAmmo && unit._rocketDropped) {
+            unit._rocketDropped = false;
+            unit._rocketDropTime = 0;
         }
+    }
+    const msSinceDrop = (unit && unit._rocketDropTime) ? (Date.now() - unit._rocketDropTime) : 0;
+    // Tube is still on-screen (held OR lying dropped) during this window;
+    // once it passes, the tube stops rendering entirely ("disappears").
+    const showDroppedTube = !hasAmmo && !!(unit && unit._rocketDropped) && msSinceDrop < ROCKET_DROP_LINGER_MS;
 
-        // Frame — short struts connecting each wheel up to the box,
-        // replacing the side view's long horizontal frame (which
-        // represented the cart's LENGTH, now foreshortened to near-
-        // nothing since we're looking at the cart roughly end-on).
-        ctx.strokeStyle = "#5d4037"; ctx.lineWidth = 3;
-        ctx.beginPath(); ctx.moveTo(-CART_WHEEL_SPAN, CART_WHEEL_Y); ctx.lineTo(-CART_WHEEL_SPAN, CART_BOX_Y + CART_BOX_H); ctx.stroke();
-        ctx.beginPath(); ctx.moveTo(CART_WHEEL_SPAN, CART_WHEEL_Y); ctx.lineTo(CART_WHEEL_SPAN, CART_BOX_Y + CART_BOX_H); ctx.stroke();
-
-        // Launch Box — centered, spanning between the wheels
-        ctx.fillStyle = "#4e342e";
-        ctx.fillRect(-CART_BOX_W / 2, CART_BOX_Y - CART_BOX_H, CART_BOX_W, CART_BOX_H);
-        ctx.strokeStyle = "#212121"; ctx.lineWidth = 1;
-        ctx.strokeRect(-CART_BOX_W / 2, CART_BOX_Y - CART_BOX_H, CART_BOX_W, CART_BOX_H);
-
-        // Rockets — tips pointing down-screen (toward the viewer/target)
-        // instead of sideways, arranged in the same rows/cols grid.
-        if (hasAmmo) {
-            ctx.fillStyle = "#212121";
-            let rows = 6, cols = 5, spacing = 2, count = 0;
-            for (let r = 0; r < rows; r++) {
-                for (let c = 0; c < cols; c++) {
-                    if (count < currentAmmo) {
-                        let ax = -CART_BOX_W / 2 + 2 + (r * spacing);
-                        let ay = CART_BOX_Y - 2 + thrust;
-                        ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(ax + 1, ay + 4); ctx.lineTo(ax + 2, ay); ctx.fill();
-                    }
-                    count++;
-                }
-            }
-            if (isAttacking) {
-                ctx.fillStyle = "rgba(255, 160, 0, 0.8)";
-                ctx.beginPath(); ctx.arc(0, CART_BOX_Y + 2, 4 + Math.random() * 4, 0, Math.PI * 2); ctx.fill();
-                ctx.fillStyle = "rgba(150, 150, 150, 0.5)";
-                ctx.beginPath(); ctx.arc(0, CART_BOX_Y, 6 + Math.random() * 6, 0, Math.PI * 2); ctx.fill();
+    // BUGFIX: isAttacking (unit.state === "attacking" && unit.cooldown > 30)
+    // is a brief PER-SHOT windup flash — for Rocket's 42-tick reload that's
+    // only true ~12 ticks (~28%) of each shot's cycle, so the direction lock
+    // engaged then immediately released back to side view for the other
+    // ~72% between every single shot, reading as "always sideways" with
+    // occasional flicker. isLaunching needs to span the WHOLE ranged
+    // engagement (every shot of the volley), not just each shot's windup —
+    // unit.state stays "attacking" continuously for the entire engagement
+    // (set unconditionally in _handleCombatExecution), so pair it with the
+    // ranged stance instead of the narrow cooldown gate.
+    const isRangedEngaged = unit && unit.stats
+        ? (unit.state === "attacking" && unit.stats.currentStance === "statusrange")
+        : isAttacking;
+    // "HAS FIRED" GATE — proactive consistency fix, same reasoning as
+    // the Repeater's ENGAGE block (top-down block, troop_draw.js call
+    // site above): isRangedEngaged alone (state+stance) can go true the
+    // instant a target is acquired, before the very first shot actually
+    // fires. Not a reported rocket bug this round, but the identical
+    // underlying mechanism has the same theoretical hole, so applying
+    // the same fix here rather than leaving it inconsistent between the
+    // two units.
+    //
+    // TIMER BACKUP — added this session per direct request: "animation
+    // is after the first shot, with a backup based on a timer just in
+    // case the launcher keeps shooting." The primary trigger above
+    // (isAttacking flipping true while in statusrange) is the normal
+    // path, but if for any reason that per-shot flag never pulses true
+    // while the unit is still clearly locked into a ranged engagement
+    // with live ammo (e.g. an AI state desync where cooldown/attacking
+    // timing drifts out of step with the stance), the tube would sit
+    // frozen in its unfired/idle art forever even though ammo is
+    // actually ticking down in the background. unit._rocketEngageSince
+    // stamps the moment statusrange engagement began (edge-detected, so
+    // it doesn't reset every frame); if ROCKET_FIRE_TIMEOUT_MS elapses
+    // while still engaged-with-ammo and the primary trigger still
+    // hasn't fired, force _rocketHasFired true anyway so the animation
+    // catches up. Timeout picked at 2x FIRE_CYCLE_MS-to-be (300ms,
+    // defined a few lines below as 150ms) — long enough that a normal
+    // first shot's isAttacking pulse always wins first, short enough
+    // that the fallback is barely noticeable if it ever does kick in.
+    const ROCKET_FIRE_TIMEOUT_MS = 300;
+    if (unit && unit.stats) {
+        if (isAttacking && unit.stats.currentStance === "statusrange") {
+            unit._rocketHasFired = true;
+        }
+        if (unit.stats.currentStance !== "statusrange") {
+            unit._rocketHasFired = false;
+            unit._rocketEngageSince = 0;
+        } else {
+            // Engaged in ranged stance — stamp the FIRST frame we see
+            // this (edge-detect via the 0 sentinel) so the timeout
+            // measures from engagement start, not from every frame.
+            if (!unit._rocketEngageSince) unit._rocketEngageSince = Date.now();
+            if (!unit._rocketHasFired && hasAmmo &&
+                (Date.now() - unit._rocketEngageSince) >= ROCKET_FIRE_TIMEOUT_MS) {
+                unit._rocketHasFired = true;
             }
         }
-        ctx.restore();
+    }
+    const hasFiredOnce = unit ? !!unit._rocketHasFired : isAttacking;
+    const isLaunching = isRangedEngaged && hasAmmo && hasFiredOnce;
+    let weaponBob = (typeof bob !== 'undefined') ? bob : 0;
 
-        // Handle — reaches down toward the near end of the cart (the
-        // push-bar closest to the operator), instead of the side
-        // view's sideways-reaching hand.
-        ctx.fillStyle = "#ffccbc";
-        ctx.beginPath();
-        ctx.arc(0, 10 + bob, 2.5, 0, Math.PI * 2);
-        ctx.fill();
+    // ── DIRECTION LOCK ─────────────────────────────────────────────
+    // Per spec: while the unit is actively firing (isLaunching true —
+    // isAttacking with ammo remaining), the tube is LOCKED to a single
+    // up or down pose, chosen once when firing starts and held for as
+    // long as firing continues uninterrupted. The lock is state-based,
+    // not time-based:
+    //   - ENGAGE: the instant isLaunching flips from false to true
+    //     (first shot of a fresh volley), pick up or down (never side
+    //     — side view is never a valid outcome while locked) by
+    //     checking the actual target's position relative to the unit,
+    //     falling back to faction preference (player prefers up, enemy
+    //     prefers down) if the target is roughly level or unavailable.
+    //   - HOLD: the SAME direction is reused every frame isLaunching
+    //     stays continuously true — no re-roll mid-burst, so the tube
+    //     doesn't flicker between up/down shot to shot.
+    //   - RELEASE: the instant isLaunching goes false — either a pause
+    //     (isAttacking false: target lost, repositioning, cooldown gap
+    //     between bursts) or genuinely out of ammo (hasAmmo false) —
+    //     the lock clears immediately and the tube is free to fall
+    //     back to a normal side view (or re-lock fresh on the next
+    //     volley) rather than staying pinned to a stale direction.
+    //
+    // Stored on unit._rocketLocked (bool) and unit._rocketAimAngle
+    // (radians, only meaningful while _rocketLocked is true).
+    //
+    // We must be defensive about `unit` being undefined (e.g. during
+    // early frames or preview renders) — in that case fall back to a
+    // simple facing read with no persistence.
+    // ──────────────────────────────────────────────────────────────
+    // SURGERY FIX: removed the old ROCKET_PLAYER_PREFERS_UP hardcoded
+    // constant (same two bugs as the Repeater's lock above in this file:
+    // side is a string compared to the number 1 — always false — AND a
+    // fixed player=up/enemy=down default no longer holds with randomized
+    // spawn corners). preferUp is now derived per-battle from this unit's
+    // own spawn-geometry forward vector, computed inline at ENGAGE below.
 
+    let rocketRenderAngle = 0; // precise continuous angle actually rendered (tubeBaseRot below) — replaces the old lockedFacingY/rocketIsDiagonal bucketing
+
+    if (unit) {
+        // DEBOUNCE — proactive consistency fix matching the Repeater's
+        // lock (same reasoning: prevent a single-frame signal blip from
+        // causing a rapid re-flicker between side and locked up/down).
+        const ROCKET_LOCK_DEBOUNCE_MS = 300;
+        if (typeof unit._rocketLockChangeAt !== 'number') unit._rocketLockChangeAt = 0;
+        const sinceRocketChange = Date.now() - unit._rocketLockChangeAt;
+
+        if (isLaunching && !unit._rocketLocked && sinceRocketChange >= ROCKET_LOCK_DEBOUNCE_MS) {
+            // ENGAGE — fresh volley just started this frame. Direction
+            // comes from the ENEMY SIDE's live centroid
+            // (_computeCentroidLock), chosen ONCE here and held for the
+            // whole volley until ammo runs out — unchanged, per direct
+            // request ("the rocket just has the one volley"). NEW this
+            // pass: stores the exact continuous angle (.angle, atan2-
+            // based) rather than bucketing into a fixed 0°/45°/90°
+            // choice — per direct follow-up request ("aim at the exact
+            // angle...at the target its aiming"), so the one-time lock
+            // is now precise instead of rounded to the nearest named
+            // direction.
+            const _rocketLock = _computeCentroidLock(unit, side);
+            unit._rocketAimAngle = _rocketLock.angle;
+            unit._rocketAimDirX = (_rocketLock.deltaX < 0) ? -1 : 1;
+            unit._rocketLocked  = true;
+            unit._rocketLockChangeAt = Date.now();
+        } else if (!hasAmmo && unit._rocketLocked) {
+            // RELEASE — per direct request: "cannot switch to any other
+            // orientation until all ammunition is exhausted." Release is
+            // now gated on hasAmmo specifically (ammo truly hit 0), not
+            // the broader isLaunching flag (which could also drop from a
+            // momentary target-loss or state hiccup mid-volley — exactly
+            // the kind of transient blip that shouldn't be allowed to
+            // break the lock early). No debounce needed on this path:
+            // "ammo is exhausted" is a hard, unambiguous, one-way event,
+            // not a noisy signal that needs settling time like the
+            // isLaunching-based ENGAGE trigger above.
+            unit._rocketLocked = false;
+            unit._rocketLockChangeAt = Date.now();
+        }
+
+        rocketRenderAngle = unit._rocketLocked ? (unit._rocketAimAngle || 0) : 0;
+
+        // SURGERY: force the mirror toward the enemy's side captured at
+        // ENGAGE, for as long as the volley's lock holds, so the tube
+        // (and the dagger it falls back to once ammo runs out — see
+        // "current state" below) visibly points at the enemy.
+        if (unit._rocketLocked && unit._rocketAimDirX) {
+            unit.facingDir = unit._rocketAimDirX;
+        }
     } else {
-    // 2. Draw the Cart (ISOLATED TRANSLATION)
-    ctx.save(); 
-    ctx.translate(15 * dir, 2 + bob); // Move to cart position
-
-    // Wheels
-    ctx.strokeStyle = "#3e2723"; ctx.lineWidth = 2;
-    for (let sideOffset of [-8, 8]) {
-        ctx.save();
-        ctx.translate(0, 6);
-        ctx.rotate(wheelSpin * dir);
-        ctx.beginPath(); ctx.arc(0, 0, 6, 0, Math.PI * 2); ctx.stroke();
-        ctx.beginPath(); ctx.moveTo(-6, 0); ctx.lineTo(6, 0); ctx.stroke();
-        ctx.beginPath(); ctx.moveTo(0, -6); ctx.lineTo(0, 6); ctx.stroke();
-        ctx.restore();
+        // No unit object (preview / early frame) — read live facing,
+        // same simple perpendicular fallback as before.
+        rocketRenderAngle = facingDown ? (Math.PI / 2) : (facingUp ? -(Math.PI / 2) : 0);
     }
 
-    // Main Frame
-    ctx.strokeStyle = "#5d4037"; ctx.lineWidth = 3;
-    ctx.beginPath(); ctx.moveTo(-12 * dir, 2); ctx.lineTo(8 * dir, 2); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(-12 * dir, 2); ctx.lineTo(-18 * dir, -4); ctx.stroke();
+    // ROCKET-SPECIFIC ANGLE — per direct request: "upward and downward
+    // angles should have the launcher perpendicular to the x axis,
+    // temporarily while shooting the firework," later refined to "aim
+    // at the exact angle...at the target" (continuous, not bucketed).
+    // rocketRenderAngle above is only ever non-zero while
+    // unit._rocketLocked is true, and that lock only ever engages
+    // during isLaunching (see the ENGAGE/RELEASE block above) — so
+    // this IS already exactly "temporarily while shooting"; once
+    // firing stops the lock releases and tubeBaseRot falls back to 0
+    // (side view) on its own. Still a single ctx.rotate(tubeBaseRot),
+    // so this remains "merely a rotation of the weapon" with no
+    // relayout involved — gun (same file, above) and this tube are the
+    // two weapons simple enough for that; the body itself never
+    // rotates, only this wrapped geometry does.
+    const tubeBaseRot = rocketRenderAngle;
 
-    // The Launch Box
+    // FIRE_CYCLE_MS — matched 1:1 to the Rocket's reload time in
+    // troop_system.js's getReloadTime (9 ticks @ ~16.67ms/tick ≈
+    // 150ms), per direct request that ammo burn through fast enough to
+    // read as fireworks (20 rounds in 2-10 seconds — at 150ms/shot
+    // that's a 3.0 second burst). Ignition/launch phase boundaries
+    // below are scaled to still read as two distinct beats at this
+    // much faster pace instead of blurring into one flash.
+    const FIRE_CYCLE_MS = 150; // one ignite -> launch pulse, repeats every shot while isLaunching
+    const fireSeed = (unit && unit.id ? unit.id : 0) * 137 % FIRE_CYCLE_MS; // desyncs multiple launchers
+    const fireCycle = isLaunching ? (((Date.now() + fireSeed) % FIRE_CYCLE_MS) / FIRE_CYCLE_MS) : 0;
+    // Recoil kick straight back along the tube's own axis at the instant of
+    // launch — slightly stronger than a hand cannon's (this is a much
+    // heavier weapon), still along the same rotated axis either way.
+    const recoilKick = (isLaunching && fireCycle < 0.2) ? -4 * (1 - fireCycle / 0.2) : 0;
+
+    // ═══════════════════════════════════════════════════════════════
+    // "NEST OF BEES" REDESIGN — per explicit reference (a faceted,
+    // banded hexagonal tube) and explicit sizing note ("roughly the
+    // size of a child"). This isn't a rifle-scale barrel anymore: it's
+    // a bulky, faceted CONTAINER bundling many rocket-arrows, fired as
+    // one swarm — the historical "one nest of bees" (一窩蜂) launcher.
+    // Scale reference: drawBody's own legs run 0->9 and torso 0->-10
+    // with the head topping out around -15.5, so the adult figure this
+    // weapon is held against is roughly 24-25px tall. TUBE_FAR_X here
+    // puts the container's own length at ~19px near-to-far — read as
+    // "roughly child-sized" next to that figure — and TUBE_HALF_W (4.5)
+    // makes it nearly as wide as the torso itself (8px across), so it
+    // reads as bulk you'd need both arms to cradle, not a barrel you'd
+    // aim one-handed.
+    //
+    // The faceted look from the reference is approximated with a
+    // two-tone fill (lighter top facet / darker lower facet, faking a
+    // hex prism's lit and shaded faces) plus two cross-bands at even
+    // intervals along the tube's length, matching the reference's
+    // segmented hex-panel construction. The rear end is capped with a
+    // small point (matching the reference's pointed hex cap); the front
+    // stays open, since that's where the rockets actually launch from.
+    //
+    // "Nest of bees" also means MANY rockets bundled in the one
+    // container, not a single loaded round — the old single triangular
+    // rocket-nose is now a small CLUSTER of three, spread across the
+    // muzzle's width, and ignition/launch/smoke all widen to match.
+    //
+    // Grip changed to match: instead of a rifle-style rear-hand + close
+    // forward-hand, the two hands now sit further apart (near the rear
+    // cap and just past the midpoint) — cradling a heavy container
+    // rather than sighting down a barrel. Still uses the same single
+    // ctx.rotate(tubeBaseRot) wrapper as before, so there is still no
+    // angle-lock: this reads correctly rotated to any facing.
+    // ═══════════════════════════════════════════════════════════════
+    const TUBE_NEAR_X = 2;    // rear end, closest to the body
+    const TUBE_FAR_X  = 21;   // muzzle end — ~19px container length, "roughly a child's size" against the ~24px figure
+    const TUBE_HALF_W = 4.5;  // chunky container width — nearly as wide as the torso (8px)
+    const TUBE_MID_Y  = -5;   // vertical center of the tube, chest height on the figure
+    const CAP_X = TUBE_NEAR_X - 3; // rear pointed cap tip
+
+    if (hasAmmo || showDroppedTube) {
+        ctx.save();
+        if (hasAmmo) {
+            ctx.translate(recoilKick * dir, weaponBob);
+            ctx.rotate(tubeBaseRot);
+        } else {
+            // GROUND DROP POSE — the RELEASE logic above (see DIRECTION
+            // LOCK) already zeroes the up/down lock the SAME frame ammo
+            // hits 0 (isLaunching depends on hasAmmo too), so tubeBaseRot
+            // is already back to its natural side/0 orientation by the
+            // time we get here — no locked angle to unwind first. Lands
+            // it near the feet (drawBody's legs run 0->9, see the scale-
+            // reference comment near the top of this weapon) with a
+            // fixed haphazard tilt, then fades out over the final quarter
+            // of the linger window for a clean exit instead of an abrupt
+            // pop the instant the timer runs out.
+            const dropFadeStart = ROCKET_DROP_LINGER_MS * 0.75;
+            const dropAlpha = (msSinceDrop > dropFadeStart)
+                ? Math.max(0, 1 - (msSinceDrop - dropFadeStart) / (ROCKET_DROP_LINGER_MS - dropFadeStart))
+                : 1;
+            ctx.globalAlpha = dropAlpha;
+            ctx.translate(4 * dir, 9);
+            ctx.rotate(0.35 * dir);
+        }
+
+    // Main container body — lighter top-facet fill + capped rear point
+    ctx.fillStyle = "#6d4c3a";
+    ctx.strokeStyle = "#2b1b14"; ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(CAP_X * dir, TUBE_MID_Y);
+    ctx.lineTo(TUBE_NEAR_X * dir, TUBE_MID_Y - TUBE_HALF_W);
+    ctx.lineTo(TUBE_FAR_X * dir, TUBE_MID_Y - TUBE_HALF_W);
+    ctx.lineTo(TUBE_FAR_X * dir, TUBE_MID_Y + TUBE_HALF_W);
+    ctx.lineTo(TUBE_NEAR_X * dir, TUBE_MID_Y + TUBE_HALF_W);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+
+    // Darker lower-half facet — fakes the hex prism's shaded side face
     ctx.fillStyle = "#4e342e";
-    ctx.fillRect(-6 * dir, -12, 12 * dir, 14);
-    ctx.strokeStyle = "#212121"; ctx.lineWidth = 1;
-    ctx.strokeRect(-6 * dir, -12, 12 * dir, 14);
+    ctx.beginPath();
+    ctx.moveTo(TUBE_NEAR_X * dir, TUBE_MID_Y);
+    ctx.lineTo(TUBE_FAR_X * dir, TUBE_MID_Y);
+    ctx.lineTo(TUBE_FAR_X * dir, TUBE_MID_Y + TUBE_HALF_W);
+    ctx.lineTo(TUBE_NEAR_X * dir, TUBE_MID_Y + TUBE_HALF_W);
+    ctx.closePath();
+    ctx.fill();
 
-    // Rocket Tips & Firing Effects
+    // Segment bands — two seams across the container's width, evenly
+    // spaced along its length, matching the reference's banded hex
+    // panels (the "nest" of bundled sections, not one smooth tube).
+    ctx.strokeStyle = "#2b1b14"; ctx.lineWidth = 1;
+    const bandSpan = TUBE_FAR_X - TUBE_NEAR_X;
+    for (const bf of [0.35, 0.7]) {
+        const bx = (TUBE_NEAR_X + bandSpan * bf) * dir;
+        ctx.beginPath();
+        ctx.moveTo(bx, TUBE_MID_Y - TUBE_HALF_W);
+        ctx.lineTo(bx, TUBE_MID_Y + TUBE_HALF_W);
+        ctx.stroke();
+    }
+
+    // Loaded rockets — a CLUSTER of three noses spread across the open
+    // muzzle, selling "many rockets bundled in one container" rather
+    // than a single loaded round.
     if (hasAmmo) {
         ctx.fillStyle = "#212121";
-        let rows = 6, cols = 5, spacing = 2, count = 0;
-        for (let r = 0; r < rows; r++) {
-            for (let c = 0; c < cols; c++) {
-                if (count < currentAmmo) {
-                    let ax = (6 * dir) + (thrust * dir);
-                    let ay = -10 + (r * spacing);
-                    ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(ax + (4 * dir), ay + 1); ctx.lineTo(ax, ay + 2); ctx.fill();
-                }
-                count++;
+        for (const oy of [-TUBE_HALF_W * 0.55, 0, TUBE_HALF_W * 0.55]) {
+            ctx.beginPath();
+            ctx.moveTo(TUBE_FAR_X * dir, TUBE_MID_Y + oy - 1.1);
+            ctx.lineTo((TUBE_FAR_X + 3) * dir, TUBE_MID_Y + oy);
+            ctx.lineTo(TUBE_FAR_X * dir, TUBE_MID_Y + oy + 1.1);
+            ctx.fill();
+        }
+    }
+
+    // ONE hand visible — at the lower-rear portion of the tube (near
+    // the capped/butt end, lower edge), matching the single-hand spec.
+    // The two-hand "cradling" version was removed because it produced
+    // three visible hands total once the section-4 weapon hand was also
+    // counted. Section 4 no longer draws its own hand either (see below).
+    // Gated to hasAmmo: a dropped tube lying on the ground isn't being
+    // held by anyone, so no hand should render on it during the linger.
+    if (hasAmmo) {
+        ctx.fillStyle = "#ffccbc";
+        ctx.beginPath();
+        ctx.arc((TUBE_NEAR_X + 2) * dir, TUBE_MID_Y + TUBE_HALF_W * 0.7, 2.2, 0, Math.PI * 2);
+        ctx.fill();
+    }
+
+    // Ignition -> launch, anchored at the (now wider) muzzle. Still tied
+    // to the tight per-shot fireCycle (now ~150ms) — at this speed the
+    // rapid ignite/flash flicker READS as a firecracker string, which
+    // is the desired effect now that shots fire this fast.
+    if (isLaunching) {
+        if (fireCycle < 0.35) {
+            // IGNITION — spark catching before the launch
+            let ip = fireCycle / 0.35;
+            ctx.fillStyle = "rgba(255,255,255,0.9)";
+            ctx.beginPath(); ctx.arc(TUBE_FAR_X * dir, TUBE_MID_Y, 1 + ip * 2.5, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = "#ffeb3b";
+            ctx.beginPath(); ctx.arc(TUBE_FAR_X * dir, TUBE_MID_Y, 1 + ip * 4, 0, Math.PI * 2); ctx.fill();
+        } else {
+            // LAUNCH — flame burst as the volley fires out
+            ctx.fillStyle = "rgba(255, 160, 0, 0.85)";
+            ctx.beginPath(); ctx.arc((TUBE_FAR_X + 2) * dir, TUBE_MID_Y, 5 + Math.random() * 4, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = "#ffeb3b";
+            ctx.beginPath(); ctx.arc((TUBE_FAR_X + 4) * dir, TUBE_MID_Y, 2.5 + Math.random() * 2, 0, Math.PI * 2); ctx.fill();
+        }
+    }
+
+    // SMOKE — REDESIGNED this session per direct request: "the smoke
+    // should keep playing once in a while randomly just like a
+    // fireworks launcher." The old smoke was a deterministic function
+    // of fireCycle alone (always on for the back 75% of every cycle) —
+    // that worked at the old 700ms cadence, but now that FIRE_CYCLE_MS
+    // is ~150ms, tying smoke to fireCycle would make it flicker on/off
+    // in lockstep with every single shot — far too fast to read as
+    // drifting smoke, and not the "occasional random puff" look of a
+    // real firework stand.
+    //
+    // Replaced with a persistent, randomly-reseeded puff SYSTEM stored
+    // on the unit itself (unit._rocketSmokePuffs), independent of the
+    // per-shot fireCycle:
+    //   - A NEW puff spawns at a random moment while isLaunching, not
+    //     every shot — unit._rocketNextSmokeAt holds the timestamp for
+    //     the next spawn, itself re-randomized after each spawn
+    //     (roughly every 80-220ms — "once in a while" relative to the
+    //     150ms shot cadence, not locked to it 1:1).
+    //   - Each puff independently ages, drifts outward, and fades over
+    //     its own ~600-900ms lifetime — several puffs from DIFFERENT
+    //     shots can be visible and overlapping at once, exactly like a
+    //     real firework launcher's smoke trail rather than one puff
+    //     resetting per shot.
+    //   - Puffs are pruned once fully faded so the array doesn't grow
+    //     unbounded across a multi-second burst.
+    // Falls back to skipping smoke entirely when `unit` isn't available
+    // (preview/no-unit render) so this never crashes there — ignition/
+    // launch flash above still renders fine without it.
+    if (unit) {
+        if (!Array.isArray(unit._rocketSmokePuffs)) unit._rocketSmokePuffs = [];
+        if (typeof unit._rocketNextSmokeAt !== 'number') unit._rocketNextSmokeAt = 0;
+
+        const nowMsSmoke = Date.now();
+        if (isLaunching && nowMsSmoke >= unit._rocketNextSmokeAt) {
+            unit._rocketSmokePuffs.push({
+                born: nowMsSmoke,
+                life: 600 + Math.random() * 300,       // 600-900ms lifetime
+                oy: (Math.random() * 2 - 1) * TUBE_HALF_W * 1.3, // random vertical offset off the muzzle
+                size: 4 + Math.random() * 3,
+            });
+            // Next spawn "once in a while" — randomized, deliberately
+            // NOT locked to FIRE_CYCLE_MS, so puffs don't sync 1:1 with
+            // shots (some shots get a puff, some don't, some get an
+            // extra one between shots — reads as organic/random).
+            unit._rocketNextSmokeAt = nowMsSmoke + 80 + Math.random() * 140;
+        }
+
+        for (let i = unit._rocketSmokePuffs.length - 1; i >= 0; i--) {
+            const puff = unit._rocketSmokePuffs[i];
+            const age = nowMsSmoke - puff.born;
+            if (age >= puff.life) {
+                unit._rocketSmokePuffs.splice(i, 1);
+                continue;
+            }
+            const sp = age / puff.life; // 0 (just spawned) -> 1 (fully faded)
+            const drift = sp * 14;
+            const fade = Math.max(0, 0.5 * (1 - sp));
+            if (fade <= 0) continue;
+            ctx.fillStyle = `rgba(150, 150, 150, ${fade.toFixed(2)})`;
+            ctx.beginPath();
+            ctx.arc(TUBE_FAR_X * dir + dir * drift, TUBE_MID_Y + puff.oy, puff.size + sp * 4, 0, Math.PI * 2);
+            ctx.fill();
+        }
+    }
+
+    ctx.restore();
+    }
+
+    // 4. Backup weapon — DAGGER (SWAPPED BACK from the small axe this
+    // session, per direct request: "switch to a dagger". The axe had
+    // itself replaced an earlier dagger per a prior explicit spec — this
+    // reverses that, back to the double-taper stabbing blade (bare grip,
+    // no cross guard). Grip length also reverts to match (a dagger's
+    // grip reads shorter than the axe's longer haft).
+    // ═══════════════════════════════════════════════════════════
+    // Gated to !hasAmmo && !showDroppedTube: the dagger only appears
+    // once the empty tube has fully finished its ground-drop/linger
+    // (see GROUND DROP above) and disappeared — otherwise the unit
+    // would read as dual-wielding a dropped tube AND a drawn dagger at
+    // the same time. Same 3-phase wind-up/strike/recovery swing timing
+    // as before (untouched — only the drawn weapon geometry changed,
+    // not the attack motion).
+    //
+    // No separate hand circle after ctx.restore() — the single hand
+    // already drawn on the tube body above is this unit's only visible
+    // hand, fixing the three-hands-visible bug.
+    // ═══════════════════════════════════════════════════════════
+    if (!hasAmmo && !showDroppedTube) {
+        let stabX = 0, stabY = 0;
+        let daggerRot = (Math.PI / -5) * dir;
+
+        if (isAttacking) {
+            let swingCycle = (Date.now() / 450) % 1.0;
+            if (swingCycle < 0.2) {                   // wind-up
+                let p = swingCycle / 0.2;
+                stabX = -4 * p;
+                stabY = 1 * p;
+                daggerRot = ((Math.PI / -5) - 0.3 * p) * dir;
+            } else if (swingCycle < 0.5) {             // strike
+                let p = (swingCycle - 0.2) / 0.3;
+                let ease = p * (2 - p);
+                stabX = -4 + ease * 12;
+                stabY = 1 - ease * 2;
+                daggerRot = ((Math.PI / -5) - 0.3 + ease * 0.6) * dir;
+            } else {                                   // recovery
+                let p = (swingCycle - 0.5) / 0.5;
+                let rec = Math.pow(1 - p, 2);
+                stabX = 8 * rec;
+                stabY = -1 * rec;
+                daggerRot = ((Math.PI / -5) + 0.3 * rec) * dir;
             }
         }
-        if (isAttacking) {
-            ctx.fillStyle = "rgba(255, 160, 0, 0.8)";
-            ctx.beginPath(); ctx.arc(10 * dir, -6, 4 + Math.random() * 4, 0, Math.PI * 2); ctx.fill();
-            ctx.fillStyle = "rgba(150, 150, 150, 0.5)";
-            ctx.beginPath(); ctx.arc(8 * dir, -4, 6 + Math.random() * 6, 0, Math.PI * 2); ctx.fill();
-        }
-    }
-    ctx.restore(); // <--- CRITICAL: Returns coordinates back to the Man's center
 
-    // 3. Draw the Operator (The Man)
-  //  ctx.fillStyle = factionColor; 
-//ctx.fillRect(-3, -10 + bob, 6, 10); // Body
+        const daggerPivotX = (-6 + stabX) * dir;
+        const daggerPivotY = -2 + bob + stabY; // waist height, lower than spear
 
-    // Forward Hand (Holding cart handle)
-    ctx.fillStyle = "#ffccbc";
-    ctx.beginPath(); 
-    ctx.arc(4 * dir, -2 + bob, 2.5, 0, Math.PI * 2); 
-    ctx.fill();
-    }
+        ctx.save();
+        ctx.translate(daggerPivotX, daggerPivotY);
+        ctx.rotate(daggerRot);
 
-    // 4. Draw the Spear (Opposite Hand / Back Hand)
-    // ═══════════════════════════════════════════════════════════
-    // DOWNWARD FACING — same shared-blade-convention fix as the
-    // shortsword-style weapons elsewhere in this file: this spear's
-    // shaft is drawn locally along Y (moveTo(0,8) to lineTo(0,-28),
-    // head at the negative end), so at rest (spearRot small) it
-    // already points mostly up-screen — Math.PI flips that to
-    // down-screen. The stab reach (stabX in the side view) swaps from
-    // the X translate component to the Y translate component, since
-    // "forward" is now down-screen instead of sideways — same axis-
-    // swap idea used throughout this session.
-    // ═══════════════════════════════════════════════════════════
-    let stabX = 0, stabY = 0;
-    let spearRot = (Math.PI / -6) * dir;
+        // Grip — short bare handle, shorter than the axe's haft
+        ctx.strokeStyle = "#3e2723"; ctx.lineWidth = 2.5; ctx.lineCap = "round";
+        ctx.beginPath(); ctx.moveTo(0, 4); ctx.lineTo(0, -3); ctx.stroke();
 
-    if (!hasAmmo && isAttacking) {
-        let stabCycle = (Date.now() / 200) % 1.0; 
-        stabX = Math.sin(stabCycle * Math.PI) * 12;
-        stabY = Math.sin(stabCycle * Math.PI) * 2;
-        spearRot = (Math.PI / 12) * dir;
+        // Blade — double taper, symmetric diamond profile coming to a
+        // point, classic straight stabbing dagger silhouette.
+        ctx.fillStyle = "#9e9e9e";
+        ctx.strokeStyle = "#616161"; ctx.lineWidth = 0.8;
+        ctx.beginPath();
+        ctx.moveTo(0, -3);
+        ctx.lineTo(1.6, -6.5);
+        ctx.lineTo(0, -12);
+        ctx.lineTo(-1.6, -6.5);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+        // Center-line highlight along the blade
+        ctx.strokeStyle = "rgba(255,255,255,0.5)"; ctx.lineWidth = 0.6;
+        ctx.beginPath(); ctx.moveTo(0, -3.5); ctx.lineTo(0, -11); ctx.stroke();
+
+        ctx.restore();
     }
 
-    const spearPivotX = facingDown ? 0 : ((-8 + stabX) * dir);
-    const spearPivotY = facingDown ? (-8 + bob + stabX) : (-8 + bob + stabY);
-    const spearFinalRot = facingDown ? Math.PI : spearRot;
-
-    ctx.save(); 
-    ctx.translate(spearPivotX, spearPivotY);
-    ctx.rotate(spearFinalRot);
-    
-    // Spear Shaft & Head
-    ctx.strokeStyle = "#4e342e"; ctx.lineWidth = 1.8;
-    ctx.beginPath(); ctx.moveTo(0, 8); ctx.lineTo(0, -28); ctx.stroke();
-    ctx.fillStyle = "#bdbdbd";
-    ctx.beginPath(); ctx.moveTo(-1.5, -28); ctx.lineTo(0, -36); ctx.lineTo(1.5, -28); ctx.fill();
-    ctx.restore(); // <--- CRITICAL: Returns coordinates back to the Man's center
-
-    // 5. Spear Hand (Drawn last so it's on top)
-    ctx.fillStyle = "#ffccbc";
-    ctx.beginPath();
-    ctx.arc(spearPivotX, spearPivotY, 2.5, 0, Math.PI * 2);
-    ctx.fill();
-
-} 
+}
 
 else if (type === "shortsword" || (typeof unit !== 'undefined' && unit.stats && unit.stats.isRanged && unit.stats.ammo <= 0 && type !== "javelinier")) {
     
@@ -3822,6 +5074,37 @@ else if (type === "shortsword" || (typeof unit !== 'undefined' && unit.stats && 
     ctx.rotate(rotAngle);
 
     // --- 3. DRAW REALISTIC STRAIGHT DAO ---
+    // (or, for Sanyanchong specifically, its own spent weapon — see
+    // isSanyanchongFallback branch just below)
+
+    // NEW — per direct follow-up request ("improve them"): Sanyanchong,
+    // once its three barrels are spent, keeps and swings the SAME haft
+    // it fired from (see infscript.js's "gun" branch, stickBackX) rather
+    // than drawing a generic shortsword like every other ranged unit
+    // falling into this branch does. Reuses ALL of the swing/thrust/
+    // pivot/timing math above completely unchanged — the blade-drawing
+    // block just below is the only thing that differs, gated on
+    // unitName so nothing else in this shared fallback is touched.
+    const isSanyanchongFallback = (typeof unitName !== 'undefined' && unitName === "Sanyanchong");
+
+    if (isSanyanchongFallback) {
+        // Shaft — noticeably longer and plain wood-colored, no blade
+        // silhouette, since this is the same haft (see stickBackX in
+        // the "gun" branch) now doubling as a two-handed club.
+        ctx.strokeStyle = "#6d4c41"; ctx.lineWidth = 2.4;
+        ctx.beginPath(); ctx.moveTo(0, 2); ctx.lineTo(0, -15); ctx.stroke();
+        // Spent barrel cluster bunched at the striking end — three
+        // short dulled-bronze stubs, echoing the live triple-barrel
+        // geometry without redrawing it in full.
+        ctx.strokeStyle = "#5d4e46"; ctx.lineWidth = 1.6;
+        [-1.6, 0, 1.6].forEach(ox => {
+            ctx.beginPath(); ctx.moveTo(ox, -13); ctx.lineTo(ox, -18); ctx.stroke();
+        });
+        // Iron collar binding the cluster to the haft, matching the
+        // live weapon's own collar.
+        ctx.strokeStyle = "#616161"; ctx.lineWidth = 3;
+        ctx.beginPath(); ctx.moveTo(-2.2, -12.5); ctx.lineTo(2.2, -12.5); ctx.stroke();
+    } else {
     
     // Shadow/Blade Depth
     ctx.fillStyle = "rgba(0,0,0,0.2)";
@@ -3844,6 +5127,7 @@ else if (type === "shortsword" || (typeof unit !== 'undefined' && unit.stats && 
     // Guard (Small, thick iron disc)
     ctx.strokeStyle = "#263238"; ctx.lineWidth = 2;
     ctx.beginPath(); ctx.moveTo(-2.5, 0); ctx.lineTo(2.5, 0); ctx.stroke();
+    }
 
     // Grip
     ctx.strokeStyle = "#4e342e"; ctx.lineWidth = 2.5;

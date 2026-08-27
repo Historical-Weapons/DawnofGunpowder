@@ -1,5 +1,14 @@
 let siegeAITick = 0;
 
+// DEBUG TOGGLE: set window.__SIEGE_DEBUG_GATE__ = true in the browser
+// console (or flip the default below) to turn on the [GATE-CLAMP],
+// [RAM-RELEASE], [DUMMY-LOCK], and [STUCK-WATCH] console logs used to
+// pin down the post-breach gate-stuck bug. Leave false for normal play —
+// these run a per-unit, per-tick check and will spam the console.
+if (typeof window !== 'undefined' && window.__SIEGE_DEBUG_GATE__ === undefined) {
+    window.__SIEGE_DEBUG_GATE__ = false;
+}
+
 function processSiegeEngines() {
     if (!inSiegeBattle) return;
     
@@ -19,6 +28,54 @@ function processSiegeEngines() {
     let activeLadders = siegeEquipment.ladders.filter(l => l.isDeployed && l.hp > 0);
     let isWallBreached = activeLadders.length > 0;
 
+    // DEBUG: [STUCK-WATCH] catch-all, path-agnostic stuck detector. Doesn't
+    // assume WHICH code path is holding a unit — just flags any player unit
+    // within ~150px of the gate x-line, post-breach, that hasn't meaningfully
+    // moved (>5px) in over 2 seconds. If a unit logs here WITHOUT also
+    // logging [DUMMY-LOCK] or [GATE-CLAMP] around the same time, the stuck
+    // mechanism is neither of the two fixed/instrumented paths — something
+    // else entirely (e.g. plain unit-vs-unit crowd collision, a third
+    // targeting branch, or a stale reference) is responsible, and that's
+    // the next place to look.
+    if (window.__SIEGE_DEBUG_GATE__ && isGateBreached && typeof SiegeTopography !== 'undefined') {
+        battleEnvironment.units.forEach(u => {
+            if (u.side !== "player" || u.hp <= 0 || u.isCommander) return;
+            if (Math.abs(u.x - SiegeTopography.gatePixelX) > 150) return;
+
+            u.__stuckWatchLastPos = u.__stuckWatchLastPos || { x: u.x, y: u.y, t: Date.now() };
+            let moved = Math.hypot(u.x - u.__stuckWatchLastPos.x, u.y - u.__stuckWatchLastPos.y);
+
+            if (moved > 5) {
+                u.__stuckWatchLastPos = { x: u.x, y: u.y, t: Date.now() };
+            } else if (Date.now() - u.__stuckWatchLastPos.t > 2000) {
+                u.__stuckWatchLogLast = u.__stuckWatchLogLast || 0;
+                if (Date.now() - u.__stuckWatchLogLast > 1500) {
+                    u.__stuckWatchLogLast = Date.now();
+                    console.log(
+                        "%c[STUCK-WATCH] player unit near gate hasn't moved in 2s+",
+                        "color:#fff;background:#8e44ad;font-weight:bold;padding:2px 4px;",
+                        {
+                            unitId: u.id ?? u.name ?? "(no id)",
+                            siegeRole: u.siegeRole,
+                            orderType: u.orderType,
+                            priorityOverride: u.priorityOverride,
+                            hasOrders: u.hasOrders,
+                            disableAICombat: u.disableAICombat,
+                            isClimbing: u.isClimbing,
+                            onWall: u.onWall,
+                            x: Math.round(u.x),
+                            y: Math.round(u.y),
+                            wallPixelY: Math.round(SiegeTopography.wallPixelY),
+                            gatePixelX: Math.round(SiegeTopography.gatePixelX),
+                            target: u.target ? { x: Math.round(u.target.x), y: Math.round(u.target.y), isDummy: !!u.target.isDummy } : null,
+                            secondsStuck: Math.round((Date.now() - u.__stuckWatchLastPos.t) / 100) / 10
+                        }
+                    );
+                }
+            }
+        });
+    }
+
     // HARD NPC COLLISION CLAMP (Funneling logic)
     let wallPixelY = SiegeTopography.wallPixelY; 
     let westWallX = 45 * BATTLE_TILE_SIZE; 
@@ -36,6 +93,48 @@ function processSiegeEngines() {
             // wallPixelY+20 unless their x is within a narrow window of the gate that
             // frame, which reads as units being stuck/pushed back right at the gate.
             if (u.isClimbing || (u.siegeRole && (u.siegeRole.includes('ladder') || u.siegeRole === 'assault_complete'))) return;
+
+            // BUGFIX ("units gather in front of the gate and get stuck there
+            // after it breaks, even though the general can walk through
+            // fine"): this function runs BEFORE processTacticalOrders every
+            // tick (see updateBattleUnits's call order), so this clamp gets
+            // first say over every non-ladder/non-assault_complete unit's
+            // position each frame — including a unit that's correctly
+            // walking toward battlefield_commands.js's Stage-1 gate_funnel
+            // dummy target. The 2-E/2-F fix above already recognized this
+            // and gave ladder/assault_complete units a full, unconditional
+            // exemption once tagged — no x-window check at all. Every other
+            // unit instead depends on atOpenGate re-passing its 80px
+            // x-alignment check FRESH every single tick, with no persistence
+            // or grace period. With dozens of units all converging on the
+            // same ~60px-wide funnel point at once, ordinary crowd jostling
+            // can easily push a unit's x outside that 80px window for a
+            // tick — at which point it gets clamp-reset straight back to
+            // wallPixelY + 20, discarding real forward progress. Repeated
+            // across a packed crowd, this becomes a self-sustaining jam: the
+            // congestion that pushes units off-center is itself partly
+            // caused by this same clamp resetting others nearby.
+            //
+            // Separately — and this is the mechanism the request specifically
+            // asked about ("perhaps we need to kill the old target dummy
+            // after gate open"): even a unit that DOES stay inside the 80px
+            // window and dodges the Y-clamp still hits the `u.x += dirX *
+            // 1.8` nudge on line ~53 below every tick it's in the gate zone.
+            // That's a second, independent x-steering driver layered on top
+            // of whatever battlefield_commands.js's funnel target / seek_engage
+            // targeting already computed for this unit that same frame — the
+            // "old target dummy" logic here was never actually retired once
+            // the gate opened, it just kept running in parallel and fighting
+            // the real steering with small competing corrections.
+            //
+            // Fix: once the gate is breached, this clamp has no further job
+            // to do for ANY player unit near the gate — same reasoning as
+            // the existing ladder/assault_complete exemption, just no longer
+            // restricted to those two roles. Units still approaching a
+            // genuinely closed gate, or clamped against the wall elsewhere,
+            // are completely unaffected — this only widens the exemption
+            // that already exists for the post-breach population.
+            if (isGateBreached && u.side === "player" && Math.abs(u.x - SiegeTopography.gatePixelX) < gateHalfWidth) return;
             
             let atOpenGate = (isGateBreached && Math.abs(u.x - SiegeTopography.gatePixelX) < gateHalfWidth);
             let atLadder = activeLadders.some(l => Math.abs(u.x - l.x) < 24);
@@ -43,6 +142,34 @@ function processSiegeEngines() {
          // 1. FRONT WALL COLLISION
                     if (u.side === "player" && !u.isCommander) {
                         if (u.y < wallPixelY + 20 && !atLadder && !atOpenGate) {
+                            // DEBUG: [GATE-CLAMP] fires whenever this per-tick,
+                            // no-persistence 80px x-window check re-snaps a
+                            // player unit back to the wall line. If a unit
+                            // reported as "stuck at the gate" is logging this
+                            // repeatedly every frame, THIS clamp — not
+                            // targeting/waypoints — is what's holding it.
+                            // xOffsetFromGate tells you how far outside the
+                            // gateHalfWidth (80px) window the unit's x had
+                            // drifted at the moment it got snapped.
+                            if (window.__SIEGE_DEBUG_GATE__) {
+                                console.log(
+                                    "%c[GATE-CLAMP] unit re-snapped to wall line",
+                                    "color:#fff;background:#c0392b;font-weight:bold;padding:2px 4px;",
+                                    {
+                                        unitId: u.id ?? u.name ?? "(no id)",
+                                        siegeRole: u.siegeRole,
+                                        orderType: u.orderType,
+                                        priorityOverride: u.priorityOverride,
+                                        x: Math.round(u.x),
+                                        gatePixelX: Math.round(SiegeTopography.gatePixelX),
+                                        xOffsetFromGate: Math.round(Math.abs(u.x - SiegeTopography.gatePixelX)),
+                                        gateHalfWidth,
+                                        y_before: Math.round(u.y),
+                                        y_after: wallPixelY + 20,
+                                        isGateBreached
+                                    }
+                                );
+                            }
                             u.y = wallPixelY + 20; // Hard clamp on the Y axis
                             
                             // NEW SURGERY: Slide towards the ladder if assigned, otherwise slide to gate
@@ -74,6 +201,110 @@ function processSiegeEngines() {
     siegeEquipment.rams.forEach(ram => {
         if (ram.hp <= 0) return;
 
+        // BUGFIX ("ram pushers stuck after the gate breaks, can't detach"):
+        // hoisted up from further down in this function. Previously
+        // "isGateBroken" was only computed after the crew-presence/auto-
+        // refill/Y-clamp logic below had already run using ram.hp alone —
+        // and ram.hp does NOT drop to 0 just because the GATE broke. The
+        // gate has its own separate gateHP. So a ram that successfully
+        // breached the gate is still fully alive and still passes every
+        // "am I a valid ram to crew" check below, forever. Nothing anywhere
+        // previously connected "the gate is now open" to "release the
+        // pushers" — computing it here lets every block below skip clamping/
+        // refilling/holding crew in place once the breach has happened.
+        const isGateBroken = !ram.targetGate || ram.targetGate.gateHP <= 0 || window.__SIEGE_GATE_BREACHED__;
+
+        // BUGFIX: release existing ram_pusher crew the instant the gate
+        // breaks, instead of leaving them assigned to a ram that has
+        // nothing left to batter.
+        //
+        // FOLLOW-UP FIX ("pushers still look stuck while the ram is backing
+        // off"): the first version of this handed freed units bare
+        // seek_engage and relied on processTacticalOrders' seek_engage
+        // handler (battlefield_commands.js) to pick a live enemy target.
+        // Right after a breach, though, defenders are simultaneously being
+        // set to retreatToPlaza (see triggerGateBreach in
+        // siege_function_helpers.js) and can legitimately be out of range/
+        // not yet resolvable for a tick or several — pickSmartCombatTarget
+        // and the nearest-enemy fallback both return null in that window,
+        // so unit.target stays null and the freed unit just stands exactly
+        // where it was crewing the ram, with nowhere to go, while the ram
+        // itself visibly retreats south out from under it. That reads as
+        // "stuck," even though the unit is technically free.
+        // Fix: give freed pushers the same immediate gate-directed waypoint
+        // triggerGateBreach already hands every other unit (move_to_point +
+        // priorityOverride, aimed at the gate centroid) so they have
+        // somewhere to walk to on the very same tick they're released,
+        // with real walking animation, regardless of whether a live enemy
+        // target is resolvable yet. Once they arrive, normal seek_engage
+        // targeting (already working) takes over as usual.
+        if (isGateBroken && typeof battleEnvironment !== 'undefined' && battleEnvironment.units) {
+            battleEnvironment.units.forEach(u => {
+                if (u.side === "player" && u.hp > 0 && u.siegeRole === "ram_pusher" && u.siegeTarget === ram) {
+                    u.siegeRole = null;
+                    u.siegeTarget = null;
+                    u.hasOrders = true;
+                    // BUGFIX ("ram pushers permanently stuck at the broken
+                    // gate"): this used to hand freed pushers orderType =
+                    // "move_to_point" with priorityOverride = true and a
+                    // ONE-TIME dummy target frozen at gateY-20. That target
+                    // was never re-issued or advanced by anything —
+                    // battlefield_commands.js's Stage-1/Stage-2 funnel
+                    // (gate_funnel -> isInsideCity -> seek_engage handoff)
+                    // only runs for orderType === "siege_assault", which
+                    // these units never had. The result: pushers walked to
+                    // the frozen point and then had nowhere left to go,
+                    // forever — reading as a collision jam right at the
+                    // gate gap, and immune to new player orders since
+                    // priorityOverride was never cleared by anything either
+                    // (see the companion fix in ai_categories.js's
+                    // processAction, which now also releases the lock on a
+                    // fresh order or on arrival as a safety net).
+                    //
+                    // Fix: route freed pushers through "siege_assault" like
+                    // every other attacker, so they get the SAME proven
+                    // Stage-1 (funnel to gate) -> Stage-2 (seek_engage /
+                    // getCityNavTarget, actually walks them to the plaza)
+                    // handoff that already works correctly for the rest of
+                    // the assault force, instead of a bespoke dead-end path.
+                    u.orderType = "siege_assault";
+                    u.priorityOverride = false;
+                    let gateX = typeof SiegeTopography !== 'undefined' ? SiegeTopography.gatePixelX : ram.x;
+                    let gateY = typeof SiegeTopography !== 'undefined' ? SiegeTopography.gatePixelY : ram.y - 100;
+                    u.target = {
+                        x: gateX + (Math.random() - 0.5) * 80,
+                        y: gateY - 20,
+                        hp: 9999,
+                        isDummy: true,
+                        priority: "gate_centroid"
+                    };
+
+                    // DEBUG: [RAM-RELEASE] fires exactly once per unit, the
+                    // tick a ram_pusher is freed after the gate breaks. If a
+                    // unit that later gets stuck never logs this, it isn't a
+                    // freed ram_pusher at all — the stuck mechanism for it
+                    // lives somewhere else entirely (different siegeRole/
+                    // orderType), and the fix in this function doesn't apply
+                    // to it.
+                    if (window.__SIEGE_DEBUG_GATE__) {
+                        console.log(
+                            "%c[RAM-RELEASE] ram_pusher freed at gate breach",
+                            "color:#fff;background:#2471a3;font-weight:bold;padding:2px 4px;",
+                            {
+                                unitId: u.id ?? u.name ?? "(no id)",
+                                orderType: u.orderType,
+                                priorityOverride: u.priorityOverride,
+                                targetX: Math.round(u.target.x),
+                                targetY: Math.round(u.target.y),
+                                unitX: Math.round(u.x),
+                                unitY: Math.round(u.y)
+                            }
+                        );
+                    }
+                }
+            });
+        }
+
         // ---> CREW PRESENCE REQUIRED AGAIN <---
         // Rams only move/attack while at least one non-commander player unit
         // that is legally allowed to operate siege engines is in body contact
@@ -82,8 +313,14 @@ function processSiegeEngines() {
         // RAM CREW CAP: 5 — this is the top limit for the whole player siege
         // attacker AI. Only the 5 closest count as crew (units beyond that
         // won't push/speed the ram, won't be marked "busy" via carriedBy).
+        // BUGFIX: once the gate is broken there is no more crew job at all —
+        // physicallyPresentCrew is forced empty so the auto-refill block
+        // below and the "busy, don't retarget me" flag on the ram both stand
+        // down immediately, instead of continuing to treat nearby units as
+        // ram crew just because they haven't walked away from the ram's
+        // former position yet.
         const RAM_CREW_CAP = 5;
-        let physicallyPresentCrew = playerUnits.filter(u => 
+        let physicallyPresentCrew = isGateBroken ? [] : playerUnits.filter(u => 
             !u.isCommander && 
             canUseSiegeEngines(u) &&
             Math.hypot(u.x - ram.x, u.y - ram.y) < 60
@@ -96,7 +333,9 @@ function processSiegeEngines() {
         // send them in — the ram never sits under-crewed just because its
         // assigned pushers thinned out. Prefers reserve/ladder units over
         // pulling someone off another active job.
-        if (physicallyPresentCrew.length < RAM_CREW_CAP && typeof battleEnvironment !== 'undefined' && battleEnvironment.units) {
+        // BUGFIX: gated on !isGateBroken — refilling ram crew after the gate
+        // is already down would just create brand-new stuck pushers.
+        if (!isGateBroken && physicallyPresentCrew.length < RAM_CREW_CAP && typeof battleEnvironment !== 'undefined' && battleEnvironment.units) {
             const alreadyOnThisRam = new Set(physicallyPresentCrew);
             const ramPusherCount = battleEnvironment.units.filter(u =>
                 u.side === "player" && u.hp > 0 && u.siegeRole === "ram_pusher" && u.siegeTarget === ram
@@ -107,7 +346,12 @@ function processSiegeEngines() {
                     .filter(u => u.side === "player" && u.hp > 0 && !u.isCommander && !alreadyOnThisRam.has(u) &&
                         !u.disableAICombat && // frozen units (siege start, no orders yet) must never be auto-pulled onto a ram
                         canUseSiegeEngines(u) &&
-                        ["infantry_reserve", "ladder_carrier", "ranged_support"].includes(u.siegeRole))
+                        u.siegeRole === "ladder_carrier") // RESERVES REMOVED: infantry_reserve no longer
+                                                           // exists. ranged_support is deliberately excluded
+                                                           // too — shooters stay shooters in the new 3-bucket
+                                                           // model (ranged / ram / ladder); only ladder-bound
+                                                           // units (including those still queued waiting for a
+                                                           // ladder slot) are valid ram-refill candidates.
                     .sort((a, b) => Math.hypot(a.x - ram.x, a.y - ram.y) - Math.hypot(b.x - ram.x, b.y - ram.y))
                     .slice(0, slotsOpen);
                 candidates.forEach(u => {
@@ -128,7 +372,14 @@ function processSiegeEngines() {
         // The north tip of the battering log head sits at ram.y - 45 (draw geometry).
         // Pushers may not exceed 10px south of that tip (i.e. y < ram.y - 35) UNTIL the
         // ram begins its attack swing. This prevents crew from running in front of the ram.
-        if (!ram.isBreaking) {
+        // BUGFIX: added `!isGateBroken` — this clamp fires whenever
+        // `!ram.isBreaking`, which is also true the entire time the ram is
+        // "retreating"/"idle" post-breach (see the RETREATING branch further
+        // down, which explicitly sets ram.isBreaking = false). Since
+        // physicallyPresentCrew is now already forced empty post-breach this
+        // loop is a no-op either way, but the explicit guard keeps the intent
+        // readable and safe even if crew detection above ever changes.
+        if (!ram.isBreaking && !isGateBroken) {
             const ramNorthTip = ram.y - 45;
             const pusherFloorY  = ramNorthTip + 10; // 10 south of the tip
             physicallyPresentCrew.forEach(u => {
@@ -142,28 +393,43 @@ function processSiegeEngines() {
         // --- END RAM PUSHER Y-CLAMP ---
 
         const exactGateY = SiegeTopography.gatePixelY;
-        const safeRetreatY = exactGateY + 150; 
-        const ramSpeed = ram.speed || ram.stats?.speed || 0.6;
+        // SURGERY (30% retreat distance, per direct request): the ram used
+        // to retreat all the way to exactGateY+150 starting from its attack
+        // position at exactGateY+30 — a 120px backup. Now it only backs up
+        // 30% of that original distance (36px), i.e. to exactGateY+66.
+        const ORIGINAL_RETREAT_DISTANCE = 120; // exactGateY+150 minus exactGateY+30
+        const safeRetreatY = exactGateY + 30 + (ORIGINAL_RETREAT_DISTANCE * 0.3);
+        const ramSpeed = ram.speed || ram.stats?.speed || 0.3;
 
         // NOTE: intentionally NOT nulling ram.targetGate to detect "broken" —
         // that made the ram permanently forget the gate the first time it ever
         // retreated (crew died / ran off), even if the gate still had HP left.
-        // Breach is now judged purely from live gate state.
-        const isGateBroken = !ram.targetGate || ram.targetGate.gateHP <= 0 || window.__SIEGE_GATE_BREACHED__;
+        // Breach is now judged purely from live gate state. (isGateBroken
+        // itself is now computed once, at the top of this forEach — see the
+        // BUGFIX comment there — so it isn't redeclared here anymore.)
         
         if (!isGateBroken && ramIsManned) {
             if (ram.y > exactGateY+30) {
                 ram.state = "moving_to_gate";
                 ram.isBreaking = false;
-                ram.y -= ramSpeed;
-BattleAudio.playSiegeMovement(ram.x, ram.y, true);				
+                // SURGERY: halt instead of pushing through a large unit
+                // (general/horse/elephant/camel) standing exactly where the
+                // ram is about to advance into — resumes the instant that
+                // unit clears out of the way.
+                let nextRamY = ram.y - ramSpeed;
+                if (typeof isLargeUnitBlockingEngineMove === 'function' && isLargeUnitBlockingEngineMove(ram, ram.x, nextRamY)) {
+                    ram.state = "waiting_for_clearance";
+                } else {
+                    ram.y = nextRamY;
+BattleAudio.playSiegeMovement(ram.x, ram.y, true);
+                }
             } else {
                 ram.y = exactGateY+30; 
                 ram.state = "attacking_gate";
                 ram.isBreaking = true;
                 
                 if (Math.random() > 0.99) { 
-                    ram.targetGate.gateHP -= 35;  //slow
+                    ram.targetGate.gateHP -= 235;  //slow
 BattleAudio.playRamHit(ram.x, ram.y);
                     
                     if (ram.targetGate.gateHP <= 0) {
@@ -189,8 +455,16 @@ BattleAudio.playRamHit(ram.x, ram.y);
             if (ram.path) ram.path = null;
 
             if (ram.y < safeRetreatY) {
-                ram.state = "retreating";
-                ram.y += (ramSpeed * 0.5); 
+                // SURGERY: halt instead of pushing through a large unit
+                // standing exactly where the ram is about to retreat into —
+                // resumes the instant that unit clears out of the way.
+                let nextRamY = ram.y + (ramSpeed * 0.5);
+                if (typeof isLargeUnitBlockingEngineMove === 'function' && isLargeUnitBlockingEngineMove(ram, ram.x, nextRamY)) {
+                    ram.state = "retreating_blocked";
+                } else {
+                    ram.state = "retreating";
+                    ram.y = nextRamY;
+                }
             } else {
                 ram.state = "idle";
                 ram.hasOrders = false; 
@@ -306,17 +580,27 @@ BattleAudio.playRamHit(ram.x, ram.y);
         
         // D. Move only while someone is actually touching it (crew required again)
         if (activePushers.length > 0 && ladder.y > targetPixelY) {
-            ladder.y -= ladder.speed;
-            ladder.lastY = ladder.y;
-           BattleAudio.playSiegeMovement(ladder.x, ladder.y, true); 
-            // Pull touching pushers along with the ladder.
-            // While pushing (pre-deploy), unit targets the ladder centroid so they
-            // converge toward it rather than drifting off to the side.
-            // After deployment the normal AI resumes (this block no longer runs).
-            activePushers.forEach(u => {
-                u.target = { x: ladder.x, y: ladder.y, isDummy: true }; // centroid
-                u.y -= ladder.speed;
-            });
+            // SURGERY: halt instead of pushing through a large unit
+            // (general/horse/elephant/camel) standing exactly where this
+            // ladder is about to advance into — resumes the instant that
+            // unit clears out of the way. Pushers hold with it rather than
+            // getting dragged into the same spot this tick.
+            let nextLadderY = ladder.y - ladder.speed;
+            if (typeof isLargeUnitBlockingEngineMove === 'function' && isLargeUnitBlockingEngineMove(ladder, ladder.x, nextLadderY)) {
+                ladder.state = "waiting_for_clearance";
+            } else {
+                ladder.y = nextLadderY;
+                ladder.lastY = ladder.y;
+               BattleAudio.playSiegeMovement(ladder.x, ladder.y, true); 
+                // Pull touching pushers along with the ladder.
+                // While pushing (pre-deploy), unit targets the ladder centroid so they
+                // converge toward it rather than drifting off to the side.
+                // After deployment the normal AI resumes (this block no longer runs).
+                activePushers.forEach(u => {
+                    u.target = { x: ladder.x, y: ladder.y, isDummy: true }; // centroid
+                    u.y -= ladder.speed;
+                });
+            }
         }
 
         if (ladder.y <= targetPixelY && !ladder.isDeployed) {
@@ -597,10 +881,20 @@ if (u.onWall) {
                     let isPatrolling = (u.state === "moving" && u.target && u.target.isDummy);
                     
                     if (u.state === "idle" || !u.hasOrders || !isPatrolling) {
-                        // Spread out across 80% of the map width, and varying depths behind the wall
-                        let spreadWidth = BATTLE_WORLD_WIDTH * 0.8;
-                        let targetX = (BATTLE_WORLD_WIDTH / 2) + ((Math.random() - 0.5) * spreadWidth);
-                        let targetY = SiegeTopography.wallPixelY - 150 - (Math.random() * 400); // Deep patrol depth
+                        // Patrol tightly around the gate instead of 80% of the
+                        // full map width — that width was why defenders kept
+                        // drifting far north on every idle tick regardless of
+                        // where deploySiegeDefenders spawned them; this ties
+                        // patrol to the same gate anchor the spawn point uses.
+                        // SURGERY: was wallPixelY - 150 - random(100), a
+                        // separate north-biased formula that fought the
+                        // spawn point every time a unit went idle. Now reads
+                        // the same shared SiegeTopography.defenderRallyPixelY
+                        // as the spawn/rally logic, with a small jitter band
+                        // instead of a one-directional (always more-north) offset.
+                        let spreadWidth = 300; // was BATTLE_WORLD_WIDTH * 0.8
+                        let targetX = SiegeTopography.gatePixelX + ((Math.random() - 0.5) * spreadWidth);
+                        let targetY = SiegeTopography.defenderRallyPixelY + ((Math.random() - 0.5) * 100);
 
                         u.target = { x: targetX, y: targetY, isDummy: true };
                         u.state = "moving";
@@ -620,8 +914,14 @@ if (u.onWall) {
 		}}
 		else {
             // GATE IS BROKEN: FALLBACK TO PLAZA OR ATTACK
-            let plazaX = SiegeTopography.gatePixelX; 
-            let plazaY = SiegeTopography.plazaPixelY;
+            // Anchored to SiegeTopography.defenderRallyPixelY (the shared
+            // anchor) rather than plazaPixelY (wallPixelY - 600, the old
+            // far-north point that caused the same drift bug as the patrol
+            // logic above) or a locally-hardcoded gatePixelY - 200 — this
+            // keeps the post-breach rally point consistent with wherever
+            // deploySiegeDefenders actually spawns defenders now.
+            let plazaX = SiegeTopography.gatePixelX;
+            let plazaY = SiegeTopography.defenderRallyPixelY;
             let distToPlaza = Math.hypot(plazaX - u.x, plazaY - u.y);
 
             // ---> LARGE UNITS EARLY PLAZA RETURN <---
@@ -703,278 +1003,80 @@ if (u.y > lavaBoundaryY) {
         }
 
     });
-}
-// ============================================================================
-// 3. ATTACKER AI (PLAYER)
-// ============================================================================
-// FIX: this block used to run unconditionally every 4 ticks regardless of the
-// robot/auto-AI toggle in autoAttack.js. Turning the robot off (or issuing a
-// manual order, which also reverts it) stopped autoAttack.js's OWN interval,
-// but this file is a second, independent AI driver — it has no idea the robot
-// was turned off, so it would keep re-grabbing any unit whose orderType was
-// still (or got reset back to) "siege_assault"/"seek_engage"/"ladder_crew",
-// silently overriding manual orders in siege battles specifically.
-// W.MC3TacticalAI.isAutoRunning() is the same live flag the robot button
-// itself reads/writes, so this now genuinely respects "robot is off."
-let __mc3RobotOff = (typeof window !== 'undefined' && window.MC3TacticalAI &&
-    typeof window.MC3TacticalAI.isAutoRunning === 'function' &&
-    !window.MC3TacticalAI.isAutoRunning());
 
-if (siegeAITick % 4 === 0 && !__mc3RobotOff) {
-    playerUnits.forEach((u, index) => {
-        if (u.isCommander || u.disableAICombat || u.selected) return; 
-        if (u.hasOrders && !["siege_assault", "seek_engage", "ladder_crew"].includes(u.orderType)) return; 
-        if (u.state === "attacking" && u.target && !u.target.isDummy && u.target.hp > 0) return; // Prevent target hesitation
-		
-		
-// Ladder crew units may still receive updated destinations — do NOT block them entirely
-        // Only skip them if they are already close enough to their ladder (within 40px)
-        if (u.orderType === "ladder_crew" && !isGateBreached && !isWallBreached) {
-            let myLadder = siegeEquipment.ladders.find(l => !l.isDeployed && l.hp > 0);
-            if (myLadder) {
-                let d = Math.hypot(u.x - myLadder.x, u.y - myLadder.y);
-                if (d < 40) return; // Already touching — let the push logic handle it
-                // Not close yet — fall through so they get directed below
-            } else {
-                return; // No undeployed ladders left, skip
-            }
-        }
-		
-        const roleStr = String((u.stats?.role || "") + " " + (u.unitType || "") + " " + (u.stats?.name || "")).toLowerCase();
-        const isCavalry = u.stats?.isLarge || roleStr.match(/(cav|horse|mount|camel|eleph)/);
-        const isRanged = roleStr.includes("ranged") || roleStr.includes("archer");
-        const isEquipmentCrew = (u.id % 5 === 0);
+    // ========================================================================
+    // ---> LAST SIEGE DEFENDER RESORT <---
+    // Runs after every branch above has had its turn, path-agnostic — same
+    // idea as the [STUCK-WATCH] debug detector further up: don't assume
+    // WHICH code path put a defender far from the gate (spawn math, the
+    // patrol branch, the post-breach fallback, or something not yet found),
+    // just catch the end state and correct it. Backstop only — 600px is 2x
+    // the 300px patrol spreadWidth above, so this stays quiet during normal
+    // patrol movement and only fires once something has actually gone wrong.
+    // ========================================================================
+    if (typeof SiegeTopography !== 'undefined') {
+        const RESORT_TRIGGER_DIST = 600;
+        const RESORT_BAND_X = 300; // matches patrol spreadWidth above
+        const RESORT_BAND_Y = 100; // matches patrol depth range above
 
-        let isOperatingEquipment = siegeEquipment.ladders.some(l => l.carriedBy === u) || 
-                                   siegeEquipment.rams.some(r => r.carriedBy && r.carriedBy.includes(u));
-
-        if ((isGateBreached || isWallBreached) && !isOperatingEquipment) {
-            let closestEnemy = null;
-            let minDist = Infinity;
-            
-            // Hysteresis calculation for attackers
-            let currentTargetDist = (u.target && !u.target.isDummy && u.target.hp > 0) 
-                ? Math.hypot(u.x - u.target.x, u.y - u.target.y) 
-                : Infinity;
-            
-            for (let i = 0; i < allAliveEnemies.length; i++) {
-                let enemy = allAliveEnemies[i];
-                let dist = Math.hypot(u.x - enemy.x, u.y - enemy.y);
-                if (dist < minDist) { minDist = dist; closestEnemy = enemy; }
-            }
-            
-            let switchTarget = minDist < (currentTargetDist - 30); // Need strong reason to switch
-
-            if (isRanged) {
-                // Ensure they never get stuck in forced melee mode
-                u.forceMelee = false;
-                let attackRange = u.stats.range || 150; // Fallback range if undefined
-
-                if (isGateBreached || siegeAITick >= 1200) {
-                    let bestEntry = null;
-                    let minEntryDist = Infinity;
-
-                    if (isGateBreached) {
-                        minEntryDist = Math.hypot(u.x - SiegeTopography.gatePixelX, u.y - SiegeTopography.gatePixelY);
-                        bestEntry = { x: SiegeTopography.gatePixelX, y: SiegeTopography.gatePixelY + 20 };
-                    }
-                    
-                    if (canUseSiegeEngines(u)) {
-                        activeLadders.forEach(l => {
-                            let d = Math.hypot(u.x - l.x, u.y - l.y);
-                            if (d < minEntryDist) { minEntryDist = d; bestEntry = { x: l.x, y: l.y + 10 }; }
-                        });
-                    }
-
-                    // 1. If an enemy is in range, prioritize targeting them directly (stay at a distance)
-                    if (closestEnemy && minDist <= attackRange) {
-                        if (switchTarget || !u.target || u.target.isDummy) {
-                            u.target = closestEnemy;
-                            u.state = "moving";
-                            u.hasOrders = true;
-                        }
-                    }
-                    // 2. If out of range, move to the breach to get inside/get line of sight (Remaining Ranged)
-                    else if (bestEntry && minEntryDist > 80) {
-                        u.target = { x: bestEntry.x, y: bestEntry.y, isDummy: true };
-                        u.state = "moving";
-                        u.hasOrders = true;
-                    } 
-                    // 3. Otherwise, track the closest enemy
-                    else if (closestEnemy && minDist > 35 && (switchTarget || u.target.isDummy)) {
-                        u.target = closestEnemy;
-                        u.state = "moving";
-                        u.hasOrders = true;
-                    }
-                } else {
-                    if (closestEnemy && (switchTarget || !u.target || u.target.isDummy)) { 
-                        u.target = closestEnemy; 
-                        u.state = "moving"; 
-                        u.hasOrders = true; 
-                    }
-                }
-            } else {
-                // Melee post-breach logic
-                if (closestEnemy && minDist > 35 && (switchTarget || !u.target || u.target.isDummy)) {
-                    u.target = closestEnemy;
-                    u.state = "moving";
-                    u.hasOrders = true;
-                }
-            }
-        } 
-        else if (!isOperatingEquipment) {
-            // PRE-BREACH LOGIC
-            let gateX = SiegeTopography.gatePixelX;
-            let wallY = SiegeTopography.wallPixelY;
-
-// ALL ladder_crew units: direct to the nearest undeployed ladder before any other logic runs
-            if (u.orderType === "ladder_crew" && !isRanged) {
-                let undeployedLadders = siegeEquipment.ladders.filter(l => !l.isDeployed && l.hp > 0);
-                if (undeployedLadders.length > 0) {
-                    let closestLadder = undeployedLadders.reduce((prev, curr) =>
-                        Math.hypot(curr.x - u.x, curr.y - u.y) < Math.hypot(prev.x - u.x, prev.y - u.y) ? curr : prev
-                    );
-                    u.target = { x: closestLadder.x, y: closestLadder.y, isDummy: true };
-                    u.state = "moving";
-                    u.hasOrders = true;
-                }
-                return;
-            }
-            
-            if (isCavalry) {
-                // Completely freeze them until the breach. 
-                // ai_categories.js will guide them to the back line, this kills the vibrating slide.
-                u.vx = 0;
-                u.vy = 0;
-                u.state = "idle";
-                u.hasOrders = true;
-                return; // Abort further targeting logic so they stay perfectly still
-            } else if (isEquipmentCrew && !isRanged) {
-                let undeployedLadders = siegeEquipment.ladders.filter(l => !l.isDeployed && l.hp > 0);
-                if (undeployedLadders.length > 0) {
-                    let closestLadder = undeployedLadders.reduce((prev, curr) =>
-                        Math.hypot(curr.x - u.x, curr.y - u.y) < Math.hypot(prev.x - u.x, prev.y - u.y) ? curr : prev
-                    );
-                    u.target = { x: closestLadder.x, y: closestLadder.y + 15, isDummy: true };
-                    u.state = "moving";
-                    u.hasOrders = true;
-                    u.orderType = "ladder_crew";
-                }
-            } else if (isRanged) {
-                // Pre-breach ranged behavior (unchanged, works as intended)
-                u.forceMelee = false; // Added safeguard
-
-                if (!u.target || u.target.hp <= 0 || u.target.isDummy) {
-                    let targetEnemy = null;
-                    let minWDist = Infinity;
-                    wallEnemies.forEach(e => {
-                        let d = Math.hypot(u.x - e.x, u.y - e.y);
-                        if (d < minWDist) { minWDist = d; targetEnemy = e; }
+        allAliveEnemies.forEach(u => {
+            if (u.isCommander) return;
+            let distFromGate = Math.hypot(u.x - SiegeTopography.gatePixelX, u.y - SiegeTopography.gatePixelY);
+            if (distFromGate > RESORT_TRIGGER_DIST) {
+                if (window.__SIEGE_DEBUG_GATE__) {
+                    console.log("[LAST-RESORT] pulling defender back to gate", {
+                        id: u.id,
+                        distFromGate: Math.round(distFromGate),
+                        from: { x: Math.round(u.x), y: Math.round(u.y) }
                     });
-
-                    if (targetEnemy) {
-                        u.target = targetEnemy;
-                        u.state = "moving";
-                        u.hasOrders = true;
-                   } else if (u.state === "idle" || !u.hasOrders) {
-                        // ---> SURGERY 4A: Send short-ranged Firelances/Bombs to the front line!
-                        let isShortRange = roleStr.includes("firelance") || roleStr.includes("bomb") || roleStr.includes("hand cannoneer");
-                        if (isShortRange) {
-                            u.target = { x: gateX + ((Math.random() - 0.5) * 200), y: wallY + 80 + (Math.random() * 40), isDummy: true };
-                        } else {
-                            // Standard archers stay back
-                            u.target = { x: gateX + ((index % 20) - 10) * 45, y: wallY + 280 + (Math.floor(index / 20) * 35), isDummy: true };
-                        }
-                        u.state = "moving";
-                        u.hasOrders = true;
-                    }
                 }
-} else {
-                // Melee pre-breach logic
-                
-                // === WALL GUARD: Units already on the scaffold fight enemies there. ===
-                // They must NEVER be given a target south of the wall or they walk off the edge.
-                if (u.onWall) {
-                    // Find the closest enemy to fight on or near the wall
-                    let closestWallEnemy = null;
-                    let minWallDist = Infinity;
-                    for (let i = 0; i < allAliveEnemies.length; i++) {
-                        let d = Math.hypot(u.x - allAliveEnemies[i].x, u.y - allAliveEnemies[i].y);
-                        if (d < minWallDist) { minWallDist = d; closestWallEnemy = allAliveEnemies[i]; }
-                    }
-                    if (closestWallEnemy && minWallDist < 300) {
-                        // Attack the nearest enemy from the wall
-                        u.target = closestWallEnemy;
-                        u.state = "moving";
-                        u.hasOrders = true;
-                    } else {
-                        // No nearby enemy — patrol along the wall top (stay at wallY - 40 or higher, NEVER go south)
-                        if (u.state === "idle" || !u.hasOrders || (u.target && u.target.isDummy && u.target.y > wallY - 20)) {
-                            u.target = { 
-                                x: gateX + ((Math.random() - 0.5) * 400), 
-                                y: wallY - 40 - (Math.random() * 30),
-                                isDummy: true 
-                            };
-                            u.state = "moving";
-                            u.hasOrders = true;
-                        }
-                    }
-                    return; // STOP. Do not fall through to any ground-level targeting below.
-                }
-                
-// Melee reserve pre-breach logic
-let availableLadders = typeof activeLadders !== "undefined" ? activeLadders : siegeEquipment.ladders.filter(l => l.isDeployed && l.hp > 0);
-// Only count ladders that still have an open crew slot (cap of 2, matching
-// the ladder-crew assignment elsewhere) — otherwise these units pile up
-// next to an already-full ladder with nothing to do.
-let laddersWithRoom = availableLadders.filter(l => !l.crewAssigned || l.crewAssigned.length < 2);
-
-if (laddersWithRoom.length > 0 && canUseSiegeEngines(u)) {
-    let bestLadder = laddersWithRoom.reduce((prev, curr) => 
-        Math.hypot(curr.x - u.x, curr.y - u.y) < Math.hypot(prev.x - u.x, prev.y - u.y) ? curr : prev
-    );
-    const destX = bestLadder.x, destY = bestLadder.y - 15;
-    // FIX (stutter bug): only (re)issue the move order when the destination
-    // actually changes. Creating a brand-new dummy target object every tick
-    // — even pointing at the exact same coordinates — made downstream
-    // movement code treat it as a fresh order every frame, which is what
-    // caused these reserve units to visibly stutter: advance a few px,
-    // "receive" a new order and reset, advance a few px, reset, forever.
-    const alreadyHeadingHere = u.target && u.target.isDummy &&
-        Math.abs(u.target.x - destX) < 1 && Math.abs(u.target.y - destY) < 1;
-    if (!alreadyHeadingHere) {
-        u.target = { x: destX, y: destY, isDummy: true };
-    }
-    u.state = "moving";
-    u.hasOrders = true;
-    // Fill the ladder-pushing role instead of idling as generic reserve —
-    // a reserve unit walking up to a ladder with room should be crewing it.
-    u.siegeRole = "ladder_carrier";
-    u.siegeTarget = bestLadder;
-    if (!bestLadder.crewAssigned) bestLadder.crewAssigned = [];
-    if (!bestLadder.crewAssigned.includes(u)) bestLadder.crewAssigned.push(u);
-} else if (u.state === "idle" || !u.hasOrders || (u.target && u.target.isDummy && u.target.y > wallY + 500)) {
-    // No ladder has room right now — same stutter fix applies: don't
-    // recreate the target object if already roughly in the reserve line
-    // (the destination is randomized on purpose, so we check the general
-    // band instead of exact coordinates).
-    const alreadyInLine = u.target && u.target.isDummy && u.target.y > wallY + 400 && u.target.y < wallY + 600;
-    if (!alreadyInLine) {
-        // REVISED: Form a tight reserve line just behind the archers (wallY + 450)
-        // Spread them across a 800px wide line to look like an organized army
-        u.target = { 
-            x: gateX + ((Math.random() - 0.5) * 800), 
-            y: wallY + 450 + (Math.random() * 80), // Stay out of tower range
-            isDummy: true 
-        };
-    }
-    u.state = "moving";
-    u.hasOrders = true;
-}
+                u.target = {
+                    x: SiegeTopography.gatePixelX + (Math.random() - 0.5) * RESORT_BAND_X,
+                    y: (SiegeTopography.wallPixelY - 150) + (Math.random() - 0.5) * RESORT_BAND_Y,
+                    isDummy: true
+                };
+                u.state = "moving";
+                u.hasOrders = true;
             }
-        }
-    });
+        });
+    }
 }
+// ============================================================================
+// 3. ATTACKER AI (PLAYER) — REMOVED
+// ============================================================================
+// BUGFIX ("ladder climbers approach, get yanked far south, then come back
+// to try again"): this entire block used to be a SECOND, fully independent
+// siege-attacker AI, running on its own "every 4 ticks" cadence completely
+// separate from processTacticalOrders (battlefield_commands.js) and
+// executeSiegeAssaultAI's role assignment (also battlefield_commands.js,
+// invoked from autoAttack.js). Two independent systems were both writing
+// to the same unit.target/unit.state/unit.hasOrders every few ticks, each
+// with its OWN idea of who counts as reserve/cavalry/equipment-crew:
+//   - This block classified "equipment crew" as `u.id % 5 === 0` — units
+//     were sorted into rams/ladders/ranged support based on the low digit
+//     of a random ID, with zero relation to what siegeRole the OTHER
+//     system (executeSiegeAssaultAI) had actually assigned them.
+//   - This block also maintained its OWN separate "reserve line" standing
+//     spot (wallY + 450, well south of the wall) independent of the
+//     cavalry_reserve/camp mechanism that used to live in
+//     battlefield_commands.js.
+// The result: a unit mid-walk to a ladder under one system's orders could
+// have its target silently overwritten by this block on its own
+// independent tick, get rerouted to this block's reserve line or back
+// toward a ram/ladder base, then get reclaimed by the other system later —
+// which is exactly the "approach, get pulled far away, come back and try
+// again" loop being reported. It was also the last real source of the
+// "reserve" concept in the codebase (see executeSiegeAssaultAI in
+// battlefield_commands.js, which has been rewritten to remove reserves
+// entirely — every non-ranged, non-ram unit is now a ladder crew member,
+// either actively climbing or queued waiting at a ladder for a free slot).
+// processTacticalOrders (battlefield_commands.js) already owns targeting/
+// movement for every siege_assault/seek_engage/ladder_crew unit — this
+// file's OWN interval-driven re-targeting of the same units was pure
+// redundant duplication of that responsibility, not a distinct feature.
+// The ram-crew management earlier in this function (crew presence,
+// Y-clamp, auto-refill, gate-breach release) is untouched — that logic is
+// specific to ram physics and has no equivalent elsewhere.
 }
 
 function applyDamageToGate(gateId, damageAmount) {

@@ -267,10 +267,35 @@ const SiegeTopography = {
     gatePixelX: 0,
     gatePixelY: 0,
     plazaPixelY: 0,
-    campPixelY: 0
+    campPixelY: 0,
+    defenderRallyPixelY: 0 // SURGERY: single source of truth for where defenders spawn/patrol/rally. See DEFENDER_SOUTH_SHIFT below.
 };
 
+// SURGERY: how far south (larger Y) of the old gatePixelY-200 anchor the
+// defender garrison should sit. Change this ONE number to retune it —
+// every spawn/patrol/rally/clamp site now reads SiegeTopography.defenderRallyPixelY
+// instead of hardcoding "gatePixelY - 200" separately, which is what let
+// the old anchor keep winning: some sites got fixed, others (the pre-deploy
+// clamp box especially) didn't, so units kept getting pulled back north.
+const DEFENDER_SOUTH_SHIFT = 400;
+// SURGERY: pull defenders further north, off the gate line, with a ±10%
+// randomized tolerance so they don't land on an identical Y every siege.
+const DEFENDER_NORTH_PULLBACK = 300 * (0.9 + Math.random() * 0.2); // 270-330px
+
+let _establishTopoCallCount = 0;
+
 function establishSiegeTopography() {
+    _establishTopoCallCount++;
+    // DIAGNOSTIC: full overheadCityGates dump, tagged with a call counter.
+    // User reports this only breaks on siege #2+ within a session, specifically
+    // after a LAND battle ran first — never on a fresh page load straight into
+    // a siege. Logging every gate's raw {x,y,side} on every call lets us diff
+    // call #1 (works) against call #2 (broken) directly, instead of guessing
+    // whether overheadCityGates itself is what changed between them.
+    console.log("[SiegeTopography] === establishSiegeTopography call #" + _establishTopoCallCount + " ===",
+        "overheadCityGates(" + (typeof overheadCityGates !== 'undefined' && overheadCityGates ? overheadCityGates.length : 'undefined') + " gates)=",
+        (typeof overheadCityGates !== 'undefined' ? overheadCityGates.map(g => ({x: g.x, y: g.y, side: g.side})) : undefined));
+
     // 1. Fallback base based on city_system logic
     let foundWallY = Math.floor(CITY_LOGICAL_ROWS * 0.35); 
     
@@ -282,6 +307,9 @@ function establishSiegeTopography() {
         SiegeTopography.gateTileX = southGate.x;
         SiegeTopography.gateTileY = southGate.y;
     } else {
+        console.warn("[SiegeTopography] southGate NOT FOUND — falling back to foundWallY=" + foundWallY +
+            " (CITY_LOGICAL_ROWS=" + CITY_LOGICAL_ROWS + "). overheadCityGates=", 
+            (typeof overheadCityGates !== 'undefined' ? overheadCityGates : undefined));
         SiegeTopography.gateTileX = Math.floor(BATTLE_COLS / 2);
         SiegeTopography.gateTileY = foundWallY;
     }
@@ -292,13 +320,38 @@ function establishSiegeTopography() {
     SiegeTopography.gatePixelX = SiegeTopography.gateTileX * BATTLE_TILE_SIZE;
     SiegeTopography.gatePixelY = SiegeTopography.gateTileY * BATTLE_TILE_SIZE;
     
-    // Plaza is deep inside the city (North)
+    // Plaza is deep inside the city (North) — kept for back-compat, nothing
+    // functional reads this anymore (see defenderRallyPixelY below).
     SiegeTopography.plazaPixelY = SiegeTopography.wallPixelY - 600; 
     
     // Camp is outside the walls (South), giving enough room for trebuchets
     SiegeTopography.campPixelY = SiegeTopography.wallPixelY + 800; 
+
+    // SURGERY: the actual defender anchor. Was gatePixelY - 200 everywhere;
+    // now gatePixelY - 200 + DEFENDER_SOUTH_SHIFT, computed once here so
+    // deploySiegeDefenders, the patrol AI, the gate-breach rally, the
+    // enemy commander spawn, and the pre-deploy clamp box all agree.
+    SiegeTopography.defenderRallyPixelY = (SiegeTopography.gatePixelY - 200) + DEFENDER_SOUTH_SHIFT - DEFENDER_NORTH_PULLBACK; 
     
-    console.log("Siege Topography Established: Wall at Y=" + SiegeTopography.wallPixelY + ", Camp at Y=" + SiegeTopography.campPixelY);
+    // DIAGNOSTIC: real runtime values, including the raw south gate object
+    // straight from overheadCityGates — CITY_LOGICAL_ROWS is confirmed
+    // defined (city_system.js:12) and southGate lookup is confirmed to
+    // match real data (fortification_system.js:81-92), so this is no
+    // longer a "is X undefined" check — it's "what are the ACTUAL numbers
+    // this specific run produced." BATTLE_ROWS/BATTLE_COLS logged too since
+    // a mismatch between CITY_LOGICAL_ROWS (city gen) and BATTLE_ROWS
+    // (battle world size) would show up here as gatePixelY landing outside
+    // the actual battle world bounds.
+    console.log("[SiegeTopography] southGate=", southGate,
+        "| foundWallY(tile)=" + foundWallY,
+        "| wallPixelY=" + SiegeTopography.wallPixelY,
+        "| gatePixelX=" + SiegeTopography.gatePixelX,
+        "| gatePixelY=" + SiegeTopography.gatePixelY,
+        "| defenderRallyPixelY=" + SiegeTopography.defenderRallyPixelY,
+        "| campPixelY=" + SiegeTopography.campPixelY,
+        "| BATTLE_WORLD_HEIGHT=" + (typeof BATTLE_WORLD_HEIGHT !== 'undefined' ? BATTLE_WORLD_HEIGHT : 'undefined'),
+        "| BATTLE_ROWS=" + (typeof BATTLE_ROWS !== 'undefined' ? BATTLE_ROWS : 'undefined'),
+        "| CITY_LOGICAL_ROWS=" + CITY_LOGICAL_ROWS);
 }
 
 function enterSiegeBattlefield(enemyNPC, playerObj, cityObj) {
@@ -322,6 +375,11 @@ function enterSiegeBattlefield(enemyNPC, playerObj, cityObj) {
     // touched. Confirmed root cause of "rush to plaza even though the
     // southern gate is closed."
     window.__SIEGE_GATE_BREACHED__ = false;
+    // SURGERY: same staleness bug as __SIEGE_GATE_BREACHED__ above, but for
+    // the pillar hitboxes triggerGateBreach() records — without this a
+    // fresh siege would inherit the PREVIOUS siege's pillar rectangles
+    // (wrong map, wrong gate position) until/unless its own gate breaks.
+    window.__siegeGatePillars__ = [];
     
     // ADD THIS:
     window.inNavalBattle = false; 
@@ -510,7 +568,17 @@ if (typeof overheadCityGates !== 'undefined') {
 	isBattlefieldReady = true;
 }
 
-function deploySiegeAttackers(faction,totalTroops,side){deployArmy(faction,totalTroops,side);let cavCount=0;battleEnvironment.units.forEach(u=>{if(u.side==="player"&&!u.isCommander){let checkStr=String((u.stats?.role||"")+" "+(u.unitType||"")).toLowerCase();if(u.stats?.isLarge||checkStr.match(/(cav|cavalry|keshig|horse|lancer|mount|camel|eleph|knight)/)){u.siegeRole="cavalry_reserve";u.hasOrders=false;cavCount++}}});if(cavCount>0){console.log(`[SIEGE SYSTEM] Detected ${cavCount} Cavalry units. Moved to Rear-Guard Reserve.`)}let expectedSpawnY=BATTLE_WORLD_HEIGHT-300;let shiftY=expectedSpawnY-SiegeTopography.campPixelY+300;battleEnvironment.units.forEach(u=>{if(u.side==="player"){u.y-=shiftY;if(u.target&&u.target.isDummy){u.target.y-=shiftY}}})} //old method here
+function deploySiegeAttackers(faction,totalTroops,side){deployArmy(faction,totalTroops,side);
+// RESERVES REMOVED (explicit request): this used to tag every cavalry-like
+// unit as "cavalry_reserve" with hasOrders=false at the moment of deployment,
+// before executeSiegeAssaultAI ever got a chance to run — meaning cavalry
+// started the battle already frozen in the old rear-guard-reserve mechanism
+// (see ai_categories.js's PRE-BREACH CAVALRY HARD FREEZE, which keyed off
+// this exact role string). Cavalry now deploys the same as every other unit
+// and gets a normal assignment (ranged shooter, ram pusher, or ladder queue)
+// from executeSiegeAssaultAI once the player presses the siege auto-attack
+// button, same as everyone else — no separate reserve treatment.
+let expectedSpawnY=BATTLE_WORLD_HEIGHT-300;let shiftY=expectedSpawnY-SiegeTopography.campPixelY+300;battleEnvironment.units.forEach(u=>{if(u.side==="player"){u.y-=shiftY;if(u.target&&u.target.isDummy){u.target.y-=shiftY}}})} //old method here
  
  
  
@@ -594,22 +662,30 @@ for (let i = 0; i < unitsToSpawn; i++) {
         let currentRole = "normal"; 
     
 
-        // 2. Set the target anchor deep in the plaza (900px North of the wall)
-        let spawnXCenter = SiegeTopography.gatePixelX || (BATTLE_COLS * BATTLE_TILE_SIZE / 2);
-        let plazaY = SiegeTopography.wallPixelY - 150; 
+// 2. Anchor 200px north of the southern gate, on the gate's own X
+        //    (gatePixelY comes from southGate — see establishSiegeTopography;
+        //    smaller Y = further north, matching the wallY-40..wallY-4 scan
+        //    above and plazaPixelY = wallPixelY - 600)
+        const GATE_SPAWN_OFFSET = 200; // kept for the radius math below, no longer used for plazaY itself
+        let spawnXCenter = SiegeTopography.gatePixelX;
+        let plazaY = SiegeTopography.defenderRallyPixelY;
 
-        // 3. Tight Circular Math (from your previous edits)
-        const personalSpace = 26; 
+        // 3. Circular Math, radius scaled to the ±10% tolerance and then
+        //    tripled — the previous 20px ceiling packed units glued
+        //    together right on top of the gate; this gives them real
+        //    room to spread out around the (now further-north) anchor.
+        const personalSpace = 26;
+        const maxSpreadRadius = GATE_SPAWN_OFFSET * 0.1 * 3; // 60px — tripled spread ceiling
         let angle = (i * 0.5) + (Math.random() * Math.PI * 2);
-        let dist = (Math.sqrt(i) * personalSpace) + (Math.random() * 800);
+        let dist = Math.min(Math.sqrt(i) * personalSpace, maxSpreadRadius) + (Math.random() * maxSpreadRadius);
 
         // 4. Horizontal Compression (* 0.5) to keep them strictly in the center street
-        let finalX = spawnXCenter + (Math.cos(angle) * dist * 0.5); 
-        let finalY = plazaY + (Math.random() - 0.5) * 35; 
+        let finalX = spawnXCenter + (Math.cos(angle) * dist * 0.5);
+        let finalY = plazaY + (Math.random() - 0.5) * (GATE_SPAWN_OFFSET * 0.1 * 3);
 
-        // 5. Minimal random jitter for a cleaner formation
-        finalX += (Math.random() - 0.5) * 350; 
-        finalY += (Math.random() - 0.5) * 10;
+        // 5. Minimal random jitter for a cleaner formation, same tripled bound
+        finalX += (Math.random() - 0.5) * (GATE_SPAWN_OFFSET * 0.1 * 3);
+        finalY += (Math.random() - 0.5) * (GATE_SPAWN_OFFSET * 0.1 * 3);
 		
 		
         battleEnvironment.units.push({
@@ -633,6 +709,7 @@ for (let i = 0; i < unitsToSpawn; i++) {
             onWall: isElevated 
         });
     }
+
 }
 
 // ============================================================================
@@ -713,7 +790,26 @@ function _getInteriorAvoidanceVector(unit, dx, dy, dist) {
 }
 
 function getSiegePathfindingVector(unit, target, originalDx, originalDy, originalDist) {
-    if (!inSiegeBattle || unit.side !== "player" || unit.onWall || unit.isClimbing || (unit.siegeRole && unit.siegeRole.includes('ladder'))) {
+    // FIX (crash report: "Uncaught TypeError: Cannot read properties of
+    // null (reading 'y')" at this file's former line 799, hit while
+    // dragging a blue-arrow formation move during a siege): this function
+    // is called from ai_categories.js's _handleMovement for EVERY moving
+    // player unit each frame — including one under a plain move_to_point/
+    // formation order, which has no combat target and correctly passes
+    // unit.target as null (it's not attacking anything, it's marching
+    // where the player pointed). The guard below never checked for that;
+    // it only checked side/onWall/isClimbing/ladder-role, so target.y a
+    // few lines down threw the instant a targetless player unit took this
+    // path during any siege — reliably reproducible any time formation-
+    // drag is used while a siege is active and the selection isn't
+    // currently locked onto an enemy, not something specific to the gate
+    // being open (that only changes what the gate-routing logic below
+    // does; it was never what caused the crash itself).
+    // No target -> nothing to route around specifically; the original
+    // dx/dy/dist already points at wherever the real order (formation
+    // waypoint, etc.) wants this unit to go, so that's the correct
+    // fallback, same as the other early-outs on this line already do.
+    if (!inSiegeBattle || unit.side !== "player" || unit.onWall || unit.isClimbing || (unit.siegeRole && unit.siegeRole.includes('ladder')) || !target) {
         return { dx: originalDx, dy: originalDy, dist: originalDist };
     }
 
@@ -729,7 +825,50 @@ function getSiegePathfindingVector(unit, target, originalDx, originalDy, origina
         let bestEntryPoint = null;
 
         if (isGateBreached) {
-            bestEntryPoint = { x: SiegeTopography.gatePixelX, y: SiegeTopography.gatePixelY + 20 };
+            // FIX ("attackers cluster in a dot and can't get past the gate"):
+            // this used to be one fixed point — SiegeTopography.gatePixelX,
+            // gatePixelY + 20 — identical for every player unit. With dozens
+            // of units all being steered at the same exact pixel every tick,
+            // they physically stack on top of each other right at the wall's
+            // outer face and can never disperse (every other multi-unit
+            // convergence case in this codebase — ladders in siege_system.js,
+            // defenders in siegeEngineLogic.js, archer aim in ai_categories.js
+            // — fans units out; this was the one spot that didn't).
+            //
+            // Also, "+ 20" placed the target SOUTH of the wall (outside it),
+            // which is short of wallBoundaryY (wallPixelY - 10) below — so
+            // even a unit that reached the old point never satisfied the
+            // unit.y < wallBoundaryY handoff into _getInteriorAvoidanceVector,
+            // and got re-aimed at the identical point again next tick,
+            // forever. battlefield_commands.js's processTacticalOrders had to
+            // grow its own 4-second "STUCK-AT-THE-DOOR FAILSAFE" band-aid to
+            // cope with exactly this.
+            //
+            // Fix: give each unit its own lane, anchored to where it's
+            // already standing. Land the target solidly past wallBoundaryY
+            // so arriving here actually releases the unit into interior
+            // movement instead of holding it at the threshold.
+            //
+            // CORRECTION: this originally clamped the lane to 80px — the
+            // gateHalfWidth siegeEngineLogic.js uses to decide when to stop
+            // INTERFERING with a unit. That number is deliberately wider
+            // than the real doorway (a generous "leave it alone" tolerance
+            // is harmless there). It is NOT safe to reuse as an actual
+            // destination: the physical opening (fortification_system.js:
+            // gateRadius=6 tiles * 8px, minus the outer tile on each side,
+            // which is the still-solid door pillar) is only ~40px each way
+            // from center. A lane of 65px pointed some units directly at
+            // solid wall stone next to the pillars — plain terrain collision
+            // (isBattleCollision, battlefield_logic.js) blocks that for
+            // EVERYONE regardless of side/siegeRole/breach state, which is
+            // exactly the "invisible wall right past the gate, one-way,
+            // general exempt" symptom: units aimed outside the true opening
+            // simply could never physically get there. Keeping the lane
+            // inside the real doorway (with a small margin off the pillars)
+            // fixes that while still spreading units instead of stacking them.
+            const gateOpeningHalfWidth = 32;
+            const lane = Math.max(-gateOpeningHalfWidth, Math.min(gateOpeningHalfWidth, unit.x - SiegeTopography.gatePixelX));
+            bestEntryPoint = { x: SiegeTopography.gatePixelX + lane, y: SiegeTopography.wallPixelY - 40 };
         } else if (activeLadders.length > 0 && canUseSiegeEngines(unit)) {
             let closestLadder = activeLadders.reduce((prev, curr) => {
                 return Math.hypot(curr.x - unit.x, curr.y - unit.y) < Math.hypot(prev.x - unit.x, prev.y - unit.y) ? curr : prev;
@@ -747,6 +886,27 @@ function getSiegePathfindingVector(unit, target, originalDx, originalDy, origina
                 };
             }
         }
+    }
+
+    // NEW: GATE STAGING — a unit that just cleared the doorway (Stage 0
+    // above) used to be handed straight to real-target seeking on the very
+    // next tick. With rams, ladders, and the broken door pillars all
+    // clustered in that first ~40-80px, immediately trying to navigate
+    // toward a real (often distant, often obstructed) enemy target from
+    // right in that clutter is what produced the "extremely dumb, doesn't
+    // know where to go" wandering — the unit was pathing around siege
+    // equipment and enemies at the same time with no clear priority.
+    // Requested fix: walk straight to 100px past the gate first (using the
+    // same obstacle-dodge fan as real interior movement, so it still sidesteps
+    // anything in the way), THEN switch to seek & engage. _siegeStagingCleared
+    // latches permanently once reached, so a unit knocked back toward the
+    // gate mid-fight doesn't re-trigger this and abandon combat.
+    if (window.__SIEGE_GATE_BREACHED__ && unit.y <= wallBoundaryY && !unit._siegeStagingCleared) {
+        const stagingY = SiegeTopography.wallPixelY - 100;
+        if (unit.y > stagingY) {
+            return _getInteriorAvoidanceVector(unit, 0, stagingY - unit.y, Math.abs(stagingY - unit.y));
+        }
+        unit._siegeStagingCleared = true;
     }
 
     // Post-breach and already inside the walls: this is the "rush the

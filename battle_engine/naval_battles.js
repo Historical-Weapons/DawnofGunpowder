@@ -87,9 +87,10 @@ const IS_NATIVE = (
 // regardless of tier. This is the single read point all naval quality
 // gating below calls into.
 //
-// Desktop is always 100 here too (window.desktopBattleQuality is locked to
-// MAX in settings_ui.js), so _navGetQual() naturally returns "always full
-// quality" on desktop with no separate branch needed.
+// Desktop defaults to 100 (MAX) but is no longer locked there — settings_ui.js's
+// Graphics Quality preset can put desktopBattleQuality on any of LOW/MED/HIGH/MAX
+// now, same as mobile. _navGetQual() already reads it live with no caching, so
+// naval battles pick up a desktop tier change with no code change needed here.
 function _navGetQual() {
     var q = IS_NATIVE
         ? (typeof window.mobileBattleQuality === 'number' ? window.mobileBattleQuality : 50)
@@ -289,32 +290,71 @@ function generateNavalMap() {
         // At full map size (50000x32000 world / 8px tiles = 6250x4000 grid =
         // 25,000,000 tiles) calling _fbm (12 hash ops each) per tile was the
         // single biggest loading-time cost — 300M+ hash calls on every battle
-        // start. Visual detail below ~128px (16 tiles) is imperceptible at
-        // naval zoom levels, so we sample once per 16x16 block and fill the
-        // whole block with that value. This cuts iterations by 256x while
-        // keeping the exact same map dimensions and overall coastline shape.
+        // start. Kept that: still exactly one _fbm call per 16x16 block, so
+        // this fix carries none of that cost back.
+        //
+        // FIX (rendering pass): the old version FILLED the entire 16x16
+        // block with one uniform tile value once elevation crossed a
+        // threshold — a whole ~128x128px region became one flat "Rocks" or
+        // "Algae" tile. On screen that reads as a giant solid-colored
+        // square, not a reef. Real reef/rock formations are small and
+        // scattered, with open water between them, even within a generally
+        // shallow/rocky area.
+        //
+        // Fix: keep the same one-_fbm-per-block sampling (same performance),
+        // but only use that block elevation to decide whether the block is
+        // "feature-eligible" (i.e. shallow/rocky water broadly, matching the
+        // original thresholds). Inside an eligible block, individual tiles
+        // are only turned into a feature with roughly 1-in-5 odds (FEATURE_DENSITY),
+        // decided per-tile via one cheap _hash2D call (not a second _fbm —
+        // no extra noise-octave cost), so each block ends up with a handful
+        // of small rock/reef/kelp/trench tiles scattered through mostly-open
+        // water instead of one uniform slab. The which-feature choice (rock
+        // vs reef vs kelp vs trench) also comes from a hash, keyed so
+        // adjacent eligible blocks don't all pick the same feature type —
+        // avoids a different flavor of the same "uniform block" look.
         const BLOCK = 16;
+        const FEATURE_DENSITY = 0.20; // ~1 in 5 tiles inside an eligible block become a feature
         for (let bx = 0; bx < BATTLE_COLS; bx += BLOCK) {
             for (let by = 0; by < BATTLE_ROWS; by += BLOCK) {
-                // Sample noise once at the block's center tile
+                // Sample noise once at the block's center tile (unchanged cost)
                 const sampleX = bx + (BLOCK >> 1);
                 const sampleY = by + (BLOCK >> 1);
-                let n = _fbm(sampleX, sampleY, seed);
-                let elevation = n;
+                const elevation = _fbm(sampleX, sampleY, seed);
 
-                let tileVal;
-                if (elevation > 0.85) tileVal = 13;      // Rocks
-                else if (elevation > 0.7) tileVal = 12;  // Reefs
-                else if (elevation > 0.65) tileVal = 14; // Algae
-                else if (elevation < 0.05) tileVal = 15; // Dark water
-                else tileVal = 11;
+                // Same four elevation bands as before, but now they pick
+                // which feature this block is ELIGIBLE to scatter, not what
+                // the whole block gets filled with.
+                let featureVal = 0; // 0 = not eligible, block stays open water (11)
+                if (elevation > 0.85) featureVal = 13;      // Rocks
+                else if (elevation > 0.7) featureVal = 12;  // Reefs
+                else if (elevation > 0.65) featureVal = 14; // Algae/kelp
+                else if (elevation < 0.05) featureVal = 15; // Dark water pocket
 
                 const xEnd = Math.min(bx + BLOCK, BATTLE_COLS);
                 const yEnd = Math.min(by + BLOCK, BATTLE_ROWS);
+
+                if (featureVal === 0) continue; // whole block stays plain water — nothing to scatter
+
+                // "Dark water" (15) is a colour/depth mood, not a physical
+                // obstruction, so it's fine to still cover the block evenly
+                // (matches the original look for that one case; no flat-
+                // square complaint applies to a water-depth tint).
+                if (featureVal === 15) {
+                    for (let x = bx; x < xEnd; x++) {
+                        const col = grid[x];
+                        for (let y = by; y < yEnd; y++) col[y] = featureVal;
+                    }
+                    continue;
+                }
+
+                // Rocks/reef/kelp: scatter individual tiles within the block.
                 for (let x = bx; x < xEnd; x++) {
                     const col = grid[x];
                     for (let y = by; y < yEnd; y++) {
-                        col[y] = tileVal;
+                        const roll = _hash2D(x * 3 + 1, y * 5 + 7, seed ^ 0xFEA7); // independent stream from elevation sampling
+                        if (roll < FEATURE_DENSITY) col[y] = featureVal;
+                        // else: stays open water (11), the block's initial fill
                     }
                 }
             }
@@ -325,6 +365,58 @@ function generateNavalMap() {
     battleEnvironment.grid = grid;
     battleEnvironment.groundColor = navalEnvironment.waterColor;
 }
+// =========================================================================
+// SURGERY: NAVAL RANDOMIZED 4-CORNER SPAWN GEOMETRY
+// Parallel to computeSpawnGeometry/pickBattleSpawnAssignment in
+// battlefield_launch.js (same corner-vector shape: ax/ay anchor plus
+// forward/rear/across unit vectors) but with its own inset sizing —
+// battlefield_launch.js caps its inset at 600px, which is a negligible
+// fraction of naval's ~50000x32000 world. Uses an 18%-of-dimension inset
+// instead, matching the spirit of the original fixed 82%/18% split this
+// replaces. Shared BATTLE_SPAWN_POSITIONS (now corner-only — see
+// battlefield_launch.js) is reused so both battle types draw from the
+// same 4 corner names.
+// =========================================================================
+function computeNavalSpawnGeometry(posName) {
+    const insetX = BATTLE_WORLD_WIDTH * 0.18;
+    const insetY = BATTLE_WORLD_HEIGHT * 0.18;
+    const D = Math.SQRT1_2;
+    let ax, ay, fx, fy;
+    switch (posName) {
+        case "NE": ax = BATTLE_WORLD_WIDTH - insetX; ay = insetY;                       fx = -D; fy = D;  break;
+        case "SE": ax = BATTLE_WORLD_WIDTH - insetX; ay = BATTLE_WORLD_HEIGHT - insetY; fx = -D; fy = -D; break;
+        case "NW": ax = insetX;                      ay = insetY;                       fx = D;  fy = D;  break;
+        case "SW": ax = insetX;                      ay = BATTLE_WORLD_HEIGHT - insetY; fx = D;  fy = -D; break;
+        default:   ax = BATTLE_WORLD_WIDTH / 2;      ay = BATTLE_WORLD_HEIGHT - insetY; fx = 0;  fy = -1; // fallback = old player-south
+    }
+    return {
+        position: posName,
+        ax: ax, ay: ay,
+        forward: { x: fx, y: fy },
+        rear:    { x: -fx, y: -fy },
+        across:  { x: -fy, y: fx }
+    };
+}
+
+function pickNavalSpawnAssignment() {
+    const corners = (typeof BATTLE_SPAWN_POSITIONS !== 'undefined')
+        ? BATTLE_SPAWN_POSITIONS
+        : ["NE", "SE", "NW", "SW"]; // defensive fallback if load order ever changes
+    let a = corners[Math.floor(Math.random() * corners.length)];
+    let b;
+    do {
+        b = corners[Math.floor(Math.random() * corners.length)];
+    } while (b === a);
+
+    let playerPos = a, enemyPos = b;
+    if (Math.random() < 0.5) { playerPos = b; enemyPos = a; }
+
+    return {
+        player: computeNavalSpawnGeometry(playerPos),
+        enemy:  computeNavalSpawnGeometry(enemyPos)
+    };
+}
+
 function generateShips(pCount, eCount) {
     navalEnvironment.ships = [];
 
@@ -337,18 +429,29 @@ function generateShips(pCount, eCount) {
     if (eCount <= 30) { eType = SHIP_TYPES.LIGHT; eType.name = "Light Scout"; }
     else if (eCount <= 100) { eType = SHIP_TYPES.MEDIUM; eType.name = "Medium Junk"; }
 
-    // === SANDBOX & CUSTOM IDENTICAL: ships at EXTREME opposite ends ===
-    // Player at south 82%, enemy at north 18% (matches custom_naval_launcher).
-    // The user must row + sail across the wide ocean to engage.
-    const centerX = BATTLE_WORLD_WIDTH / 2;
-    let pX = centerX, pY = BATTLE_WORLD_HEIGHT * 0.82;
-    let eX = centerX, eY = BATTLE_WORLD_HEIGHT * 0.18;
+    // === RANDOMIZED CORNER SPAWNS ===
+    // Replaces the old fixed player-south(0.82)/enemy-north(0.18) split.
+    // Each side lands on a different random corner (never both the same)
+    // via computeNavalSpawnGeometry/pickNavalSpawnAssignment above — the
+    // user still has a vast ocean to sail across to engage, just not
+    // always along a straight north-south line anymore. Heading below is
+    // derived from the assignment's forward vector so each ship starts
+    // facing roughly toward the fight instead of a hardcoded north/south.
+    //
+    // NOTE: the old coastSide-based inland X-shift (pulling both ships to
+    // the same X on Coastal maps) is removed — it hardcoded both ships
+    // onto one shared longitude, which conflicts with corner spawns
+    // giving each ship an independent X *and* Y. coastSide itself is
+    // untouched and still drives Coastal's water/land coloring and wind
+    // strength elsewhere in this file; only its use for ship X here is gone.
+    window.navalSpawnAssignment = pickNavalSpawnAssignment();
+    const pGeo = window.navalSpawnAssignment.player;
+    const eGeo = window.navalSpawnAssignment.enemy;
 
-    if (navalEnvironment.mapType === "Coastal") {
-        // For coastal maps, also shift slightly inland based on coastSide
-        if (navalEnvironment.coastSide === 0) { pX = eX = BATTLE_WORLD_WIDTH  * 0.60; }
-        if (navalEnvironment.coastSide === 1) { pX = eX = BATTLE_WORLD_WIDTH  * 0.40; }
-    }
+    let pX = pGeo.ax, pY = pGeo.ay;
+    let eX = eGeo.ax, eY = eGeo.ay;
+    let pHeading = Math.atan2(pGeo.forward.y, pGeo.forward.x);
+    let eHeading = Math.atan2(eGeo.forward.y, eGeo.forward.x);
 
     let pShip = {
         side: "player", 
@@ -363,7 +466,7 @@ function generateShips(pCount, eCount) {
         type: pType.name, // <--- THE CRITICAL FIX FOR COLLISION MATH
 
         // ── SAILING MOVEMENT PROPERTIES (Foundation) ──────────────────────
-        heading:     Math.PI * 1.5,  // ship faces UP (north) initially — radians
+        heading:     pHeading,      // SURGERY: faces toward the fight from its corner (was hardcoded north) — radians
         speed:       0,              // current speed (world-units per frame)
         maxSpeed:    7.00,           // max speed — sail at gale can exceed rowing cap  // <<<<<<<<<< TWEAK MAX SAIL SPEED
         vx:          0,              // velocity components (derived from heading+speed)
@@ -390,7 +493,7 @@ function generateShips(pCount, eCount) {
         type: eType.name, // <--- THE CRITICAL FIX FOR COLLISION MATH
 
         // ── SAILING MOVEMENT PROPERTIES (Foundation) ──────────────────────
-        heading:     Math.PI * 0.5,  // ship faces DOWN (south) initially
+        heading:     eHeading,      // SURGERY: faces toward the fight from its corner (was hardcoded south)
         speed:       0,
         maxSpeed:    7.00,           // max speed — sail at gale can exceed rowing cap  // <<<<<<<<<< TWEAK ENEMY SHIP MAX SAIL SPEED
         vx:          0,
@@ -575,7 +678,22 @@ function updateNavalPhysics() {
     // the rest of the battle — not just while _grappled (which clears the
     // instant hulls separate). This is what makes the lockout permanent.
     if (_pShip && window.NavalRowing && !window.gotRammed) {
-        window.NavalRowing.applyInput(_pShip, window._shipHelmInput, window._helmKeys);
+        // SURGERY: during pre-deploy, block forward/reverse rowing thrust but
+        // still allow turning. NavalRowing.applyInput reads dy as forward/
+        // reverse thrust and dx as turn torque (see the file's own header
+        // comment above) — they're independently gated inside applyInput, so
+        // zeroing dy here while passing dx through unmodified lets the ship
+        // rotate in place without being able to row anywhere. Sail thrust
+        // (further down, per-ship loop) reads only ship.heading vs wind and
+        // is NOT gated here, so wind still moves/turns-assists the ship via
+        // sail as normal — only manual rowing propulsion is blocked.
+        let _helmForPreDeploy = window._shipHelmInput;
+        let _keysForPreDeploy = window._helmKeys;
+        if (typeof window !== 'undefined' && window.__preDeploymentActive) {
+            if (_helmForPreDeploy) _helmForPreDeploy = { dx: _helmForPreDeploy.dx || 0, dy: 0 };
+            if (_keysForPreDeploy) _keysForPreDeploy = Object.assign({}, _keysForPreDeploy, { i: false, k: false });
+        }
+        window.NavalRowing.applyInput(_pShip, _helmForPreDeploy, _keysForPreDeploy);
     }
 
     // ── SAIL ANGLE — fully auto-trim for ALL ships (player + enemy) ────────
@@ -735,7 +853,13 @@ function updateNavalPhysics() {
         }
 
         if (window.NavalRowing) {
-            window.NavalRowing.applyInput(s, { dx: _aiTurn, dy: -_aiForward }, null);
+            // SURGERY: enemy ships also lose rowing during pre-deploy, matching
+            // the player restriction above and the "enemy fully frozen" rule
+            // used elsewhere for land/siege pre-deploy — an enemy ship should
+            // not be able to close distance under oar power before COMMENCE.
+            // Turn (_aiTurn) still passes through, same as the player.
+            const _preDeploy = (typeof window !== 'undefined' && window.__preDeploymentActive);
+            window.NavalRowing.applyInput(s, { dx: _aiTurn, dy: _preDeploy ? 0 : -_aiForward }, null);
         }
         s._sailManual = false;
     });
@@ -823,7 +947,7 @@ function updateNavalPhysics() {
         const SAIL_POWER = 0.35;   // was 0.075 — sail now meaningfully drives the ship
 
         // Grappled ships cannot use sail (no point, they're locked together)
-        const _sailActive = !ship._grappled;
+const _sailActive = !ship._grappled && !window.__preDeploymentActive;
 
         if (_sailActive && _polarFactor > 0) {
             const _sailFwdForce = _polarFactor * _effectiveWindSpeed;
@@ -1050,6 +1174,7 @@ function updateNavalPhysics() {
                 if ((Math.pow(Math.abs(lx) / rx, 2.5) + Math.pow(Math.abs(ly) / ry, 2.5)) > 1.0) return;
 
                 // Translate with ship movement
+                const _preStickUnitX = unit.x, _preStickUnitY = unit.y;
                 unit.x += ship._dx;
                 unit.y += ship._dy;
 
@@ -1060,6 +1185,32 @@ function updateNavalPhysics() {
                     const oy = unit.y - ship.y;
                     unit.x = ship.x + ox * _cosDelta - oy * _sinDelta;
                     unit.y = ship.y + ox * _sinDelta + oy * _cosDelta;
+                }
+
+                // ── FIX: facing direction was reading the ship's motion as the
+                // unit's own — direction should be relative to the deck, not
+                // the water ──────────────────────────────────────────────────
+                // troop_draw.js's facingDir/facingDirY hysteresis (the
+                // "VERTICAL FACING" block) computes its per-frame delta as
+                // unit.x - unit._prevX / unit.y - unit._prevY in WORLD space.
+                // The translate+orbit above just moved unit.x/unit.y by
+                // however much the SHIP itself moved and turned this frame.
+                // With nothing else changed, that whole ship-induced shift
+                // would read as the unit's own movement the next time
+                // troop_draw.js runs — a unit standing still on deck would
+                // flip its sprite's facing every time the ship changed speed
+                // or heading, because facing was effectively being measured
+                // against the water (world space) instead of the deck.
+                // Shifting _prevX/_prevY by the exact same ship-induced delta
+                // (translation + rotational orbit combined, measured as
+                // whatever unit.x/unit.y actually ended up changing by above)
+                // cancels that component out of troop_draw.js's difference,
+                // leaving only the unit's own true movement across the deck:
+                // a unit walking across a turning ship still turns correctly,
+                // a stationary one no longer does just because the ship did.
+                if (unit._prevX !== undefined) {
+                    unit._prevX += unit.x - _preStickUnitX;
+                    unit._prevY += unit.y - _preStickUnitY;
                 }
 
                 // === ORDER-DESTINATION STICKING (living units only — a corpse's
@@ -1093,6 +1244,29 @@ function updateNavalPhysics() {
                         const tty = unit.target.y - ship.y;
                         unit.target.x = ship.x + ttx * _cosDelta - tty * _sinDelta;
                         unit.target.y = ship.y + ttx * _sinDelta + tty * _cosDelta;
+                    }
+                }
+
+                // === NAVAL BOARDING LEASH ANCHOR STICKING (living units only) ===
+                // battlefield_logic.js's naval boarding leash (the fix that
+                // replaced the old full-freeze-on-deck behaviour) stamps
+                // unit._navalAnchorPoint as the center of the small radius a
+                // unit is allowed to roam before it hits the "collision wall"
+                // and gets clamped back. Same problem as orderTargetPoint
+                // above: that anchor is a plain world-space point, so without
+                // this it would silently drift off the deck as the ship
+                // sailed or turned — the leash circle would end up floating
+                // over open water instead of staying centered on where the
+                // unit is actually standing. Identical translate+rotate,
+                // applied to the same anchor every frame the ship moves.
+                if (unit.hp > 0 && unit._navalAnchorPoint) {
+                    unit._navalAnchorPoint.x += ship._dx;
+                    unit._navalAnchorPoint.y += ship._dy;
+                    if (_hasRot) {
+                        const anx = unit._navalAnchorPoint.x - ship.x;
+                        const any = unit._navalAnchorPoint.y - ship.y;
+                        unit._navalAnchorPoint.x = ship.x + anx * _cosDelta - any * _sinDelta;
+                        unit._navalAnchorPoint.y = ship.y + anx * _sinDelta + any * _cosDelta;
                     }
                 }
 
@@ -1422,8 +1596,11 @@ function _fishAvoidanceVector(f) {
 //          stay mostly clear, gale-force wind whites the surface up. Ships
 //          also raise a bow spray + leave a stern wake trail at this tier —
 //          see drawShipWakes() / _drawBowSpray() further down.
-//   MAX  → HIGH + a fine sparkling glitter octave (twinkling glints, desktop-
-//          exclusive since it's the priciest pass).
+//   MAX  → HIGH + a fine sparkling glitter octave (twinkling glints). No
+//          longer desktop-exclusive — any device selecting MAX by name gets
+//          it — but still the priciest pass, which is why _navWaterQL()'s
+//          CUSTOM-state approximation below caps at HIGH (2) rather than
+//          ever inferring MAX (3) from a hand-tuned value.
 //
 // Ocean/Coastal battle worlds can be up to 50000x32000 world units, so this
 // NEVER samples the whole map. Only the current camera viewport (+padding)
@@ -1435,9 +1612,19 @@ function _navWaterQL() {
     if (tier === "MAX")                      return 3;
     if (tier === "HIGH")                     return 2;
     if (tier === "MED" || tier === "MEDIUM") return 1;
-    if (!window._SETTINGS_IS_MOBILE)         return 2;   // desktop default = HIGH
-    const mq = _navGetQual();
-    return mq >= 100 ? 2 : mq >= 50 ? 1 : 0;
+    if (tier === "LOW")                      return 0;
+    // CUSTOM (or not yet initialised) — approximate from the live numeric
+    // value using the same 40/80 tier-bucket edges GRAPHICS_QUALITY_TIERS
+    // uses everywhere else (settings_ui.js). _navGetQual() already reads
+    // mobileBattleQuality or desktopBattleQuality as appropriate, so this
+    // one line now covers both platforms — it used to hardcode `return 2`
+    // for any non-mobile device here, which quietly ignored how low a
+    // desktop player had actually dragged the Advanced slider once they'd
+    // touched anything else and dropped into CUSTOM. Caps at 2 (never 3)
+    // same as before: the priciest MAX-only sparkle octave is reserved for
+    // players who land on MAX by name, not inferred from a hand-tuned value.
+    const q = _navGetQual();
+    return q >= 80 ? 2 : q >= 40 ? 1 : 0;
 }
 
 // ── Anisotropic ridge sample — the "directional wave" primitive ──────────
@@ -1604,9 +1791,14 @@ function drawProceduralOceanWater(ctx) {
         if (ql >= 3) {
             // ── MAX ONLY — fine sparkle/glitter octave ────────────────────
             // Small twinkling glints scattered across the surface, evoking
-            // light catching individual wave facets. MAX is desktop-
-            // exclusive (see GRAPHICS_QUALITY_TIERS in settings_ui.js), so
-            // the extra per-candidate-cell cost (one more hash + sin) is
+            // light catching individual wave facets. MAX is reachable from
+            // any device now (see GRAPHICS_QUALITY_TIERS in settings_ui.js —
+            // it's no longer desktop-exclusive), but ql only ever reaches 3
+            // via an exact "MAX" tier selection, never via the CUSTOM
+            // fallback in _navWaterQL() above — so this octave still only
+            // runs for players who deliberately opted into the priciest
+            // tier, on whichever hardware they're doing that on. The extra
+            // per-candidate-cell cost (one more hash + sin) is
             // affordable here in a way it wouldn't be on mobile HIGH.
             const fineFreq   = 0.024;  // <<<< TWEAK glitter density
             const glintDrift = time * 10;
@@ -1615,10 +1807,10 @@ function drawProceduralOceanWater(ctx) {
             for (let wx = x0; wx < x1; wx += cell) {
                 for (let wy = y0; wy < y1; wy += cell) {
                     const n = _noise2D((wx + gDriftX) * fineFreq, (wy - gDriftY) * fineFreq, seed ^ 0xBEEF);
-                    if (n <= 0.90) continue; // raised from 0.775 — far fewer, sparser glints; still visible on MAX, no longer a busy shimmer
+                    if (n <= 0.955) continue; // raised again from 0.90 — roughly half as many glints as before; still a few visible twinkles on MAX, no longer scattered "specs" across the whole surface
                     const twinkleSeed = _hash2D((wx / cell) | 0, (wy / cell) | 0, seed ^ 0x51DE);
                     const twinkle = 0.5 + 0.5 * Math.sin(time * 3.2 + twinkleSeed * Math.PI * 2 * 6);
-                    const a = (n - 0.775) * 1.6 * (0.30 + 0.70 * twinkle) * ampMul;
+                    const a = (n - 0.955) * 1.6 * (0.30 + 0.70 * twinkle) * ampMul;
                     if (a < 0.02) continue;
                     ctx.fillStyle = "rgba(255,255,255," + a.toFixed(3) + ")";
                     ctx.beginPath();
@@ -1667,7 +1859,7 @@ function drawNavalBackground(ctx) {
                 cacheCtx.save();
 
                 if (cell === 12) {
-                    // REEFS (Paste your previous reef drawing logic here, but use cacheCtx instead of ctx)
+                    // REEFS — soft sandy-tan gradient patch, randomised size/rotation per tile
                     const n = _hash2D(x * 11, y * 17, seed);
                     const drawRadius = BATTLE_TILE_SIZE * (1.2 + n * 0.6); 
                     const grad = cacheCtx.createRadialGradient(cx, cy, BATTLE_TILE_SIZE * 0.1, cx, cy, drawRadius);
@@ -1681,7 +1873,7 @@ function drawNavalBackground(ctx) {
                     cacheCtx.fill();
 
                 } else if (cell === 13) {
-                    // ROCKS (Paste your previous rock drawing logic here, using cacheCtx)
+                    // ROCKS — dark shadow + a small cluster of stone ellipses
                     const n = _hash2D(x * 7, y * 31, seed);
                     cacheCtx.fillStyle = "rgba(0, 0, 0, 0.25)";
                     cacheCtx.beginPath();
@@ -1701,7 +1893,7 @@ function drawNavalBackground(ctx) {
                     }
 
                 } else if (cell === 14) {
-                    // KELP (Paste your previous kelp drawing logic here, using cacheCtx)
+                    // KELP — a few curved strands per tile
                     const n = _hash2D(x * 13, y * 29, seed);
                     const strands = 4 + Math.floor(n * 5);
                     for (let i = 0; i < strands; i++) {
@@ -1720,7 +1912,7 @@ function drawNavalBackground(ctx) {
                     }
                     
                 } else if (cell === 15) {
-                    // TRENCHES (Paste your previous trench drawing logic here, using cacheCtx)
+                    // DARK WATER POCKET — soft dark radial vignette
                     const n = _hash2D(x * 5, y * 41, seed);
                     const drawRadius = BATTLE_TILE_SIZE * (1.0 + n * 0.5);
                     const grad = cacheCtx.createRadialGradient(cx, cy, BATTLE_TILE_SIZE * 0.1, cx, cy, drawRadius);

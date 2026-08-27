@@ -130,9 +130,10 @@ const CFG = {
     CARD_W:         82,
     CARD_H:         110,
 
-    PLAYER_DEPLOY_FRAC:       0.25,   // land + river
-    PLAYER_DEPLOY_FRAC_SIEGE: 0.18,   // siege (furthest south)
-    ENEMY_DEPLOY_FRAC:        0.30,
+    PLAYER_DEPLOY_FRAC:       0.25,   // land + river — UNUSED now that DEPLOY_ZONE_SIZE drives the square, kept for any external reader
+    PLAYER_DEPLOY_FRAC_SIEGE: 0.18,   // siege — UNUSED, see above
+    ENEMY_DEPLOY_FRAC:        0.30,   // UNUSED, see above
+    DEPLOY_ZONE_SIZE:         400,    // land/river/siege deploy zone is a DEPLOY_ZONE_SIZE x DEPLOY_ZONE_SIZE square centered on the side's spawn anchor
 
     COMMENCE_ZOOM_START:      0.85,
     COMMENCE_ZOOM_END:        1.40,
@@ -637,12 +638,16 @@ function _buildScreen() {
 // ── Unit type → emoji fallback icon ─────────────────────────────────────────
 function _unitIcon(type) {
     const s = (type || "").toLowerCase();
+	 if (s.match(/(twohand|two|greatsword|handed)/))
+        return "⚔️";
+	
     if (s.match(/(cav|horse|lancer|mount|keshig)/))  return "🏇";
     if (s.match(/eleph/))                             return "🐘";
     if (s.match(/(bomb|artill|trebuch)/))             return "💣";
     if (s.match(/(ship|naval|galley)/))               return "⛵";
     if (s.match(/(archer|bow|crossbow)/))             return "🏹";
     if (s.match(/(hand|rocket|firelance)/))           return "🔥";
+    if (s.match(/cannon/))                            return "🎆";
     if (s.match(/camel/))                             return "🐫";
     if (s.match(/(pike|spear|glaive)/))               return "🔱";
     if (s.match(/(slinger|javelinier)/))              return "🤾";
@@ -1164,7 +1169,17 @@ function hideBattleLoadingScreen() {
         _screen.style.display    = "none";
         _screen.style.opacity    = "1";
         _screen.style.transition = "";
-        _launchDirectly();
+        // SURGERY: siege battles skip pre-deployment entirely and go straight
+        // to live combat via _launchDirectly(). All other battle types
+        // (land/river/naval) still go through _enterPreDeployment() as before.
+        // NOTE: checks the bare `inSiegeBattle` global, not window.inSiegeBattle
+        // — siegebattle.js declares it with top-level `let`, which does NOT
+        // attach to window, so window.inSiegeBattle is never actually set.
+        if (typeof inSiegeBattle !== "undefined" && inSiegeBattle) {
+            _launchDirectly();
+        } else {
+            _enterPreDeployment();
+        }
     }, 520);
 }
 
@@ -1227,16 +1242,11 @@ function _launchDirectly() {
                 u.priorityOverride = false;
                 u.unstickCooldown  = 0;
             } else if (u.side === "player" && !u.isCommander && !u.disableAICombat) {
-                // FIX: Siege assault AI is set by executeSiegeAssaultAI inside
-                // launchCustomSiege.  Overwriting those orders with seek_engage here
-                // breaks ladder/ram/treb crews — they abandon equipment and wander.
-                if (!window.inSiegeBattle) {
-                    u.selected         = true;
-                    u.hasOrders        = true;
-                    u.orderType        = "seek_engage";
-                    u.orderTargetPoint = null;
-                    u.formationTimer   = 120;
-                }
+                // REMOVED: Lazy General auto-select + seek_engage. Player
+                // attacker units stay unselected with no orders until the
+                // player commands them, in every battle type including siege
+                // (siege assault roles are still handled by
+                // executeSiegeAssaultAI elsewhere, untouched by this block).
             }
         });
     }
@@ -1264,73 +1274,81 @@ let _formationNameEl = null;
 
 function _buildPreDeployUI() {
     if (_preDeployUI) return;
+    // SURGERY: was 3 separately-styled translucent pills (title/formation/
+    // hint) plus a separately-styled button, pinned to top:8px/right:8px.
+    // Rebuilt as ONE opaque bordered panel, vertically centered on the right
+    // edge (top:50% + translateY(-50%) so it stays centered regardless of
+    // screen height, rather than a fixed top offset) per direct request.
     _preDeployUI = _makeEl("div", {
         position:       "fixed",
-        top:            "8px",
+        top:            "50%",
         right:          "8px",
+        transform:      "translateY(-50%)",
         zIndex:         "9800",
         display:        "none",
         flexDirection:  "column",
         alignItems:     "stretch",
-        gap:            "4px",
-        width:          "clamp(180px, 26vw, 240px)",
+        gap:            "0",
+        width:          "clamp(200px, 26vw, 260px)",
         pointerEvents:  "none",
-        fontFamily:     "'Cinzel', Georgia, serif"
+        fontFamily:     "'Cinzel', Georgia, serif",
+        background:     "#150b06",   // fully opaque — no see-through to the battlefield behind it
+        border:         "2px solid #d4b886",
+        borderRadius:   "10px",
+        boxShadow:      "0 6px 22px rgba(0,0,0,0.85)",
+        overflow:       "hidden"
     });
     _preDeployUI.id = "bls-predeploy-hud";
 
     const titlePill = _makeEl("div", {
-        background:    "linear-gradient(180deg, rgba(18,8,4,0.96) 0%, rgba(8,4,2,0.92) 100%)",
-        border:        "1px solid #d4b886",
-        borderRadius:  "8px",
-        padding:       "6px 10px",
+        background:    "#1c0f07",
+        padding:       "10px 12px",
         textAlign:     "center",
         color:         "#ffca28",
-        fontSize:      "11px",
+        fontSize:      "12px",
         fontWeight:    "700",
         letterSpacing: "0.18em",
         textTransform: "uppercase",
         textShadow:    "0 1px 3px #000",
-        boxShadow:     "0 4px 14px rgba(0,0,0,0.7)",
+        borderBottom:  "1px solid #d4b886",
         pointerEvents: "auto"
     }, "Pre-Battle Deployment");
     _preDeployUI.appendChild(titlePill);
 
     _formationNameEl = _makeEl("div", {
-        background:    "rgba(8,4,2,0.85)",
-        border:        "1px solid rgba(255,107,107,0.7)",
-        borderRadius:  "6px",
-        padding:       "4px 8px",
+        background:    "#1c0f07",
+        padding:       "8px 12px",
         textAlign:     "center",
         color:         "#ff9b9b",
-        fontSize:      "10px",
+        fontSize:      "11px",
         fontWeight:    "600",
         letterSpacing: "0.12em",
         textTransform: "uppercase",
+        borderBottom:  "1px solid rgba(212,184,134,0.35)",
         pointerEvents: "auto"
     }, "Enemy: —");
     _preDeployUI.appendChild(_formationNameEl);
 
     const hint = _makeEl("div", {
-        background:    "rgba(8,4,2,0.75)",
-        border:        "1px solid rgba(212,184,134,0.4)",
-        borderRadius:  "6px",
-        padding:       "4px 8px",
+        background:    "#1c0f07",
+        padding:       "8px 12px",
         textAlign:     "center",
         color:         "#cfb88a",
-        fontSize:      "9px",
+        fontSize:      "10px",
         fontStyle:     "italic",
         letterSpacing: "0.08em",
-        pointerEvents: "auto",
-        lineHeight:    "1.3"
+        lineHeight:    "1.35",
+        borderBottom:  "1px solid rgba(212,184,134,0.35)",
+        pointerEvents: "auto"
     }, "Drag-box to position troops within the blue zone.");
     _preDeployUI.appendChild(hint);
 
     _commenceBtn = _makeEl("button", {
         background:    "linear-gradient(180deg, #c62828 0%, #6a1010 100%)",
-        border:        "2px solid #ffca28",
-        borderRadius:  "9px",
-        padding:       "12px 8px",
+        border:        "none",
+        borderTop:     "2px solid #ffca28",
+        borderRadius:  "0",
+        padding:       "14px 8px",
         color:         "#fff",
         fontSize:      "clamp(13px, 2.2vw, 16px)",
         fontWeight:    "900",
@@ -1338,7 +1356,7 @@ function _buildPreDeployUI() {
         textTransform: "uppercase",
         cursor:        "pointer",
         textShadow:    "0 2px 4px #000, 0 0 12px rgba(255,202,40,0.4)",
-        boxShadow:     "0 0 24px rgba(255,202,40,0.55), inset 0 -3px 8px rgba(0,0,0,0.45)",
+        boxShadow:     "inset 0 0 24px rgba(255,202,40,0.25)",
         pointerEvents: "auto",
         userSelect:    "none",
         transition:    "transform 0.12s ease",
@@ -1365,7 +1383,18 @@ function _buildPreDeployUI() {
 
 function _showPreDeployHUD(formationName) {
     _buildPreDeployUI();
-    if (_formationNameEl) _formationNameEl.textContent = "Enemy: " + (formationName || "Standard Line");
+    // NAVAL OVERRIDE: Coastal/Ocean battles never actually apply an enemy
+    // ground formation -- _applyEnemyFormation() bails out immediately for
+    // any inNavalBattle (see below) -- so formationName here is always a
+    // leftover land-formation roll (e.g. "Cavalry Wedge") that has nothing
+    // to do with what's about to happen. Show a naval-appropriate line
+    // instead, always, for both naval map types (Ocean and Coastal). // <<<<
+    const isNavalDeploy = !!window.inNavalBattle;
+    if (_formationNameEl) {
+        _formationNameEl.textContent = isNavalDeploy
+            ? "All Hands on Deck"
+            : "Enemy: " + (formationName || "Standard Line");
+    }
     _preDeployUI.style.display = "flex";
     _preDeployUI.style.opacity = "0";
     requestAnimationFrame(() => {
@@ -1387,7 +1416,7 @@ function _hidePreDeployHUD() {
 function _worldDims() {
     return {
         W: _safeNumber(window.BATTLE_WORLD_WIDTH,  2400),
-        H: _safeNumber(window.BATTLE_WORLD_HEIGHT, 1800)
+        H: _safeNumber(window.BATTLE_WORLD_HEIGHT, 2400)
     };
 }
 
@@ -1398,6 +1427,9 @@ function _calculatePlayerDeployZone() {
     const isRiver = !!window.inRiverBattle;
 
     if (isNaval) {
+        // Naval keeps its own ship-deck-relative zone (the deck moves with
+        // the ship, so an anchor-square in world space would make no sense
+        // here) — unchanged by the SURGERY below.
         const env  = window.navalEnvironment;
         const ship = (env && Array.isArray(env.ships)) ? env.ships.find(s => s.side === "player") : null;
         if (ship) {
@@ -1413,17 +1445,132 @@ function _calculatePlayerDeployZone() {
         return { type: "naval", minX: 60, maxX: W - 60, minY: H * 0.55, maxY: H - 40, shipRef: null };
     }
     if (isSiege) {
-        return { type: "siege", minX: 60, maxX: W - 60, minY: H * (1 - CFG.PLAYER_DEPLOY_FRAC_SIEGE), maxY: H - 30 };
+        // SURGERY: square anchored on the attacker camp spawn point instead
+        // of a fixed 18%-of-map band along the south edge. Uses the same
+        // camp anchor customsiegebattle.js/siegebattle.js actually spawn the
+        // attacker roster at (SiegeTopography.campPixelY), so the zone is
+        // centered on where the roster really lands, not a guessed fraction.
+        const anchorX = W / 2;
+        const anchorY = (typeof SiegeTopography !== "undefined" && SiegeTopography.campPixelY)
+            ? SiegeTopography.campPixelY
+            : H - 100;
+        return _squareZoneAt("siege", anchorX, anchorY);
     }
     if (isRiver) {
-        return { type: "river", minX: 60, maxX: W - 60, minY: H * (1 - CFG.PLAYER_DEPLOY_FRAC), maxY: H - 30 };
+        // SURGERY: river now uses the same anchor-square as land. River
+        // battles roll the same random 4-corner battleSpawnAssignment as
+        // land (battlefield_launch.js runs pickBattleSpawnAssignment() for
+        // every non-siege battle, river included), so battleSpawnAssignment
+        // .player already gives the right per-battle anchor here.
+        return _deployZoneForSide("player");
     }
-    return { type: "land", minX: 60, maxX: W - 60, minY: H * (1 - CFG.PLAYER_DEPLOY_FRAC), maxY: H - 30 };
+    // SURGERY: direction-aware — was hardcoded to a band along the bottom
+    // edge, which assumed the player always spawned south. See
+    // _deployZoneForSide / computeSpawnGeometry in battlefield_launch.js.
+    return _deployZoneForSide("player");
 }
 
 function _calculateEnemyDeployZone() {
     const { W, H } = _worldDims();
-    return { type: "enemy", minX: 60, maxX: W - 60, minY: 30, maxY: H * CFG.ENEMY_DEPLOY_FRAC };
+    if (window.inSiegeBattle) {
+        // SURGERY: square anchored on the defender plaza spawn point
+        // (SiegeTopography.gatePixelX/plazaPixelY) instead of a fixed
+        // 30%-of-map band along the north edge — matches where
+        // spawnSiegeCommander("enemy", ...) and deploySiegeDefenders
+        // actually place the defending garrison.
+        //
+        // FOLLOW-UP FIX #2: the comment above is now ALSO stale. This zone
+        // was updated to gatePixelY - 200 to match the spawn/patrol anchor
+        // at the time, but that anchor has since moved again (see
+        // SiegeTopography.defenderRallyPixelY in siegebattle.js). This box
+        // is what _preDeployClampUnits() hard-snaps every enemy unit's x/y
+        // into, EVERY SINGLE FRAME, for the entire pre-deploy phase — so if
+        // this anchor ever drifts out of sync with the spawn point again,
+        // this is the box that will silently win and drag units back to the
+        // stale spot, no matter what the spawn/patrol logic does. Reading
+        // the shared SiegeTopography.defenderRallyPixelY directly (instead
+        // of a locally-duplicated "gatePixelY - 200") means this can't get
+        // out of sync again.
+        const anchorX = (typeof SiegeTopography !== "undefined" && SiegeTopography.gatePixelX)
+            ? SiegeTopography.gatePixelX
+            : W / 2;
+        const anchorY = (typeof SiegeTopography !== "undefined" && SiegeTopography.defenderRallyPixelY)
+            ? SiegeTopography.defenderRallyPixelY
+            : H * 0.2;
+        return _squareZoneAt("enemy", anchorX, anchorY);
+    }
+    if (window.inNavalBattle) {
+        // BUGFIX: this used to return a bare static rectangle in open water
+        // (minY:30 to H*0.30) with no shipRef and no type:"naval", unlike the
+        // player branch above which locates the actual ship. That meant enemy
+        // units during naval pre-deploy were clamped into a patch of ocean
+        // instead of onto their ship's deck. Mirror the player lookup exactly:
+        // find this side's ship in navalEnvironment.ships and build a
+        // deck-relative zone from its real x/y/width/height, with shipRef set
+        // so downstream deck-snap logic (_clampUnitToZone / _preDeployClampUnits)
+        // has something to snap onto.
+        const env  = window.navalEnvironment;
+        const ship = (env && Array.isArray(env.ships)) ? env.ships.find(s => s.side === "enemy") : null;
+        if (ship) {
+            return {
+                type: "naval",
+                minX: ship.x - ship.width  * 0.45,
+                maxX: ship.x + ship.width  * 0.45,
+                minY: ship.y - ship.height * 0.45,
+                maxY: ship.y + ship.height * 0.45,
+                shipRef: ship
+            };
+        }
+        return { type: "naval", minX: 60, maxX: W - 60, minY: 30, maxY: H * 0.30, shipRef: null };
+    }
+    // Land + river enemy zone: battleSpawnAssignment.enemy covers both
+    // identically (see battlefield_launch.js — river rolls the same random
+    // 4-corner assignment as land).
+    // SURGERY: direction-aware — was hardcoded to a band along the top edge.
+    return _deployZoneForSide("enemy");
+}
+
+// SURGERY: shared square-builder. Both _deployZoneForSide (land/river,
+// anchor = this side's rolled corner/edge spawn point) and the siege branches
+// above (anchor = the fixed camp/plaza point) funnel through this so every
+// battle type gets the same ~400x400 (CFG.DEPLOY_ZONE_SIZE) box, clipped to
+// stay margin px off the world edge (the "abyss") on every side.
+function _squareZoneAt(type, anchorX, anchorY) {
+    const { W, H } = _worldDims();
+    const margin = 60;
+    const half = CFG.DEPLOY_ZONE_SIZE / 2;
+
+    // Clamp the CENTER first so the box doesn't get pushed off-map, then
+    // clip the edges to the margin as a second safety pass — handles maps
+    // narrower than DEPLOY_ZONE_SIZE + margin*2 without collapsing to zero.
+    const cx = Math.max(margin + half, Math.min(W - margin - half, anchorX));
+    const cy = Math.max(margin + half, Math.min(H - margin - half, anchorY));
+
+    return {
+        type: type,
+        minX: Math.max(margin, cx - half),
+        maxX: Math.min(W - margin, cx + half),
+        minY: Math.max(margin, cy - half),
+        maxY: Math.min(H - margin, cy + half)
+    };
+}
+
+// SURGERY: shared helper for land/river player+enemy zones. Centers a
+// DEPLOY_ZONE_SIZE square on whichever of the 8 spawn positions this side
+// drew (battleSpawnAssignment[side].ax/ay) instead of hugging a band along
+// the map's fixed top/bottom edge. Falls back to the old edge-of-map
+// default if the spawn assignment isn't ready yet for some reason.
+function _deployZoneForSide(side) {
+    const geo = window.battleSpawnAssignment && window.battleSpawnAssignment[side];
+
+    if (!geo) {
+        const { W, H } = _worldDims();
+        return side === "player"
+            ? _squareZoneAt("land",  W / 2, H - 100)
+            : _squareZoneAt("enemy", W / 2, 100);
+    }
+
+    return _squareZoneAt(side === "player" ? "land" : "enemy", geo.ax, geo.ay);
 }
 
 // ============================================================================
@@ -1779,25 +1926,35 @@ function _preDeployUpdateBattleUnits() {
 
 // ── Post-frame clamp: keep every player unit + commander inside the zone ────
 function _preDeployClampUnits() {
-    const z = window.__playerDeployZone;
-    if (!z || !window.battleEnvironment || !Array.isArray(window.battleEnvironment.units)) return;
+    if (!window.battleEnvironment || !Array.isArray(window.battleEnvironment.units)) return;
     const units = window.battleEnvironment.units;
-    const ez    = window.__enemyDeployZone;
+    const z  = window.__playerDeployZone;
+    const ez = window.__enemyDeployZone;
+    // FOLLOW-UP FIX: previously bailed out entirely (skipping BOTH sides'
+    // clamping) if z was null. Enemy clamping has no logical dependency on
+    // the player zone existing — the two are handled independently below —
+    // so a missing/late player zone shouldn't also silently disable the
+    // enemy clamp. Each branch now checks its own zone only.
 
     for (let i = 0; i < units.length; i++) {
         const u = units[i];
         if (!u || u.hp <= 0) continue;
 
-        if (u.side === "player" && !u.isCommander) {
+        if (u.side === "player" && !u.isCommander && z) {
             _clampUnitToZone(u, z);
         } else if (u.side === "enemy" && ez) {
-            if (u.x < ez.minX) u.x = ez.minX;
-            if (u.x > ez.maxX) u.x = ez.maxX;
-            if (u.y < ez.minY) u.y = ez.minY;
-            if (u.y > ez.maxY) u.y = ez.maxY;
-            u.vx = 0; u.vy = 0;
+            // BUGFIX: was a bare min/max clamp regardless of ez.type, so a
+            // naval-type ez (once it started carrying shipRef, see the fix
+            // in _calculateEnemyDeployZone above) would still be ignored —
+            // this branch never checked getNavalSurfaceAt or snapped onto
+            // the deck, it just boxed enemy units into raw x/y coordinates.
+            // Route through the same _clampUnitToZone the player branch
+            // uses so ez.type === "naval" actually gets deck-snap behavior.
+            _clampUnitToZone(u, ez);
         }
     }
+
+    if (!z) return;
 
     // Commander handle (player.x/y)
     if (window.player) {
@@ -1865,13 +2022,12 @@ function _drawDeployZoneOverlay() {
         const ebr = w2s(ez.maxX, ez.maxY);
         ctx.fillStyle = "rgba(255,70,70,0.06)";
         ctx.fillRect(etl.x, etl.y, ebr.x - etl.x, ebr.y - etl.y);
-        ctx.strokeStyle = "rgba(255,90,90,0.55)";
-        ctx.lineWidth = 2;
-        ctx.setLineDash([14, 8]);
-        ctx.beginPath();
-        ctx.moveTo(etl.x, ebr.y);
-        ctx.lineTo(ebr.x, ebr.y);
-        ctx.stroke();
+        // SURGERY: removed the single dashed bottom-edge line — it was drawn
+        // on only ONE edge (front-line marker toward the player), which made
+        // the enemy zone look cosmetically different from the player zone
+        // below (which had its own single dashed edge on a different side).
+        // Fill-only now, consistent on both sides. Per direct request, not
+        // the black-abyss dashed lines elsewhere — those are untouched.
     }
 
     if (z.type === "naval") {
@@ -1888,13 +2044,8 @@ function _drawDeployZoneOverlay() {
         const br = w2s(z.maxX, z.maxY);
         ctx.fillStyle = "rgba(80,170,255,0.08)";
         ctx.fillRect(tl.x, tl.y, br.x - tl.x, br.y - tl.y);
-        ctx.strokeStyle = "rgba(80,170,255,0.7)";
-        ctx.lineWidth = 2.5;
-        ctx.setLineDash([14, 8]);
-        ctx.beginPath();
-        ctx.moveTo(tl.x, tl.y);
-        ctx.lineTo(br.x, tl.y);
-        ctx.stroke();
+        // SURGERY: removed the single dashed top-edge line — see matching
+        // note on the enemy zone above. Fill-only now.
     }
     ctx.setLineDash([]);
     ctx.restore();
@@ -2000,12 +2151,348 @@ function _stopIdleWander() {
 }
 
 // ============================================================================
+//  PRE-BATTLE SOLDIER CHATTER   (player troops only, land/river/naval)
+// ----------------------------------------------------------------------------
+//  Cosmetic bubble mechanics are adapted from city_dialogue_system.js
+//  (state.bubbles / showSpeech / render / wrapText / roundRect), but redrawn
+//  through THIS file's OWN world->screen conversion -- the same w2s() trick
+//  _drawDeployZoneOverlay() uses just above. city_dialogue_system.js's
+//  render() deliberately does NOT reset the canvas transform because it's
+//  called from inside city_system.js's already-camera-translated draw pass;
+//  this file has no such pass of its own -- _installDrawPatch() below runs
+//  AFTER the real draw() call, with a fresh untransformed context -- so
+//  bubbles have to convert each speaker's world x/y to screen space
+//  themselves, exactly like the deploy-zone overlay already does.
+//
+//  Line SELECTION is a new system, not a copy of either city one:
+//    - NOT city_conversation_engine.js's scripted two-NPC back-and-forth --
+//      a deploy zone full of your own troops is a crowd murmuring, not a
+//      pair having a conversation.
+//    - Modeled on RandomDialogue.js's shape instead: classify the speaker
+//      (here: tactical role + current battle type) and pick a fresh,
+//      not-recently-used line from that pool via a per-unit WeakMap
+//      history -- same anti-repeat trick RandomDialogue.js's pickFresh()
+//      uses.
+//  Only ever fires for side === "player" -- enemy troops stay silent here.
+// ============================================================================
+const CHATTER_CFG = {
+    maxConcurrent:     4,     // bubbles allowed on screen at once                   // <<<<
+    minIntervalMs:     1400,  // fastest gap between two NEW lines firing            // <<<<
+    maxIntervalMs:     3200,  // slowest gap between two NEW lines firing            // <<<<
+    bubbleDurationMs:  4200,  // how long a single bubble stays up                   // <<<<
+    perUnitCooldownMs: 9000,  // a unit that just spoke won't speak again this soon  // <<<<
+    speakRadius:       900    // world-units from the player unit can be picked from // <<<<
+};
+
+const CHATTER_LINES = {
+    universalLand: [
+        "Stand steady. Fear passes; shame lingers.",
+        "My hands haven't stopped shaking since dawn.",
+        "Say a prayer to whichever god still owes you a favor.",
+        "I've buried enough friends. Not today.",
+        "Keep your eyes on the banners, not the enemy line.",
+        "Cold hands, cold blade. At least the weather agrees with me.",
+        "Whatever happens, don't break formation for me.",
+        "Grandfather fought at a crossing like this one. Never talked about it much.",
+        "Breathe. The waiting is worse than the fighting ever is.",
+        "Just get through the first charge. The rest takes care of itself."
+    ],
+    universalNaval: [
+        "Check your footing — the deck gets slick once the shouting starts.",
+        "I'd rather drown fighting than drown running.",
+        "Mind the ropes, or the ropes will mind you.",
+        "Wind's picking up. Good. Let it carry us into them.",
+        "Salt in every wound out here, one way or another.",
+        "Keep low till the grapples are thrown.",
+        "My uncle always said the sea forgives nothing.",
+        "Timbers are creaking louder than my nerves, and that's saying something.",
+        "First one aboard drinks free tonight — if there is a tonight.",
+        "Watch the tide as much as the enemy hull."
+    ],
+    roleLand: {
+        CAVALRY: [
+            "Give the horse her head once we're past the charge line.",
+            "She's spooked. So am I. We'll manage together.",
+            "Nothing outruns a lance point but another horse.",
+            "Keep the line tight — a scattered charge is just a funeral procession.",
+            "My mare's seen more battles than half this camp."
+        ],
+        INFANTRY: [
+            "Shield up, feet planted — that's the whole trick.",
+            "Shoulder to shoulder, or not at all.",
+            "My arms remember this even when my mind wants to forget.",
+            "The line holds if we hold it. Simple as that.",
+            "One step back today is ten steps back tomorrow."
+        ],
+        RANGED: [
+            "Count your arrows twice. You won't get a third chance to.",
+            "Wind's from the west — mind your arc.",
+            "String's dry, hands are steady. Good enough.",
+            "I'll loose till my quiver's empty or my arm falls off, whichever's first.",
+            "Front line gets the glory. We get the kill count."
+        ],
+        GUNPOWDER: [
+            "Keep the powder dry, keep your head dryer.",
+            "One spark too many and we won't need the enemy's help.",
+            "Load slow, aim slower, live longer.",
+            "That smell never gets less foul. Or less satisfying.",
+            "Fire in volleys — one gun barks, the rest stay silent for nothing."
+        ],
+        SHIELD: [
+            "Lock shields, lads. Let them break on us like water on rock.",
+            "My arm's numb already and we haven't even started.",
+            "Behind this board I've outlived better men than me.",
+            "The wall doesn't move unless I do. So it isn't moving.",
+            "Paint's chipped, wood's dented — still stops a blade just fine."
+        ]
+    },
+    roleNaval: {
+        CAVALRY: [
+            "The horses hate this even more than I do.",
+            "No charging on deck — keep her calm till we make landfall.",
+            "A horse that doesn't buck in a swell is worth more than gold.",
+            "We'll ride once there's ground beneath us again.",
+            "Careful — a spooked horse does more damage than the enemy will."
+        ],
+        INFANTRY: [
+            "Deck's narrower than any battlefield I've stood on.",
+            "Boarding's just another shield wall, sideways.",
+            "Feet apart, knees loose — fight the roll of the ship first.",
+            "Wood under my boots instead of dirt. Strange, but I'll manage.",
+            "When the planks drop, don't hesitate. Hesitation drowns."
+        ],
+        RANGED: [
+            "Aim low on a rolling deck — the swell throws every shot high.",
+            "Wet bowstrings are useless. Keep yours under your cloak.",
+            "Once they're grappled close, there's no missing.",
+            "Never loosed an arrow over open water before today.",
+            "Watch the rail — I don't fancy fishing my own arrows back out."
+        ],
+        GUNPOWDER: [
+            "Powder and seawater don't mix. Neither do powder and carelessness.",
+            "Keep the fuse away from the spray.",
+            "One good volley across their deck beats a hundred blades.",
+            "This is a floating powder keg. Try not to forget that.",
+            "Load fast — the sea doesn't wait for reloading."
+        ],
+        SHIELD: [
+            "Shield wall on a rocking deck — this ought to be interesting.",
+            "Lock up at the rail. That's where they'll try to come aboard.",
+            "The board doesn't care if the ground is wood or dirt.",
+            "Brace wide. The ship moves under you whether you like it or not.",
+            "First to the boarding point holds the line for the rest."
+        ]
+    }
+};
+
+const chatterState = {
+    bubbles: [],                   // { text, npcRef, expiresAt }
+    nextFireAt: 0,
+    historyByUnit: new WeakMap()   // per-unit anti-repeat, RandomDialogue.js-style
+};
+
+function _chatterPoolFor(unit) {
+    const role  = (typeof window.getTacticalRole === "function") ? window.getTacticalRole(unit) : "INFANTRY";
+    const naval = !!window.inNavalBattle;
+    const universal    = naval ? CHATTER_LINES.universalNaval : CHATTER_LINES.universalLand;
+    const roleSpecific = (naval ? CHATTER_LINES.roleNaval : CHATTER_LINES.roleLand)[role] || [];
+    return universal.concat(roleSpecific);
+}
+
+function _pickFreshChatterLine(unit) {
+    const pool = _chatterPoolFor(unit);
+    if (!pool.length) return null;
+
+    let seen = chatterState.historyByUnit.get(unit);
+    if (!seen) { seen = []; chatterState.historyByUnit.set(unit, seen); }
+
+    const maxSeen = Math.max(1, Math.floor(pool.length / 2));
+    const fresh   = pool.filter(line => seen.indexOf(line) === -1);
+    const source  = fresh.length ? fresh : pool;
+    const chosen  = source[Math.floor(Math.random() * source.length)];
+
+    seen.push(chosen);
+    if (seen.length > maxSeen) seen.shift();
+    return chosen;
+}
+
+function _onChatterCooldown(u) {
+    const last = u.__preBattleChatterAt || 0;
+    return (performance.now() - last) < CHATTER_CFG.perUnitCooldownMs;
+}
+
+function _updatePreBattleChatter() {
+    const now = performance.now();
+    chatterState.bubbles = chatterState.bubbles.filter(b => now < b.expiresAt);
+
+    if (chatterState.bubbles.length >= CHATTER_CFG.maxConcurrent) return;
+    if (now < chatterState.nextFireAt) return;
+    if (!window.battleEnvironment || !Array.isArray(window.battleEnvironment.units)) return;
+
+    const speaking = new Set(chatterState.bubbles.map(b => b.npcRef));
+    const p  = window.player;
+    const px = (p && typeof p.x === "number") ? p.x : null;
+    const py = (p && typeof p.y === "number") ? p.y : null;
+
+    const candidates = window.battleEnvironment.units.filter(u => {
+        if (!u || u.side !== "player" || u.isCommander || u.hp <= 0) return false;
+        if (speaking.has(u) || _onChatterCooldown(u)) return false;
+        if (px !== null && py !== null && Math.hypot(u.x - px, u.y - py) > CHATTER_CFG.speakRadius) return false;
+        return true;
+    });
+    if (!candidates.length) return;
+
+    const speaker = candidates[Math.floor(Math.random() * candidates.length)];
+    const text    = _pickFreshChatterLine(speaker);
+    if (!text) return;
+
+    chatterState.bubbles.push({ text: text, npcRef: speaker, expiresAt: now + CHATTER_CFG.bubbleDurationMs });
+    speaker.__preBattleChatterAt = now;
+
+    if (typeof window.cityTTSEngine !== "undefined" && window.player) {
+        try { window.cityTTSEngine.speakSpatial(text, speaker, window.player); } catch (e) {}
+    }
+
+    chatterState.nextFireAt = now + CHATTER_CFG.minIntervalMs +
+        Math.random() * (CHATTER_CFG.maxIntervalMs - CHATTER_CFG.minIntervalMs);
+}
+
+function _startPreBattleChatter() {
+    chatterState.bubbles = [];
+    chatterState.nextFireAt = performance.now() + 300; // small breath before the first line
+}
+
+function _stopPreBattleChatter() {
+    chatterState.bubbles = [];
+    // Cuts the TTS queue too -- without this, lines queued right before
+    // COMMENCE (speakSpatial deliberately never cancels the queue, so the
+    // crowd talks over each other in order) would keep playing out loud
+    // into live combat, well after their bubbles and the whole pre-deploy
+    // HUD are already gone.
+    if (typeof window.cityTTSEngine !== "undefined" && window.cityTTSEngine.stopAll) {
+        try { window.cityTTSEngine.stopAll(); } catch (e) {}
+    }
+}
+
+function _chatterWrapText(ctx, text, maxWidth) {
+    const words = text.split(/\s+/);
+    const lines = [];
+    let line = "";
+    for (const word of words) {
+        const test = line ? (line + " " + word) : word;
+        if (line && ctx.measureText(test).width > maxWidth) {
+            lines.push(line);
+            line = word;
+        } else {
+            line = test;
+        }
+    }
+    if (line) lines.push(line);
+    return lines;
+}
+
+function _chatterRoundRect(ctx, x, y, width, height, radius) {
+    const r = Math.min(radius, width / 2, height / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.lineTo(x + width - r, y);
+    ctx.quadraticCurveTo(x + width, y, x + width, y + r);
+    ctx.lineTo(x + width, y + height - r);
+    ctx.quadraticCurveTo(x + width, y + height, x + width - r, y + height);
+    ctx.lineTo(x + r, y + height);
+    ctx.quadraticCurveTo(x, y + height, x, y + height - r);
+    ctx.lineTo(x, y + r);
+    ctx.quadraticCurveTo(x, y, x + r, y);
+    ctx.closePath();
+}
+
+function _drawPreBattleBubbles() {
+    if (!chatterState.bubbles.length) return;
+    const canvas = document.getElementById("gameCanvas") || document.querySelector("canvas");
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    // Same world->screen conversion as _drawDeployZoneOverlay() above --
+    // this runs in the same post-draw pass, on a context with no camera
+    // transform applied, so it has to do that conversion itself.
+    const zoom = _safeNumber(window.zoom, 1);
+    const camX = (window.player && typeof window.player.x === "number") ? window.player.x : 0;
+    const camY = (window.player && typeof window.player.y === "number") ? window.player.y : 0;
+    const cw = canvas.width, ch = canvas.height;
+    const w2s = (wx, wy) => ({ x: (wx - camX) * zoom + cw / 2, y: (wy - camY) * zoom + ch / 2 });
+
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.font = "bold 10px Arial, sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "top";
+
+    const now = performance.now();
+    for (const bubble of chatterState.bubbles) {
+        if (now > bubble.expiresAt || !bubble.npcRef) continue;
+
+        const screenPos = w2s(bubble.npcRef.x, bubble.npcRef.y);
+        const maxTextWidth = 110;
+        const lines = _chatterWrapText(ctx, bubble.text, maxTextWidth);
+
+        const paddingX = 6, paddingY = 5, lineHeight = 13;
+        let maxLineWidth = 0;
+        for (const l of lines) {
+            const w = ctx.measureText(l).width;
+            if (w > maxLineWidth) maxLineWidth = w;
+        }
+
+        const bubbleWidth  = Math.min(maxTextWidth, maxLineWidth) + paddingX * 2;
+        const bubbleHeight = lines.length * lineHeight + paddingY * 2;
+
+        const bottomY = screenPos.y - 32;
+        const topY    = bottomY - bubbleHeight;
+        const leftX   = screenPos.x - bubbleWidth / 2;
+
+        ctx.fillStyle   = "rgba(255,255,255,0.92)";
+        ctx.strokeStyle = "rgba(0,0,0,0.5)";
+        ctx.lineWidth   = 1;
+        _chatterRoundRect(ctx, leftX, topY, bubbleWidth, bubbleHeight, 6);
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.moveTo(screenPos.x - 4, bottomY);
+        ctx.lineTo(screenPos.x + 4, bottomY);
+        ctx.lineTo(screenPos.x, bottomY + 6);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.fillStyle = "#111111";
+        let currentY = topY + paddingY;
+        for (const l of lines) {
+            ctx.fillText(l, screenPos.x, currentY);
+            currentY += lineHeight;
+        }
+    }
+
+    ctx.restore();
+}
+
+// ============================================================================
 //  ENTER PRE-DEPLOYMENT
 // ============================================================================
 function _enterPreDeployment() {
     console.log("[BLS] Entering Pre-Deployment.");
     window.__preDeploymentActive  = true;
     window.__battleCullingEnabled = false;
+    // SURGERY: __battleLoadingActive drives _installDrawPatch's black-fill +
+    // "Loading..." spinner (see draw() below) — it was previously only ever
+    // cleared by _launchDirectly() or _commenceBattle(). Now that this
+    // function runs instead of _launchDirectly() as the loading-gate
+    // callback, nothing cleared it here, so the canvas stayed black-filled
+    // with the spinner drawn on top for the ENTIRE pre-deploy phase (the
+    // real battlefield + deploy zone overlay never got a chance to render
+    // until COMMENCE). Clear it now so draw() falls through to the real
+    // render + _drawDeployZoneOverlay() the very next frame.
+    window.__battleLoadingActive  = false;
 
     // Stop enemy tactical AI for the whole pre-deploy duration
     if (typeof window.EnemyTacticalAI !== "undefined" && window.EnemyTacticalAI.stop) {
@@ -2069,6 +2556,9 @@ function _enterPreDeployment() {
     // ★ v4.2: Start the idle-wander interval (units fidget randomly while waiting for orders)
     _startIdleWander();
 
+    // Start ambient pre-battle chatter bubbles (player troops only)
+    _startPreBattleChatter();
+
     // Clear ghost keys
     if (window.keys) for (const k in window.keys) window.keys[k] = false;
     console.log("[BLS] Enemy formation:", formation.name, "| player comp:", comp);
@@ -2091,6 +2581,11 @@ function _commenceBattle() {
 
     // ★ v4.2: stop the idle-wander interval immediately
     _stopIdleWander();
+
+    // Hard-stop pre-battle chatter -- clears any lingering bubbles and cuts
+    // the TTS queue so lines queued right before COMMENCE don't keep
+    // talking out loud into live combat.
+    _stopPreBattleChatter();
 
     if (window.battleEnvironment && Array.isArray(window.battleEnvironment.units)) {
         for (const u of window.battleEnvironment.units) {
@@ -2143,13 +2638,10 @@ function _commenceBattle() {
                 // walking to their ram/ladder.
                 u.formationTimer = 120;
             } else {
-                // No explicit order → auto-engage
-                u.selected = true;
-                u.hasOrders = true;
-                u.orderType = "seek_engage";
-                u.orderTargetPoint = null;
-                u.formationTimer = 120;
-                u.target = null;
+                // REMOVED: Lazy General auto-select + auto seek_engage.
+                // Player units with no explicit order now stay unselected
+                // and idle at COMMENCE instead of being force-charged —
+                // the player decides when and where they attack.
             }
         }
     }
@@ -2199,6 +2691,7 @@ function _commenceBattle() {
 // Expose for debug
 window.__BLS_commenceBattle      = _commenceBattle;
 window.__BLS_enterPreDeployment  = _enterPreDeployment;
+window.__BLS_launchDirectly      = _launchDirectly; // manual bypass of pre-deploy, console-only
 
 // ============================================================================
 //  PATCH:  updateBattleUnits   (PASS-THROUGH during pre-deploy)
@@ -2234,9 +2727,43 @@ function _installTickPatches() {
 
     // updateBattleUnits: pass through during pre-deploy (battlefield_logic.js has the guards)
     wrap("updateBattleUnits", {});
-    // Projectiles + naval/river physics: block during pre-deploy
+
+    // LAST LAST RESORT: _preDeployClampUnits was fully implemented but never
+    // actually invoked anywhere in this codebase — confirmed by exhaustive
+    // grep across every file, not just this one. That means neither player
+    // nor enemy units were ever clamped into their deploy zones during
+    // pre-deploy, regardless of whether __enemyDeployZone's anchor was
+    // correct or the old far-north plazaPixelY. This wraps updateBattleUnits
+    // (already unblocked during pre-deploy, see comment above) so the clamp
+    // actually runs every frame, right before the next draw — deliberately
+    // the same place/timing __enemyDeployZone's own header comments already
+    // describe this system as behaving. Path-agnostic like the
+    // lastSiegeDefenderResort in siegeEngineLogic.js: doesn't care which
+    // upstream logic misplaced a unit, just forces the end state into the
+    // (now correctly gate-anchored) box every tick.
+    const _origUpdateBattleUnits = window.updateBattleUnits;
+    if (typeof _origUpdateBattleUnits === "function" && !_origUpdateBattleUnits.__blsClampWrapped) {
+        window.updateBattleUnits = function () {
+            const result = _origUpdateBattleUnits.apply(this, arguments);
+            if (window.__preDeploymentActive) {
+                try { _preDeployClampUnits(); } catch (e) { /* swallow — never let the clamp break the tick */ }
+                try { _updatePreBattleChatter(); } catch (e) { /* swallow — never let chatter break the tick */ }
+            }
+            return result;
+        };
+        window.updateBattleUnits.__blsClampWrapped = true;
+    }
+    // Projectiles: still fully blocked during pre-deploy (no arrows mid-deploy).
     wrap("updateBattleProjectiles", { blockDuringPreDeploy: true });
-    wrap("updateNavalPhysics",      { blockDuringPreDeploy: true });
+    // SURGERY: updateNavalPhysics was fully blocked here, which meant wind,
+    // sail thrust, wave rocking, and ship turning all stopped too — ships
+    // (and non-commander crew standing on deck) sat completely inert during
+    // naval pre-deploy. Rowing-specific blocking now lives inside
+    // updateNavalPhysics itself (naval_battles.js — see the __preDeploymentActive
+    // checks around the player/enemy NavalRowing.applyInput calls), so the
+    // function needs to run every frame during pre-deploy for wind/sail/turn
+    // to keep working; only forward/reverse rowing thrust is suppressed.
+    wrap("updateNavalPhysics",      {});
     wrap("updateRiverPhysics",      { blockDuringPreDeploy: true });
 }
 
@@ -2319,42 +2846,49 @@ function _installDrawPatch() {
             });
             return; // Skip the real draw — nothing to show yet
         }
+        window.__blsFrameCounter = (window.__blsFrameCounter || 0) + 1;
+
         const result = orig.apply(this, arguments);
         if (window.__preDeploymentActive) {
             try { _drawDeployZoneOverlay(); } catch (e) {}
+            try { _drawPreBattleBubbles(); } catch (e) {}
         }
         return result;
     };
     window.draw.__blsPatched = true;
 }
 
-// ── Patch executeBoxFormationMove → clamp box to deploy zone ────────────────
+// ── Patch executeBoxFormationMove → (now a transparent passthrough) ─────────
+// SUPERSEDED: this used to clamp the drag box itself, using a
+// (minX, maxX, minY, maxY) sorted-box parameter convention. That does NOT
+// match the real function's actual signature — battlefield_commands.js's
+// mouseup handler calls it as (units, startX, startY, endX, endY), where
+// startX/Y is the drag START point and endX/Y is the drag END point: an
+// UNSORTED directional line (it encodes the formation's facing angle), not
+// a sorted box. Because of that mismatch, this wrapper's clamp math ended
+// up comparing Y-axis drag values against the deploy zone's X bounds (and
+// vice versa) on two of its four coordinates every time it ran — silently
+// corrupting the drag line instead of cleanly clamping it. That's what was
+// causing units to aim past the drawn blue-arrow box during deployment,
+// independent of anything else touching this command.
+//
+// The real, correct deploy-zone clamp for this command now lives where it
+// belongs: inside executeBoxFormationMove itself (battlefield_commands.js,
+// see its "PRE-DEPLOY CLAMP" comment), which clips each unit's OWN
+// destination along the ray from its current position via
+// _clipDestToZoneAlongRay — this keeps every unit walking the exact angle
+// the player drew and just stops it at the zone edge, rather than yanking
+// the whole box toward whichever zone corner is nearest (which is what
+// independent min/max clamping like this wrapper did would cause).
+//
+// This wrapper is kept only so the bootstrap readiness poll below (which
+// waits on executeBoxFormationMove.__blsPatched) still resolves normally —
+// it now does nothing but call straight through with the real signature.
 function _installBoxFormationPatch() {
     const orig = window.executeBoxFormationMove;
     if (typeof orig !== "function" || orig.__blsPatched) return;
-    window.executeBoxFormationMove = function (units, minX, maxX, minY, maxY) {
-        if (window.__preDeploymentActive && window.__playerDeployZone) {
-            const z = window.__playerDeployZone;
-            const overlapX = !(maxX < z.minX || minX > z.maxX);
-            const overlapY = !(maxY < z.minY || minY > z.maxY);
-            if (!overlapX || !overlapY) {
-                const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
-                const newCx = Math.max(z.minX + 80, Math.min(z.maxX - 80, cx));
-                const newCy = Math.max(z.minY + 30, Math.min(z.maxY - 30, cy));
-                const hw = Math.min(160, (z.maxX - z.minX) / 2 - 10);
-                const hh = Math.min(60,  (z.maxY - z.minY) / 2 - 10);
-                minX = newCx - hw; maxX = newCx + hw;
-                minY = newCy - hh; maxY = newCy + hh;
-            } else {
-                if (minX < z.minX) minX = z.minX;
-                if (maxX > z.maxX) maxX = z.maxX;
-                if (minY < z.minY) minY = z.minY;
-                if (maxY > z.maxY) maxY = z.maxY;
-                if (maxX - minX < 30) { const cx = (minX + maxX) / 2; minX = Math.max(z.minX, cx - 30); maxX = Math.min(z.maxX, cx + 30); }
-                if (maxY - minY < 30) { const cy = (minY + maxY) / 2; minY = Math.max(z.minY, cy - 30); maxY = Math.min(z.maxY, cy + 30); }
-            }
-        }
-        return orig.call(this, units, minX, maxX, minY, maxY);
+    window.executeBoxFormationMove = function (units, startX, startY, endX, endY) {
+        return orig.call(this, units, startX, startY, endX, endY);
     };
     window.executeBoxFormationMove.__blsPatched = true;
 }
@@ -2469,7 +3003,15 @@ function _runLoadingGate() {
                 Math.floor((newPct / 100) * DEPLOY_MSGS.length),
                 DEPLOY_MSGS.length - 1
             );
-            _statusEl.textContent = DEPLOY_MSGS[msgIdx];
+			
+if (window.inSiegeBattle) {
+    _statusEl.textContent = "Manning the Walls";
+} else if (window.inNavalBattle) {
+    _statusEl.textContent = "All Hands on Deck";
+} else {
+    _statusEl.textContent = DEPLOY_MSGS[msgIdx];
+}
+			
         }
 
         // ── FIX: Re-sync the troop counts on every tick once units exist. ──
@@ -2487,7 +3029,7 @@ function _runLoadingGate() {
             try { _refreshLoadingScreenData(); } catch (e) {}
             clearInterval(gate);
             window.__gbfProgress = null;
-            // __battleLoadingActive is cleared by _launchDirectly() after the 520ms fade completes.
+            // __battleLoadingActive is cleared by _enterPreDeployment() after the 520ms fade completes.
             hideBattleLoadingScreen();
             if (window.keys) for (const k in window.keys) window.keys[k] = false;
         }
@@ -2642,7 +3184,29 @@ function _bootstrap() {
             (window.updateBattleUnits       && window.updateBattleUnits.__blsPatched) &&
             (window.executeBoxFormationMove && window.executeBoxFormationMove.__blsPatched) &&
             (window.draw                    && window.draw.__blsPatched) &&
-            (window.enterBattlefield        && window.enterBattlefield.__blsPatched);
+            (window.enterBattlefield        && window.enterBattlefield.__blsPatched) &&
+            // FIX: these launchers were being (re)patched by _patchAllLaunchers()
+            // every tick already, but were never actually CHECKED here.
+            // _wrapLaunchFn silently no-ops if its target function isn't
+            // defined yet (see the `orig.__blsPatched` guard above), so if
+            // e.g. launchCustomNavalBattle's defining script loaded a beat
+            // late, the wrap for it could be missed on every remaining tick
+            // once "enough" went true from the other four alone — poller
+            // stops, naval (or whichever launcher loaded late) never gets
+            // wrapped, no error anywhere, no loading screen on that launch
+            // type. Checking every patchable launcher here means the poller
+            // keeps retrying (still capped at the existing 80 tries / 16s)
+            // until each one that actually exists is confirmed wrapped.
+            // `!window.fnName || ...patched` (not a bare existence check) on
+            // purpose: these four are launch-type-specific and some may
+            // legitimately never be defined in a given session (e.g. no
+            // custom-siege function in a campaign-only session) — that must
+            // not permanently block "enough" from ever being true.
+            (!window.enterSiegeBattlefield   || window.enterSiegeBattlefield.__blsPatched) &&
+            (!window.executeAttackAction     || window.executeAttackAction.__blsPatched) &&
+            (!window.launchCustomBattle      || window.launchCustomBattle.__blsPatched) &&
+            (!window.launchCustomNavalBattle || window.launchCustomNavalBattle.__blsPatched) &&
+            (!window.launchCustomSiege       || window.launchCustomSiege.__blsPatched);
         if (enough || tries > 80) {
             clearInterval(poll);
             console.log("[BLS] All patches installed (tries=" + tries + ").");

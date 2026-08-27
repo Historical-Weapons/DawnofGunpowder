@@ -306,7 +306,7 @@
   function clampToMap (x, y, margin) {
     margin = margin || 60;
     const mW = (typeof W.BATTLE_WORLD_WIDTH  !== 'undefined') ? W.BATTLE_WORLD_WIDTH  : 2400;
-    const mH = (typeof W.BATTLE_WORLD_HEIGHT !== 'undefined') ? W.BATTLE_WORLD_HEIGHT : 1800;
+    const mH = (typeof W.BATTLE_WORLD_HEIGHT !== 'undefined') ? W.BATTLE_WORLD_HEIGHT : 2400;
     return {
       x: Math.max(margin, Math.min(mW - margin, x)),
       y: Math.max(margin, Math.min(mH - margin, y)),

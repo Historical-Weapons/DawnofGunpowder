@@ -1,10 +1,10 @@
 window.attritionDifficultyMultiplier = window.attritionDifficultyMultiplier ?? 1.0;
 
 // ── FIX 4: Sandbox battle troop cap (per side) ───────────────────────────────
-// NOTE: the real device-appropriate default (LOW=80 / MED=160 / HIGH=200 /
+// NOTE: the real device-appropriate default (LOW=80 / MED=170 / HIGH=260 /
 // MAX=300) is set further below, right after GRAPHICS_QUALITY_TIERS is
 // defined, so this cap starts out matching whichever tier the device
-// defaults to (MED on mobile, MAX on desktop) instead of a flat 100 for
+// defaults to (MED on mobile, HIGH on desktop) instead of a flat 100 for
 // everyone. Left here only as a fallback if this script somehow runs out of
 // order. The ?? below means: if a save file already set this, that value wins.
 window.maxSandboxBattleTroops = window.maxSandboxBattleTroops ?? 100;
@@ -38,21 +38,55 @@ var _SETTINGS_IS_MOBILE = (
 //  projectile + ground-effect caps), and ai_categories.js (dead-body and
 //  projectile/groundEffect lingering durations) into four simple presets.
 //
-//  PC ALWAYS RUNS MAX — there is no LOW/MED/HIGH choice on desktop, mirroring
-//  how optimization-battles.js already forces desktopBattleQuality toward
-//  100 by default. Mobile gets LOW/MED/HIGH, DEFAULTING TO MED on first run
-//  (a deliberate "moderate, untested device" baseline — not the most
-//  aggressive tier) until the player picks something else; MAX is
-//  desktop-exclusive since it assumes the larger naval map (6× vs 3×) and
-//  uncapped-by-comparison projectile/ground-effect ceilings that only
-//  desktop hardware can sustain.
+//  ALL FOUR TIERS ARE AVAILABLE ON EVERY PLATFORM. Desktop used to be
+//  hard-locked to MAX (no choice at all) while only mobile got a LOW/MED/HIGH
+//  picker — that restriction is gone. Whichever tier a player taps, the
+//  values below are written to the live global that matches their ACTUAL
+//  device (window.mobileBattleQuality on mobile, window.desktopBattleQuality
+//  on desktop — decided by _SETTINGS_IS_MOBILE at apply-time, not by the
+//  tier itself), so applyGraphicsQualityTier() works identically regardless
+//  of who picked what. MED defaults on first run on mobile (a deliberate
+//  "moderate, untested device" baseline); HIGH defaults on first run on
+//  desktop — a deliberate step down from the ceiling for an untested
+//  desktop too, not "assume every PC can handle MAX." Either device can
+//  move to any of the other three (including MAX) at any time.
 //
-//  Battlefield / naval map WORLD SIZES are intentionally excluded from every
-//  tier — those are fixed by platform in optimization-battles.js (PB3) and
-//  cannot be adjusted here. They're shown read-only in the Advanced section
-//  so the player can see what they're working with.
+//  SCALING: every numeric field below is LOW + (MAX-LOW) × pct, using the
+//  same 0% / 40% / 80% / 100% split as the real LOD bucket edges that
+//  optimization-mobile-battles.js (<40 / 40-79 / ≥80) and
+//  optimization-battles.js's _shouldLOD() (≥80 disables LOD) already branch
+//  on. Only LOW and MAX are hand-picked; MED and HIGH fall out of that same
+//  curve for every field, which is what keeps the step from HIGH→MAX from
+//  going flat on some fields and cliff-like on others.
+//
+//  MAX still assumes the larger naval map (6× vs 3×) and the highest
+//  projectile/ground-effect/troop ceilings — those don't shrink just because
+//  MAX is reachable from mobile now; a phone that opts into MAX is opting
+//  into desktop-tier costs on phone hardware, by the player's own choice.
+//
+//  Battlefield / naval map WORLD SIZES remain excluded from every tier —
+//  those stay fixed by platform in optimization-battles.js (PB3) and cannot
+//  be adjusted here regardless of tier. They're shown read-only in the
+//  Advanced section so the player can see what they're working with.
 // ────────────────────────────────────────────────────────────────────────
 
+// Every field below follows value = LOW + (MAX-LOW) × pct, pct = {LOW:0,
+// MED:0.4, HIGH:0.8, MAX:1.0}. Only the LOW and MAX endpoints are hand-picked
+// per field; MED and HIGH are computed from that curve and then rounded to
+// that field's own slider step (5 for the siege caps, 10 for troops, 100/1000
+// for the lingers) so they still land on a value the Advanced slider can
+// reach exactly. That 0/40/80/100 split isn't arbitrary — it's the same
+// bucket edges optimization-mobile-battles.js already branches on (<40 / 40-79
+// / ≥80) and the same ≥80 cutoff optimization-battles.js's _shouldLOD() uses
+// to disable desktop LOD, so a tier switch lands on a value that means the
+// same thing everywhere it's read, on either platform:
+//
+//   battleQuality          0     40     80     100
+//   bodyLingerMs         1000   1800   2600   3000
+//   projectileLingerMs  15000  27000  39000  45000
+//   siegeProjectileCap     60     70     85     90
+//   siegeGroundEffectCap   90    110    130    140
+//   maxBattleTroops        80    170    260    300
 window.GRAPHICS_QUALITY_TIERS = {
     // ── LOW ─────────────────────────────────────────────────────────────────
     // "Shitty phone" mode. Every CPU-saving throttle is turned on. OPT-IN ONLY
@@ -85,9 +119,13 @@ window.GRAPHICS_QUALITY_TIERS = {
     //   _navGetQual() there): fish/wave/seagull counts cut hardest, their
     //   per-frame update+draw runs at 30 Hz alongside MB5, and they're
     //   viewport-culled with the same 0px pixel-perfect margin as MB16.
+    //
+    // What this does on desktop instead (optimization-battles.js _shouldLOD()):
+    //   battleQuality=0 → dynLodDist = 200 world-px, the most aggressive dot
+    //   radius that formula ever produces. No frame-rate cut on desktop —
+    //   _shouldLOD() only ever touches render LOD, never simulation Hz.
     LOW: {
         label: "LOW",
-        platform: "mobile",
         battleQuality: 0,
         bodyLingerMs: 1000,
         projectileLingerMs: 15000,
@@ -100,7 +138,8 @@ window.GRAPHICS_QUALITY_TIERS = {
     // ★ DEVICE DEFAULT on mobile ★ — what every phone starts on before the
     // player touches a setting. "Moderate" is the operative word: smooth
     // enough on phones with 3 GB+ RAM, but nothing here is as aggressive as
-    // LOW and nothing here is as expensive as HIGH/MAX.
+    // LOW and nothing here is as expensive as HIGH/MAX. (Desktop defaults to
+    // HIGH — see below — but can drop to MED same as any tier.)
     //
     // FRAME RATE: all throttles OFF — simulation, units, and projectiles run
     // at full 60 Hz, identical to desktop. MED/HIGH/MAX never cut frame rate;
@@ -124,19 +163,31 @@ window.GRAPHICS_QUALITY_TIERS = {
     //   UNIT COUNT: raised well above LOW — MED's spare CPU budget (since
     //   nothing is frame-rate-throttled here) goes toward fielding more
     //   troops instead, per its core design goal.
+    //
+    //   On desktop: battleQuality=40 keeps _shouldLOD() active (still below
+    //   the ≥80 disable cutoff) at dynLodDist = 200+(40/80)×600 = 500 world-px
+    //   — dots still appear at range, just further out than LOW's 200px.
     MED: {
         label: "MED",
-        platform: "mobile",
-        battleQuality: 50,
-        bodyLingerMs: 1000,
-        projectileLingerMs: 30000,
-        siegeProjectileCap: 75,
-        siegeGroundEffectCap: 115,
-        maxBattleTroops: 160,
+        battleQuality: 40,
+        bodyLingerMs: 1800,
+        projectileLingerMs: 27000,
+        siegeProjectileCap: 70,
+        siegeGroundEffectCap: 110,
+        maxBattleTroops: 170,
     },
 
     // ── HIGH ────────────────────────────────────────────────────────────────
-    // Full desktop visual quality on mobile. All caches and throttles OFF.
+    // ★ DEVICE DEFAULT on desktop ★ — what every PC starts on before the
+    // player touches a setting. Full desktop-grade LOD on whichever device
+    // picks it: battleQuality=80 is the exact ≥80 cutoff both LOD systems
+    // key off of, so this is the first tier where dot-substitution turns off
+    // completely on EITHER platform — mobile's MB1/MB2 bypass the cache and
+    // stop dotting distant units, desktop's _shouldLOD() returns false
+    // unconditionally. MAX exists above it for players who want the ceiling
+    // (longer linger times, higher siege/troop caps — see MAX below), but an
+    // untested desktop starts here rather than assuming it can carry MAX,
+    // the same "moderate first, ceiling by choice" logic MED uses on mobile.
     //
     //   MB1  Sprite cache BYPASSED — raw draw function every frame.
     //        Full smooth animation, no frame quantization.
@@ -144,26 +195,33 @@ window.GRAPHICS_QUALITY_TIERS = {
     //   MB5  FULL RATE.
     //   MB16 Viewport cull margin = 300 px.
     //   MB17 / MB18 / MB19  DISABLED.
-    //   Only difference from PC MAX: PB3 naval map is still the smaller
-    //   mobile-sized battlefield (3× base vs 6× on desktop).
+    //   Only difference from MAX: PB3 naval map is still the smaller
+    //   platform-appropriate battlefield (3× on mobile / 6× on desktop —
+    //   map size is fixed by platform, not by tier, on both HIGH and MAX),
+    //   and the lower linger/siege-cap/troop ceilings shown in the table above.
     HIGH: {
         label: "HIGH",
-        platform: "mobile",
-        battleQuality: 100,
-        bodyLingerMs: 2000,
-        projectileLingerMs: 30000,
-        siegeProjectileCap: 90,
-        siegeGroundEffectCap: 140,
-        maxBattleTroops: 200,
+        battleQuality: 80,
+        bodyLingerMs: 2600,
+        projectileLingerMs: 39000,
+        siegeProjectileCap: 85,
+        siegeGroundEffectCap: 130,
+        maxBattleTroops: 260,
     },
 
     // ── MAX ─────────────────────────────────────────────────────────────────
-    // Desktop always runs here. Identical to HIGH for every opt-file setting,
-    // but desktop also gets the 6× naval battlefield (PB3 in optimization-
-    // battles.js) and the full desktop LOD system (desktopBattleQuality=100).
+    // The ceiling for every field in the table — no longer the desktop
+    // default (that's HIGH now, above) and no longer desktop-exclusive
+    // either. Any device can select it; a phone that does is choosing
+    // desktop-tier linger/siege/troop ceilings on phone hardware, and a
+    // desktop player who wants more than HIGH's default is one tap away.
+    // battleQuality=100 reads identically to HIGH's 80 in every LOD consumer
+    // (both are ≥80), so the two are only distinguished by the other five
+    // fields below, plus PB3's platform-fixed naval map size (6× on desktop
+    // / 3× on mobile regardless of tier — see the header note above this
+    // table).
     MAX: {
         label: "MAX",
-        platform: "desktop",
         battleQuality: 100,
         bodyLingerMs: 3000,
         projectileLingerMs: 45000,
@@ -177,32 +235,39 @@ window.GRAPHICS_QUALITY_TIERS = {
 // Mobile defaults to MED ("moderate") on first run — not LOW. LOW is reserved
 // for the player explicitly opting into max-savings mode on hardware they
 // already know is struggling; an untested device gets the middle tier first.
+// Desktop defaults to HIGH on first run, same idea — full LOD-off quality
+// without assuming every PC can carry MAX's higher linger/siege/troop
+// ceilings. Both defaults only apply once, via ??, so a save file (or a
+// mid-session tier switch) sticks instead of being stomped back to the
+// default every load. Desktop is not pinned to HIGH either — MAX (or LOW/MED)
+// is one tap away, and applyGraphicsQualityTier() below can move either
+// global to any tier's value.
 window.mobileBattleQuality  = window.mobileBattleQuality  ?? window.GRAPHICS_QUALITY_TIERS.MED.battleQuality;
-window.desktopBattleQuality = window.GRAPHICS_QUALITY_TIERS.MAX.battleQuality; // Desktop is always max — see _lockDesktopToMax() below.
+window.desktopBattleQuality = window.desktopBattleQuality ?? window.GRAPHICS_QUALITY_TIERS.HIGH.battleQuality;
 
 // ── Lingering-duration globals (read live by ai_categories.js) ──────────────
-// Mobile fallback uses MED, matching the new device default above (LOW is
-// opt-in only, not what an untested phone should silently start on).
+// Mobile fallback uses MED, desktop uses HIGH — both matching the device
+// defaults above (LOW is opt-in only, MAX is opt-in only on desktop too now).
 window.bodyLingerMs = window.bodyLingerMs ?? (
-    _SETTINGS_IS_MOBILE ? window.GRAPHICS_QUALITY_TIERS.MED.bodyLingerMs : window.GRAPHICS_QUALITY_TIERS.MAX.bodyLingerMs
+    _SETTINGS_IS_MOBILE ? window.GRAPHICS_QUALITY_TIERS.MED.bodyLingerMs : window.GRAPHICS_QUALITY_TIERS.HIGH.bodyLingerMs
 );
 window.projectileLingerMs = window.projectileLingerMs ?? (
-    _SETTINGS_IS_MOBILE ? window.GRAPHICS_QUALITY_TIERS.MED.projectileLingerMs : window.GRAPHICS_QUALITY_TIERS.MAX.projectileLingerMs
+    _SETTINGS_IS_MOBILE ? window.GRAPHICS_QUALITY_TIERS.MED.projectileLingerMs : window.GRAPHICS_QUALITY_TIERS.HIGH.projectileLingerMs
 );
 
 // ── Siege cap globals (read live by optimization-siege.js) ──────────────────
 window.siegeProjectileCap = window.siegeProjectileCap ?? (
-    _SETTINGS_IS_MOBILE ? window.GRAPHICS_QUALITY_TIERS.MED.siegeProjectileCap : window.GRAPHICS_QUALITY_TIERS.MAX.siegeProjectileCap
+    _SETTINGS_IS_MOBILE ? window.GRAPHICS_QUALITY_TIERS.MED.siegeProjectileCap : window.GRAPHICS_QUALITY_TIERS.HIGH.siegeProjectileCap
 );
 window.siegeGroundEffectCap = window.siegeGroundEffectCap ?? (
-    _SETTINGS_IS_MOBILE ? window.GRAPHICS_QUALITY_TIERS.MED.siegeGroundEffectCap : window.GRAPHICS_QUALITY_TIERS.MAX.siegeGroundEffectCap
+    _SETTINGS_IS_MOBILE ? window.GRAPHICS_QUALITY_TIERS.MED.siegeGroundEffectCap : window.GRAPHICS_QUALITY_TIERS.HIGH.siegeGroundEffectCap
 );
 
 // ── Max battle troops per side, device-appropriate default ──────────────────
 // Overrides the flat 100-default set near the top of this file, now that the
 // tier table exists to pull a real device-correct number from.
 window.maxSandboxBattleTroops = (window.maxSandboxBattleTroops === 100 || window.maxSandboxBattleTroops == null) ? (
-    _SETTINGS_IS_MOBILE ? window.GRAPHICS_QUALITY_TIERS.MED.maxBattleTroops : window.GRAPHICS_QUALITY_TIERS.MAX.maxBattleTroops
+    _SETTINGS_IS_MOBILE ? window.GRAPHICS_QUALITY_TIERS.MED.maxBattleTroops : window.GRAPHICS_QUALITY_TIERS.HIGH.maxBattleTroops
 ) : window.maxSandboxBattleTroops;
 
 // ── Naval viewport-cull margin default ───────────────────────────────────────
@@ -214,7 +279,7 @@ window.NAVAL_CULL_PADDING = window.NAVAL_CULL_PADDING ?? (
 );
 
 // ── Currently active tier name (or "CUSTOM" once an Advanced value is hand-edited) ──
-window.currentGraphicsQualityTier = window.currentGraphicsQualityTier ?? (_SETTINGS_IS_MOBILE ? "MED" : "MAX");
+window.currentGraphicsQualityTier = window.currentGraphicsQualityTier ?? (_SETTINGS_IS_MOBILE ? "MED" : "HIGH");
 
 /**
  * Applies every value in a preset tier bundle to the live globals that
@@ -222,12 +287,21 @@ window.currentGraphicsQualityTier = window.currentGraphicsQualityTier ?? (_SETTI
  * and optimization-siege.js read from at call-time. Safe to call mid-battle —
  * every consumer re-reads these globals on its next tick rather than caching
  * them at install time.
+ *
+ * Every tier is available on every device now, so which quality global gets
+ * written is decided by _SETTINGS_IS_MOBILE (the device this code is
+ * actually running on) rather than anything on the tier itself — tiers no
+ * longer carry a `platform` tag. Writing by tier tag would send a desktop
+ * player's pick to window.mobileBattleQuality, which optimization-mobile-
+ * battles.js never even reads (that whole file no-ops on desktop — see its
+ * `if (!IS_MOBILE) return;` guard) — desktopBattleQuality would silently
+ * stay wherever it was and the slider would look like it did nothing.
  */
 function applyGraphicsQualityTier(tierName) {
     const tier = window.GRAPHICS_QUALITY_TIERS[tierName];
     if (!tier) return;
 
-    if (tier.platform === "mobile") {
+    if (_SETTINGS_IS_MOBILE) {
         window.mobileBattleQuality = tier.battleQuality;
     } else {
         window.desktopBattleQuality = tier.battleQuality;
@@ -484,34 +558,30 @@ window.SettingsUI = {
         const CUSTOM_YELLOW = "#ffd54f";
         const PRESET_GOLD   = "#d4af37";
 
-        let presetButtonsHtml;
-        if (_SETTINGS_IS_MOBILE) {
-            presetButtonsHtml = ["LOW", "MED", "HIGH"].map(name => {
-                const isActive = current === name; // never true while isCustom, by design
-                return `
-                    <button class="gq-preset-btn" data-tier="${name}" style="
-                        flex:1; padding:10px 4px; margin:0 3px; cursor:pointer;
-                        font-family:monospace; font-weight:bold; font-size:0.85rem;
-                        border-radius:6px; border:2px solid ${isActive ? PRESET_GOLD : '#5d4037'};
-                        background:${isActive ? PRESET_GOLD : '#2a2a2a'};
-                        color:${isActive ? '#1a1a1a' : '#ccc'};
-                    ">${name}</button>`;
-            }).join("");
-        } else {
-            // Desktop's locked badge turns yellow too while CUSTOM, since the
-            // Advanced sliders are still hand-editable even with MAX forced.
-            presetButtonsHtml = `
-                <button disabled style="
-                    flex:1; padding:10px 4px; cursor:not-allowed;
+        // All four tiers, on every platform — desktop used to get a single
+        // disabled "MAX" badge here instead of real buttons; that lock is
+        // gone, so both platforms now render the same four-button row. Which
+        // global a click writes to (mobileBattleQuality vs desktopBattleQuality)
+        // is still decided per-device, inside applyGraphicsQualityTier().
+        const presetButtonsHtml = ["LOW", "MED", "HIGH", "MAX"].map(name => {
+            const isActive = current === name; // never true while isCustom, by design
+            return `
+                <button class="gq-preset-btn" data-tier="${name}" style="
+                    flex:1; padding:10px 4px; margin:0 3px; cursor:pointer;
                     font-family:monospace; font-weight:bold; font-size:0.85rem;
-                    border-radius:6px; border:2px solid ${isCustom ? CUSTOM_YELLOW : PRESET_GOLD};
-                    background:${isCustom ? CUSTOM_YELLOW : PRESET_GOLD}; color:#1a1a1a;
-                ">${isCustom ? "CUSTOM" : "MAX"}</button>`;
-        }
+                    border-radius:6px; border:2px solid ${isActive ? PRESET_GOLD : '#5d4037'};
+                    background:${isActive ? PRESET_GOLD : '#2a2a2a'};
+                    color:${isActive ? '#1a1a1a' : '#ccc'};
+                ">${name}</button>`;
+        }).join("");
 
-        const tierHint = _SETTINGS_IS_MOBILE
-            ? "LOW: max savings — 30 Hz AI/naval, 4-frame sprites, locked-in zoom, fewer troops, pixel-tight cull (siege + naval included) &nbsp;·&nbsp; MED (default): full 60 Hz on every unit/projectile/ship — no frame-rate cuts at all — more troops instead, moderate cull &nbsp;·&nbsp; HIGH: full desktop visual quality, most troops"
-            : "Desktop always runs at maximum quality (locked). No LOD, sprite caching, or culling shortcuts are applied.";
+        // Same hint on both platforms — the tiers now mean the same thing
+        // everywhere. Only the underlying mechanism differs by device (mobile:
+        // sprite cache + AI throttle + zoom lock; desktop: LOD dot-substitution
+        // radius) and that's covered in the GRAPHICS_QUALITY_TIERS comments
+        // above for whoever's reading the source, not needed in this tooltip.
+        const tierHint =
+            "LOW: max savings — 30 Hz AI/naval (mobile), tightest LOD radius (desktop), locked-in zoom on mobile, fewest troops &nbsp;·&nbsp; MED (mobile default): full 60 Hz, no frame-rate cuts, moderate LOD/cull, more troops &nbsp;·&nbsp; HIGH (desktop default): LOD/dot-substitution off on either platform, high troop cap &nbsp;·&nbsp; MAX: same LOD as HIGH plus the longest linger times, highest siege caps, and most troops — the ceiling for every field, on either platform";
 
         const customNotice = isCustom
             ? `<div style="font-size:0.65rem; color:${CUSTOM_YELLOW}; margin-top:6px; font-style:italic;">
@@ -520,9 +590,11 @@ window.SettingsUI = {
             : "";
 
         // Device-correct default for the Reset button's label/target.
-        // Mobile resets to MED (moderate baseline), not LOW — LOW is an
-        // opt-in choice for players who already know their device struggles.
-        const deviceDefaultTier = _SETTINGS_IS_MOBILE ? "MED" : "MAX";
+        // Mobile resets to MED (moderate baseline), desktop resets to HIGH
+        // (full quality, not the MAX ceiling) — neither resets to the most
+        // aggressive OR the most expensive tier; both are opt-in choices for
+        // players who already know what they want.
+        const deviceDefaultTier = _SETTINGS_IS_MOBILE ? "MED" : "HIGH";
 
         return `
             <label>GRAPHICS QUALITY — <span id="gq-tier-label" style="color:${isCustom ? CUSTOM_YELLOW : PRESET_GOLD};">${current}</span></label>
@@ -563,15 +635,14 @@ window.SettingsUI = {
                 id: "gq-adv-battlequality", label: "Battle Quality (LOD %)",
                 value: _SETTINGS_IS_MOBILE ? window.mobileBattleQuality : window.desktopBattleQuality,
                 min: 0, max: 100, step: 1,
-                // LOCKED on desktop — desktop always runs at MAX (100%). Letting
-                // this slider drop desktopBattleQuality below 100 here would
-                // silently contradict "desktop is always max" everywhere else
-                // in this file, so the input itself is disabled rather than
-                // just documented as a convention.
-                locked: !_SETTINGS_IS_MOBILE,
+                // No longer locked on either platform — desktop can drop
+                // desktopBattleQuality below 100 same as mobile can move
+                // mobileBattleQuality. Dragging this away from a preset's exact
+                // value still flips the tier label to CUSTOM (see the `input`
+                // handler below), same as any other Advanced row.
                 desc: _SETTINGS_IS_MOBILE
-                    ? "0% (LOW): 4-frame sprite cache, 30 Hz AI, tight zoom + cull. 50% (MED): 12-frame cache, full 60 Hz, no restrictions. 100% (HIGH): cache bypassed, full desktop animation."
-                    : "Locked at 100% on desktop. Desktop hardware always runs at maximum battle quality — there is no LOD or sprite caching to trade away.",
+                    ? "0% (LOW): 4-frame sprite cache, 30 Hz AI, tight zoom + cull. 40% (MED): cache still active, full 60 Hz, no zoom lock. 80%+ (HIGH/MAX): cache bypassed, full smooth animation."
+                    : "0% (LOW): tightest LOD dot-substitution radius (200px). 40% (MED): moderate radius (500px). 80%+ (HIGH/MAX): LOD disabled — every unit always renders as a full sprite.",
             },
             {
                 id: "gq-adv-bodylinger", label: "Dead Body Lingering (ms)",
@@ -648,10 +719,13 @@ window.SettingsUI = {
 
         // ── Reset to Default ──────────────────────────────────────────────
         // Snaps every graphics-related global back to whichever tier is
-        // correct for THIS device — LOW on mobile, MAX on desktop — read
-        // from data-default-tier set at render time in
-        // _renderGraphicsQualitySection (deviceDefaultTier), so this never
-        // needs its own separate mobile/desktop branch to drift out of sync.
+        // correct for THIS device — MED on mobile, HIGH on desktop (was MAX
+        // on desktop until the device default changed; before that it was
+        // briefly mis-documented here as "LOW on mobile" — deviceDefaultTier
+        // below is the actual source of truth) — read from data-default-tier
+        // set at render time in _renderGraphicsQualitySection
+        // (deviceDefaultTier), so this never needs its own separate
+        // mobile/desktop branch to drift out of sync.
         const resetBtn = document.getElementById("gq-reset-default-btn");
         if (resetBtn) {
             resetBtn.addEventListener("click", () => {
@@ -668,16 +742,14 @@ window.SettingsUI = {
             {
                 id: "gq-adv-battlequality",
                 apply: (v) => {
-                    // DEFENSE IN DEPTH: the input is `disabled` on desktop (see
-                    // _renderAdvancedRows' `locked` flag) so this branch should
-                    // never actually fire there — disabled inputs don't emit
-                    // `input` events. Kept anyway so desktopBattleQuality can
-                    // never be set below MAX even if something else dispatches
-                    // a synthetic event on this element.
+                    // Writes to whichever global this device actually reads —
+                    // same device check applyGraphicsQualityTier() uses. No
+                    // longer forced to MAX.battleQuality on desktop; the desktop
+                    // branch now takes the dragged value like every other row.
                     if (_SETTINGS_IS_MOBILE) {
                         window.mobileBattleQuality = v;
                     } else {
-                        window.desktopBattleQuality = window.GRAPHICS_QUALITY_TIERS.MAX.battleQuality;
+                        window.desktopBattleQuality = v;
                     }
                 },
             },
@@ -690,7 +762,7 @@ window.SettingsUI = {
         bindings.forEach(b => {
             const input  = document.getElementById(b.id);
             if (!input) return;
-            if (input.disabled) return; // locked row (desktop battle quality) — nothing to bind
+            if (input.disabled) return; // no Advanced row is locked by default anymore, but skip defensively if one ever is
 
             input.addEventListener("input", (e) => {
                 const val = parseFloat(e.target.value);

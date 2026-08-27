@@ -448,6 +448,8 @@ function toggleDipLog() {
     <script src="menu/unit-encyclopedia.js"></script>
     <script src="battle_engine/infscript.js"></script>
     <script src="battle_engine/cavscript.js"></script>
+	    <script src="battle_engine/units_expansion.js"></script>
+
     <script src="battle_engine/direction_patch.js"></script>
     <script src="core/player_overlay_system.js"></script>
     <script src="battle_engine/leave_battle_roster.js"></script>
@@ -467,12 +469,13 @@ function toggleDipLog() {
 	<script src="story/scenario_import_triggerNPC.js"></script>   
    <script src="story/s1/hakata_bay_scenario.js"></script>  
      <script src="story/s2/mongolconquestxia_scenario.js"></script>   
-     <script src="story/s3/Songjinwar_scenario.js"></script>   
+     <script src="story/s3/lifeonwall_scenario.js"></script>   
     <script src="menu/menu.js"></script>
     <script src="menu/menu-units-guide.js"></script>
   
 
     <script src="menu/loading-screen.js"></script>
+    <script src="menu/unit-hover-tooltip.js"></script>
     <script src="core/audio_system.js"></script>
     <script src="core/soundeffects.js"></script>
     <script src="menu/custom_battle_gui.js"></script>
@@ -483,6 +486,8 @@ function toggleDipLog() {
     <script src="menu/battle-loading-screen.js"></script>
 	
 	
+    <script src="menu/survivalMode.js"></script>
+	  <script src="menu/survivalStructures.js"></script>
     <script src="battle_engine/siege_system.js"></script>
     <script src="core/faction_dynamics.js"></script>
     <script src="sandboxmode/sandboxmode_overworld.js"></script>
@@ -540,6 +545,7 @@ function toggleDipLog() {
         const sandboxGameBtn = allBtns.find(b => b.innerText.includes("Sandbox Game"));
         const campaignBtn = allBtns.find(b => b.innerText.includes("Campaign Mode"));
         const customBattleBtn = allBtns.find(b => b.innerText.includes("Custom Battle"));
+        const survivalBtn = allBtns.find(b => b.innerText.includes("Survival"));
         const loadGameBtn = allBtns.find(b => b.innerText.includes("Load Game"));
         
         // Find root UI buttons
@@ -553,7 +559,7 @@ function toggleDipLog() {
             
             // Group arrays
             const scenarioBtns = [launchBtn, editorBtn, sandboxImportBtn, story1Btn, story2Btn];
-            const playBtns = [campaignBtn, sandboxGameBtn, customBattleBtn, loadGameBtn].filter(Boolean);
+            const playBtns = [campaignBtn, sandboxGameBtn, customBattleBtn, survivalBtn, loadGameBtn].filter(Boolean);
             const rootBtns = [manualBtn, unitsBtn, optionsBtn].filter(Boolean); 
 
             // --- SURGERY: DYNAMIC WIDTH CLONING ---

@@ -76,7 +76,7 @@ const FactionUnitRules = {
     bannedRoles: [], // Clear this to allow roles like Cavalry (which Elephants use)
     bannedUnits: [
         "Horse Archer", "War Elephant", "Slinger","Heavy Horse Archer", "Lancer", "Heavy Lancer", 
-        "Elite Lancer", "Keshig", "Camel Cannon", "Hand Cannoneer", "Rocket","Heavy Crossbowman", "Repeater Crossbowman", "Glaiveman","Heavy Two Handed"
+        "Elite Lancer", "Keshig", "Cannon", "Hand Cannoneer", "Rocket","Heavy Crossbowman", "Repeater Crossbowman", "Glaiveman","Heavy Two Handed"
     ] // Manually exclude all "Horse-like" names and specific tech
 },
 
@@ -84,7 +84,7 @@ const FactionUnitRules = {
     bannedRoles: [], // Clear this to allow elephants
     bannedUnits: [
         "Horse Archer", "Heavy Horse Archer", "Lancer", "Heavy Lancer", 
-        "Elite Lancer", "Keshig", "Camel Cannon","Heavy Firelance", "Firelance", "Bomb", "Slinger", "Hand Cannoneer", "Rocket","Heavy Crossbowman", "Repeater Crossbowman", "Glaiveman"
+        "Elite Lancer", "Keshig", "Cannon","Heavy Firelance", "Firelance", "Bomb", "Slinger", "Hand Cannoneer", "Rocket","Heavy Crossbowman", "Repeater Crossbowman", "Glaiveman"
     ] 
 },
         "Great Khaganate": {
@@ -95,13 +95,13 @@ const FactionUnitRules = {
                 "Rocket", "Repeater Crossbowman"
             ],
             // Then we ban all "Infantry" role units EXCEPT the "Militia"
-            bannedUnits: ["Glaiveman", "War Elephant", "Slinger","Camel Cannon","Elite Lancer"] 
+            bannedUnits: ["Glaiveman", "War Elephant", "Slinger","Cannon","Elite Lancer"] 
         },
 
         "Yamato Clans": {
             // No gunpowder, no crossbows, no elephants.
             bannedRoles: ["gunner", "mounted_gunner", "firelance", "Rocket", "crossbow"],
-            bannedUnits: ["War Elephant", "Poison Crossbowman", "Repeater Crossbowman", "Camel Cannon", "Keshig","Slinger","Elite Lancer","Shielded Infantry", "Javelinier"]
+            bannedUnits: ["War Elephant", "Poison Crossbowman", "Repeater Crossbowman", "Cannon", "Keshig","Slinger","Elite Lancer","Shielded Infantry", "Javelinier"]
         },
 
         "Xiaran Dominion": {
@@ -112,22 +112,22 @@ const FactionUnitRules = {
         "Hong Dynasty": {
             bannedRoles: [], 
             // Banned Xia's unique tech and the nomad elites
-            bannedUnits: ["War Elephant", "Keshig", "Camel Cannon","Slinger","Javelinier", "Poison Crossbowman","Elite Lancer", "Hand Cannoneer", "Lancer", "Heavy Lancer","Horse Archer","Heavy Firelance"] 
+            bannedUnits: ["War Elephant", "Keshig", "Cannon","Slinger","Javelinier", "Poison Crossbowman","Elite Lancer", "Hand Cannoneer", "Lancer", "Heavy Lancer","Horse Archer","Heavy Firelance"] 
         },
 
         "Jinlord Confederacy": {
             bannedRoles: ["Rocket", "bomb"], 
-            bannedUnits: ["War Elephant","Heavy Lancer", "Camel Cannon", "Keshig","Slinger","Javelinier", "Poison Crossbowman", "Repeater Crossbowman", "Glaiveman","Lancer","Crossbowman"]
+            bannedUnits: ["War Elephant","Heavy Lancer", "Cannon", "Keshig","Slinger","Javelinier", "Poison Crossbowman", "Repeater Crossbowman", "Glaiveman","Lancer","Crossbowman"]
         },
 
         "Goryun Kingdom": {
             bannedRoles: ["mounted_gunner", "gunner"],
-            bannedUnits: ["War Elephant", "Camel Cannon", "Hand Cannoneer", "Keshig","Slinger","Javelinier", "Poison Crossbowman","Elite Lancer","Heavy Horse Archer","Heavy Lancer","Heavy Two Handed", "Heavy Crossbowman", "Glaiveman","Light Two Handed","Lancer"]
+            bannedUnits: ["War Elephant", "Cannon", "Hand Cannoneer", "Keshig","Slinger","Javelinier", "Poison Crossbowman","Elite Lancer","Heavy Horse Archer","Heavy Lancer","Heavy Two Handed", "Heavy Crossbowman", "Glaiveman","Light Two Handed","Lancer"]
         },
 
         "High Plateau Kingdoms": {
             bannedRoles: ["gunner", "mounted_gunner", "Rocket", "bomb", "firelance"],
-            bannedUnits: ["War Elephant", "Camel Cannon", "Hand Cannoneer", "Heavy Lancer", "Elite Lancer", "Keshig", "Poison Crossbowman", "Repeater Crossbowman","Crossbowman","Heavy Crossbowman","Heavy Two Handed", "Glaiveman","Heavy Horse Archer"]
+            bannedUnits: ["War Elephant", "Cannon", "Hand Cannoneer", "Heavy Lancer", "Elite Lancer", "Keshig", "Poison Crossbowman", "Repeater Crossbowman","Crossbowman","Heavy Crossbowman","Heavy Two Handed", "Glaiveman","Heavy Horse Archer"]
         }
     };
 
@@ -668,7 +668,18 @@ window.__cbPanels[side] = {
         let visType = "peasant";
         const role = template.role;
         if (role === ROLES.CAVALRY || role === ROLES.MOUNTED_GUNNER) {
-            visType = unitKey === "War Elephant" ? "elephant" : (unitKey.includes("Camel") ? "camel" : "cavalry");
+            // ROBUST FIX: the roster key itself got renamed from
+            // "Camel Cannon" to "Cannon" (not just the display .name),
+            // so the unitKey === "Camel Cannon" check silently stopped
+            // matching and this unit fell through to plain "cavalry"
+            // (default lancer visuals). Now gated on role instead —
+            // ROLES.MOUNTED_GUNNER is unique to the Cannon unit, so this
+            // can't be broken by renaming the key/name again. The Camel
+            // substring check below is left untouched for any future
+            // camel-mounted (non-gunner) unit.
+            visType = unitKey === "War Elephant" ? "elephant"
+                : role === ROLES.MOUNTED_GUNNER ? "camel_cannon"
+                : (unitKey.includes("Camel") ? "camel" : "cavalry");
         } else if (role === ROLES.HORSE_ARCHER) visType = "horse_archer";
         else if (role === ROLES.PIKE || unitKey.includes("Glaive")) visType = "spearman";
         else if (role === ROLES.SHIELD) visType = "sword_shield";
@@ -682,7 +693,7 @@ window.__cbPanels[side] = {
         else if (role === ROLES.ROCKET) visType = "rocket";
 
         // Draw it statically (Frame 10, not moving)
-        if (["cavalry", "elephant", "camel", "horse_archer"].includes(visType)) {
+        if (["cavalry", "elephant", "camel", "horse_archer", "camel_cannon"].includes(visType)) {
             drawCavalryUnit(ctx, 0, 0, false, 10, color, false, visType, side, unitKey, false, 0, 10, dummyUnit, 0);
         } else {
             drawInfantryUnit(ctx, 0, 0, false, 10, color, visType, false, side, unitKey, false, 0, 10, dummyUnit, 0);
@@ -888,9 +899,22 @@ function startCustomBattleMonitor() {
             window.__CUSTOM_BATTLE_ENDED__ = true;   // lock immediately
             clearInterval(window.cbCustomBattleMonitor);
 
-            if (typeof window.leaveBattlefield === "function") {
-                window.leaveBattlefield();
-            }
+            // SURGERY: matches the P-key exit handler's fix in
+            // sandboxmode_update.js — hard reload for custom mode instead of
+            // routing through window.leaveBattlefield()/handleCustomBattleExit.
+            // This call site was never hit by the bare-identifier hijack-bypass
+            // bug (window.leaveBattlefield() is a real property access, so it
+            // always resolved to the hijacked handleCustomBattleExit correctly),
+            // but per user request it gets the same reload treatment for
+            // consistency — one guaranteed-clean exit behavior for all custom
+            // battle end conditions (manual P-exit, auto win/loss detection),
+            // rather than two different code paths with two different
+            // reliability profiles. Sandbox/story mode never call this
+            // function at all — it's custom_battle_gui.js-only — so no
+            // __IS_CUSTOM_BATTLE__ guard is needed here the way it was in the
+            // shared sandboxmode_update.js handler.
+            console.log("[CustomBattleMonitor] Battle ended — hard reloading to guarantee clean state.");
+            window.location.reload();
         }
     }, 250);
 }
@@ -980,8 +1004,8 @@ window.__IS_CUSTOM_BATTLE__ = true; // <--- NEW SURGERY
                 y: BATTLE_WORLD_HEIGHT - 100, 
                 hp: 150, 
                 maxHealth: 150, 
-                baseSpeed: 2, 
-                speed: 2,     
+                baseSpeed: 23, 
+                speed: 23,     
                 faction: playerSetup.faction,
                 state: "idle",  
                 frame: 0,
@@ -989,6 +1013,24 @@ window.__IS_CUSTOM_BATTLE__ = true; // <--- NEW SURGERY
                 roster: playerSetup.roster
             };
         }
+
+        // FIX: baseSpeed/speed were only ever set inside the "create window.player"
+        // branch above, which only runs once per page load (first battle ever).
+        // On every battle after that, window.player already exists, so that
+        // branch is skipped and the commander keeps whatever baseSpeed was left
+        // over from the OVERWORLD (baseSpeed: 15, further scaled down each tick
+        // by starvPenalty/troopPenalty/tile speed — see sandboxmode_update.js).
+        // Unconditionally re-assert the battle-scale speed here, every launch.
+        //
+        // NOTE ON THE VALUE 23: calculateMovement() applies its OWN internal
+        // *0.5 multiplier on top of the (baseSpeed/4)*0.70 done at the call
+        // site in sandboxmode_update.js. baseSpeed=35 nets an effective
+        // ~3.06 px/frame, which cleared Heavy Lancer's range but tested too
+        // fast in practice. 23 = 35 * 0.65 (a flat 35% cut, since the formula
+        // is linear in baseSpeed), netting ~1.99 px/frame. Tune this single
+        // constant if it still needs adjusting rather than the formula itself.
+        window.player.baseSpeed = 23;
+        window.player.speed = 23;
 
         // 🔴 FIX 3: DEFINE CAMERA *BEFORE* DRAW IS CALLED
         window.camera = {
@@ -1041,10 +1083,20 @@ else {
             // --- EXISTING FIELD BATTLE LOGIC ---
             // FIX: Set dimensions BEFORE generation so the canvas and arrays are built correctly!
             BATTLE_WORLD_WIDTH = 2400;
-            // SURGERY: Assign 1200 to River, 1800 to Land
-            BATTLE_WORLD_HEIGHT = (selectedMap === "River") ? 1200 : 1800; 
+            // SURGERY: Assign 1200 to River (narrow crossing, unchanged).
+            // Land is now SQUARE (2400x2400, was 2400x1800) to match
+            // battlefield_launch.js, ahead of the upcoming 4-direction
+            // (N/S/E/W) start-position randomization.
+            BATTLE_WORLD_HEIGHT = (selectedMap === "River") ? 1200 : 2400; 
             BATTLE_COLS = Math.floor(BATTLE_WORLD_WIDTH / (typeof BATTLE_TILE_SIZE !== 'undefined' ? BATTLE_TILE_SIZE : 8));
             BATTLE_ROWS = Math.floor(BATTLE_WORLD_HEIGHT / (typeof BATTLE_TILE_SIZE !== 'undefined' ? BATTLE_TILE_SIZE : 8));
+
+            // SURGERY: Roll this battle's random 8-direction spawn assignment
+            // (see computeSpawnGeometry/pickBattleSpawnAssignment in
+            // battlefield_launch.js — shared global, not redefined here).
+            if (typeof pickBattleSpawnAssignment === 'function') {
+                window.battleSpawnAssignment = pickBattleSpawnAssignment();
+            }
 
             // Generate the Map Canvas NOW, using the correct dimensions
             // v4.7.0 CHUNKING: generateBattlefield now takes an optional
@@ -1094,17 +1146,6 @@ else {
 // --- SURGICAL HOOK: Abyss Check ---
             battleEnvironment.units.forEach((unit, index) => {
                 lastResort(unit, BATTLE_WORLD_WIDTH, BATTLE_WORLD_HEIGHT, unit.side, index);
-            });
-			
-            // Lazy General Auto-Charge
-            battleEnvironment.units.forEach(u => {
-                if (u.side === "player" && !u.isCommander && !u.disableAICombat) {
-                    u.selected = true;           
-                    u.hasOrders = true;          
-                    u.orderType = "seek_engage"; 
-                    u.orderTargetPoint = null;   
-                    u.formationTimer = 120;      
-                }
             });
 
 // Use the player commander as the battle anchor
@@ -1173,6 +1214,16 @@ else {
     // === undefined and returns immediately — the BLS never intercepts non-siege battles.
     window.launchCustomBattle = launchCustomBattle;
 
+    // SURVIVAL MODE: read-only export of the faction-unique-unit rules, so
+    // battle_engine/survival_mode.js's recruit shop and starting roster
+    // respect the same per-faction restrictions Custom Battle uses. Survival
+    // no longer depends on this file for spawning (it has its own
+    // self-contained spawner) — this is the one piece it still borrows, and
+    // it degrades safely (falls back to "every unit available") if this
+    // file isn't loaded at all.
+    window.getAvailableUnitsForFaction = getAvailableUnitsForFaction;
+    window.FactionUnitRules = FactionUnitRules;
+
 // --- CUSTOM SPAWNER FOR THIS UI (REWRITTEN: MIRRORED COMMANDER & FALLBACK ARMOR) ---
     function customSpawnLoop(rosterArray, side, faction, color) {
         // SURGERY: Scaled Enemy Spawning
@@ -1195,6 +1246,22 @@ else {
         // Group identical units together so formations look clean
         let sortedRoster = [...rosterArray].sort();
 
+        // SURGERY FIX: geo/oldForwardSign are used below (per-unit offset
+        // block in the forEach, and the commander x/y block further down)
+        // but were never declared in this function. This mirrors deployArmy()
+        // in battlefield_launch.js, which this spawn-direction logic was
+        // copied from -- that version declares geo/oldForwardSign locally
+        // right before use; this copy lost the declarations. Undeclared
+        // geo threw "ReferenceError: geo is not defined" out of
+        // customSpawnLoop -> _afterCustomGenerate -> _gbfChunk, aborting
+        // battle generation before either side's commander could spawn
+        // (hence the follow-on "Player General is fallen or not found!").
+        // SURGERY: river battles now also consume battleSpawnAssignment
+        // (were explicitly excluded here before).
+        const geo = window.battleSpawnAssignment
+            ? window.battleSpawnAssignment[side] : null;
+        const oldForwardSign = (side === "player") ? -1 : 1;
+
         sortedRoster.forEach(unitKey => {
             let template = UnitRoster.allUnits[unitKey] || UnitRoster.allUnits["Militia"];
             let unitStats = Object.assign(new Troop(template.name, template.role, template.isLarge, faction), template);
@@ -1214,7 +1281,13 @@ else {
             let visType = "peasant";
             const role = template.role;
             if (role === (typeof ROLES !== 'undefined' ? ROLES.CAVALRY : "Cavalry") || role === (typeof ROLES !== 'undefined' ? ROLES.MOUNTED_GUNNER : "Mounted Gunner")) {
-                visType = unitKey === "War Elephant" ? "elephant" : (unitKey.includes("Camel") ? "camel" : "cavalry");
+                // See the identical fix earlier in this file (first
+                // visType block) — now role-driven instead of keying off
+                // unitKey === "Camel Cannon", which broke once the roster
+                // key itself was renamed to "Cannon".
+                visType = unitKey === "War Elephant" ? "elephant"
+                    : role === (typeof ROLES !== 'undefined' ? ROLES.MOUNTED_GUNNER : "Mounted Gunner") ? "camel_cannon"
+                    : (unitKey.includes("Camel") ? "camel" : "cavalry");
             } else if (role === (typeof ROLES !== 'undefined' ? ROLES.HORSE_ARCHER : "Horse Archer")) visType = "horse_archer";
             else if (role === (typeof ROLES !== 'undefined' ? ROLES.PIKE : "Pikeman") || unitKey.includes("Glaive")) visType = "spearman";
             else if (role === (typeof ROLES !== 'undefined' ? ROLES.SHIELD : "Shield")) visType = "sword_shield";
@@ -1226,6 +1299,17 @@ else {
             else if (role === (typeof ROLES !== 'undefined' ? ROLES.GUNNER : "Gunner")) visType = "gun";
             else if (role === (typeof ROLES !== 'undefined' ? ROLES.BOMB : "Bombardier")) visType = "bomb";
             else if (role === (typeof ROLES !== 'undefined' ? ROLES.ROCKET : "Rocket")) visType = "rocket";
+
+            let unitX, unitY;
+            if (geo) {
+                const acrossOffsetTotal = (currentX - centerX) + tacOffset.x;
+                const forwardOffsetTotal = (tacOffset.y * oldForwardSign) - (currentY - startY);
+                unitX = geo.ax + geo.across.x * acrossOffsetTotal + geo.forward.x * forwardOffsetTotal;
+                unitY = geo.ay + geo.across.y * acrossOffsetTotal + geo.forward.y * forwardOffsetTotal;
+            } else {
+                unitX = currentX + tacOffset.x;
+                unitY = currentY + tacOffset.y;
+            }
 
             battleEnvironment.units.push({
                 id: Math.floor(Math.random() * 999999), 
@@ -1239,8 +1323,8 @@ else {
                 maxHp: safeHP, 
                 ammo: unitStats.ammo || template.ammo || 0, 
                 renderType: visType, 
-                x: currentX + tacOffset.x + (Math.random() - 0.5) * 5,
-                y: currentY + tacOffset.y + (Math.random() - 0.5) * 5,
+                x: unitX + (Math.random() - 0.5) * 5,
+                y: unitY + (Math.random() - 0.5) * 5,
                 vx: 0, vy: 0,
                 direction: rankDir, 
                 anim: Math.floor(Math.random() * 100),
@@ -1305,9 +1389,12 @@ cmdrStats.experienceLevel = cmdrStats.experienceLevel || 5;
             maxHp: finalMaxHp,    
             ammo: finalAmmo,      // Pulls 24 directly from your General stats
             renderType: "horse_archer", 
-            x: centerX,
+            // SURGERY: direction-aware — old formula pushed the commander
+            // 80px toward the fight from (centerX, startY); now the same
+            // 80px push happens along this side's actual forward vector.
+            x: geo ? (geo.ax + geo.forward.x * 80) : centerX,
             // FIX: Change the minus (-) to a plus (+) to spawn BEHIND the army
-            y: startY -(80 * rankDir),
+            y: geo ? (geo.ay + geo.forward.y * 80) : (startY -(80 * rankDir)),
             vx: 0,
             vy: 0,
             direction: rankDir, 
@@ -1547,17 +1634,29 @@ function lastResort(unit, worldWidth, worldHeight, side, index) {
         const row = Math.floor(index / UNITS_PER_ROW);
         const col = index % UNITS_PER_ROW;
         
-        const offsetX = col * STAGGER_GAP;
-        const offsetY = row * STAGGER_GAP;
+        const offsetAcross = col * STAGGER_GAP;
+        const offsetRear = row * STAGGER_GAP;
 
-        if (side === "player") {
-            unit.x = PADDING + offsetX;
+        // SURGERY: relocate toward this side's own assigned corner/edge
+        // (was hardcoded to bottom-left for player, top-right for enemy).
+        // SURGERY: river battles now also consume battleSpawnAssignment
+        // (were explicitly excluded here before).
+        const geo = window.battleSpawnAssignment
+            ? window.battleSpawnAssignment[side] : null;
+
+        if (geo) {
+            unit.x = geo.ax + geo.across.x * offsetAcross + geo.rear.x * offsetRear;
+            unit.y = geo.ay + geo.across.y * offsetAcross + geo.rear.y * offsetRear;
+            unit.x = Math.max(PADDING, Math.min(worldWidth - PADDING, unit.x));
+            unit.y = Math.max(PADDING, Math.min(worldHeight - PADDING, unit.y));
+        } else if (side === "player") {
+            unit.x = PADDING + offsetAcross;
             // SURGERY: Always spawn relative to the ACTUAL map bottom
-            unit.y = worldHeight - PADDING - offsetY; 
+            unit.y = worldHeight - PADDING - offsetRear; 
         } else {
-            unit.x = worldWidth - PADDING - offsetX;
+            unit.x = worldWidth - PADDING - offsetAcross;
             // SURGERY: Always spawn relative to the ACTUAL map top
-            unit.y = PADDING + offsetY; 
+            unit.y = PADDING + offsetRear; 
         }
         
         console.warn(`Abyss Fix: Relocated ${unit.unitType} to Y:${unit.y} (Map Height: ${worldHeight})`);

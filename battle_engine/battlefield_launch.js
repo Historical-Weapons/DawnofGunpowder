@@ -102,9 +102,18 @@ function _blSmallFeatureTier() {
     if (tier === "MAX")                      return 3;
     if (tier === "HIGH")                     return 2;
     if (tier === "MED" || tier === "MEDIUM") return 1;
-    if (!window._SETTINGS_IS_MOBILE)         return 2;   // desktop default = HIGH
-    const mq = (typeof window.mobileBattleQuality === "number") ? window.mobileBattleQuality : 0;
-    return mq >= 100 ? 2 : mq >= 50 ? 1 : 0;
+    if (tier === "LOW")                      return 0;
+    // CUSTOM (or not yet initialised) — same 40/80 approximation as
+    // _bptQL() in battlefield_procedural_terrain.js (kept in sync with it —
+    // see that file if this one ever needs to change). Reads whichever
+    // device-appropriate global applies instead of assuming desktop is
+    // always high-tier; that assumption only held while desktop was locked
+    // to MAX. Caps at 2 (never 3) — MAX-only extras stay reserved for
+    // players who land on MAX by name.
+    const mq = window._SETTINGS_IS_MOBILE
+        ? ((typeof window.mobileBattleQuality === "number") ? window.mobileBattleQuality : 0)
+        : ((typeof window.desktopBattleQuality === "number") ? window.desktopBattleQuality : 80);
+    return mq >= 80 ? 2 : mq >= 40 ? 1 : 0;
 }
 // Scales a base cluster count by tier: LOW=0, MED=~55%, HIGH=100%, MAX=~140%.
 function _blFeatureScale(baseCount) {
@@ -1138,6 +1147,15 @@ function enterBattlefield(enemyNPC, playerObj, currentWorldMapTile) {
 
 // ---> FIX 1: FLUSH FLAGS & RESET BOUNDS <---
     window.inNavalBattle = false;
+    // SURGERY: fresh battle — any cached "last confirmed dry position" on
+    // the persistent player object is for a DIFFERENT map/ship and must not
+    // carry over into this one. See BLS_preDeployWaterSafety /
+    // applyNavalWaterCollision's wall-revert logic in battlefield_logic.js,
+    // and the matching reset in drowning_detector.js's cleanup/init wrappers
+    // (this covers the story/campaign entry point; that file covers custom
+    // battles and naval specifically — both fire on every battle start, so
+    // this is just belt-and-suspenders for the same stale-cache problem).
+    if (typeof player !== 'undefined' && player) { player._lastDeckX = null; player._lastDeckY = null; }
     window.inRiverBattle = (currentWorldMapTile && currentWorldMapTile.name === "River");
 
     // If it's a river battle, ensure world bounds are set to the land engine's 
@@ -1261,8 +1279,12 @@ if (typeof inSiegeBattle !== 'undefined' && inSiegeBattle) {
         BATTLE_WORLD_HEIGHT = rows * BATTLE_TILE_SIZE;
 } else {
         BATTLE_WORLD_WIDTH = 2400; 
-        // SURGERY: Preserve River at 1200, set standard Land to 1800 (1/2 size)
-        BATTLE_WORLD_HEIGHT = window.inRiverBattle ? 1200 : 1800; 
+        // SURGERY: Preserve River at 1200 (narrow bank-to-bank crossing).
+        // Standard Land is now SQUARE (2400x2400, was 2400x1800) so a west/east
+        // spawn has the same travel distance as a north/south one, ahead of
+        // the upcoming 4-direction (N/S/E/W) start-position randomization.
+        // 2400/8 tile size = a clean 300x300 grid.
+        BATTLE_WORLD_HEIGHT = window.inRiverBattle ? 1200 : 2400; 
 		
 		mapCols = BATTLE_WORLD_WIDTH / BATTLE_TILE_SIZE;
         mapRows = BATTLE_WORLD_HEIGHT / BATTLE_TILE_SIZE; 
@@ -1270,6 +1292,13 @@ if (typeof inSiegeBattle !== 'undefined' && inSiegeBattle) {
     // 2. Recalculate grid columns and rows based on chosen dimensions
     BATTLE_COLS = Math.floor(BATTLE_WORLD_WIDTH / BATTLE_TILE_SIZE);
     BATTLE_ROWS = Math.floor(BATTLE_WORLD_HEIGHT / BATTLE_TILE_SIZE);
+
+    // ---> SURGERY: Roll this battle's random 4-corner spawn assignment.
+    // Computed unconditionally (cheap) even for siege, though siege never
+    // consumes it (its own positioning branches before ever touching geo)
+    // — see computeSpawnGeometry/pickBattleSpawnAssignment above for the
+    // current scope note. River battles now consume this too.
+    window.battleSpawnAssignment = pickBattleSpawnAssignment();
 
     // 3. Save state and switch modes
     savedWorldPlayerState_Battle.x = playerObj.x;
@@ -1368,29 +1397,28 @@ let playerTroopCount = playerObj.troops || 0;
         playerObj.x = BATTLE_WORLD_WIDTH / 2;
         playerObj.y = BATTLE_WORLD_HEIGHT - 100;
     }
+
+    // FIX: parler-launched land/siege battles pass the LIVE OVERWORLD playerObj
+    // straight in (see parler_system.js -> executeAttackAction -> enterBattlefield),
+    // and unlike custom_battle_gui.js's setup flow, this function never resets
+    // baseSpeed/speed for battle. Unconditionally re-assert the battle-scale
+    // value here, every launch, matching custom_battle_gui.js.
+    //
+    // NOTE ON THE VALUE 23: calculateMovement() applies its OWN internal *0.5
+    // multiplier on top of the (baseSpeed/4)*0.70 done at the call site in
+    // sandboxmode_update.js. baseSpeed=35 nets an effective ~3.06 px/frame,
+    // which cleared Heavy Lancer's range but tested too fast in practice.
+    // 23 = 35 * 0.65 (a flat 35% cut, formula is linear in baseSpeed), netting
+    // ~1.99 px/frame. Keep this in sync with custom_battle_gui.js.
+    playerObj.baseSpeed = 23;
+    playerObj.speed = 23;
 	
     // =========================================================
-    // ---> SURGERY: LAZY GENERAL AUTO-CHARGE (5 + Q BY DEFAULT)
+    // ---> REMOVED: LAZY GENERAL AUTO-CHARGE (5 + Q BY DEFAULT)
+    // ---> Player attacker units no longer auto-select and auto-charge
+    // ---> (seek_engage) at battle start, in any battle type. Units now
+    // ---> stay unselected with no orders until the player commands them.
     // =========================================================
-    // GUARD: skip entirely during a siege. This used to run unconditionally,
-    // force-setting every player unit to seek_engage (land-battle "charge
-    // nearest enemy") the instant deployment finished — including custom-battle
-    // sieges, which never routed through executeSiegeAssaultAI here. That left
-    // ram_pusher/ladder_carrier units fighting between two orders (seek_engage
-    // vs whatever siege_assault assignment ran later), which reads as units
-    // wobbling left-right instead of committing to either behavior.
-    if (typeof inSiegeBattle === 'undefined' || !inSiegeBattle) {
-        battleEnvironment.units.forEach(u => {
-            // Target player troops (ignoring the player/commander avatar)
-            if (u.side === "player" && !u.isCommander && !u.disableAICombat) {
-                u.selected = true;           // Simulates '5' (Select All)
-                u.hasOrders = true;          // Activates the command state
-                u.orderType = "seek_engage"; // Simulates 'Q' (Seek & Engage)
-                u.orderTargetPoint = null;   // Clears waypoints so they use dynamic enemy pathing
-                u.formationTimer = 120;      // Brief buffer to orient before breaking line
-            }
-        });
-    }
 
 
   if (typeof AudioManager !== 'undefined') {
@@ -1464,6 +1492,79 @@ function findValidShipDeckPosition(ship, role, side) {
 }
  
 // --- ARMY DEPLOYMENT BASED ON FACTION RACE & ACTUAL ROSTER ---
+// =========================================================================
+// SURGERY: RANDOMIZED 4-CORNER BATTLE START POSITIONING
+// Replaces the old hardcoded "enemy always north, player always south."
+// Each side is randomly assigned one of the 4 map corners (NE/SE/NW/SW),
+// never the same one for both sides. The N/S/E/W edge-centers that used
+// to be in the mix have been removed per direct request (corners only —
+// no more center-top/center-bottom/center-left/center-right spawns).
+// Each assignment carries a "forward" unit vector (toward the map center
+// / the fight), its opposite "rear" (toward that side's own spawn edge —
+// also where the baggage train now anchors, see drawSupplyLines/
+// troop_draw.js), and a perpendicular "across" vector (lateral spread).
+// deployArmy, the manual retreat command, the fleeing-redirect override,
+// the low-morale "drift toward safety" nudge, the pre-battle deploy-zone
+// bands, the baggage train anchor, and the river-battle enemy AI all read
+// window.battleSpawnAssignment instead of assuming a side.
+//
+// SCOPE NOTE: wired up for non-siege land AND river battles (river was
+// previously excluded over concern that battlefield_procedural_terrain.js
+// river generation doesn't rotate with the spawn direction — per direct
+// request this is no longer a blocker: corner spawns keep both armies
+// clear of the river banks regardless of river orientation, so river
+// terrain generation itself intentionally still does NOT rotate; only
+// the spawn/baggage geometry now varies. Siege is still excluded by
+// design — siege positioning never reads battleSpawnAssignment at all.
+// Naval has its own PARALLEL corner-spawn system now too (see
+// computeNavalSpawnGeometry/pickNavalSpawnAssignment in naval_battles.js
+// and the matching recompute in custom_naval_launcher.js) — naval uses
+// its own function because this file's 600px-capped inset is too small
+// a fraction of the ~50000x32000 naval map to be useful.
+// =========================================================================
+const BATTLE_SPAWN_POSITIONS = ["NE", "SE", "NW", "SW"];
+
+function computeSpawnGeometry(posName) {
+    const insetX = Math.min(600, BATTLE_WORLD_WIDTH * 0.15);
+    const insetY = Math.min(600, BATTLE_WORLD_HEIGHT * 0.15);
+    const D = Math.SQRT1_2; // corner diagonals
+    let ax, ay, fx, fy;
+    switch (posName) {
+        case "N":  ax = BATTLE_WORLD_WIDTH / 2;      ay = insetY;                        fx = 0;  fy = 1;  break;
+        case "S":  ax = BATTLE_WORLD_WIDTH / 2;      ay = BATTLE_WORLD_HEIGHT - insetY;   fx = 0;  fy = -1; break;
+        case "E":  ax = BATTLE_WORLD_WIDTH - insetX; ay = BATTLE_WORLD_HEIGHT / 2;        fx = -1; fy = 0;  break;
+        case "W":  ax = insetX;                      ay = BATTLE_WORLD_HEIGHT / 2;        fx = 1;  fy = 0;  break;
+        case "NE": ax = BATTLE_WORLD_WIDTH - insetX; ay = insetY;                         fx = -D; fy = D;  break;
+        case "SE": ax = BATTLE_WORLD_WIDTH - insetX; ay = BATTLE_WORLD_HEIGHT - insetY;   fx = -D; fy = -D; break;
+        case "NW": ax = insetX;                      ay = insetY;                         fx = D;  fy = D;  break;
+        case "SW": ax = insetX;                      ay = BATTLE_WORLD_HEIGHT - insetY;   fx = D;  fy = -D; break;
+        default:   ax = BATTLE_WORLD_WIDTH / 2;      ay = BATTLE_WORLD_HEIGHT - insetY;   fx = 0;  fy = -1; // fallback = old player-south
+    }
+    return {
+        position: posName,
+        ax: ax, ay: ay,
+        forward: { x: fx, y: fy },   // toward map center / the fight
+        rear:    { x: -fx, y: -fy }, // toward this side's own spawn edge
+        across:  { x: -fy, y: fx }   // lateral spread, perpendicular to forward
+    };
+}
+
+function pickBattleSpawnAssignment() {
+    let a = BATTLE_SPAWN_POSITIONS[Math.floor(Math.random() * BATTLE_SPAWN_POSITIONS.length)];
+    let b;
+    do {
+        b = BATTLE_SPAWN_POSITIONS[Math.floor(Math.random() * BATTLE_SPAWN_POSITIONS.length)];
+    } while (b === a);
+
+    let playerPos = a, enemyPos = b;
+    if (Math.random() < 0.5) { playerPos = b; enemyPos = a; }
+
+    return {
+        player: computeSpawnGeometry(playerPos),
+        enemy:  computeSpawnGeometry(enemyPos)
+    };
+}
+
 function deployArmy(faction, totalTroops, side, uniqueType) {
     
     // 1. Track initial counts for the battle summary
@@ -1475,20 +1576,7 @@ function deployArmy(faction, totalTroops, side, uniqueType) {
     let spawnY = side === "player" ? BATTLE_WORLD_HEIGHT - 30 : Math.min(600, BATTLE_WORLD_HEIGHT * 0.15);
     let spawnXCenter = BATTLE_WORLD_WIDTH / 2;
     let factionColor = (typeof FACTIONS !== 'undefined' && FACTIONS[faction]) ? FACTIONS[faction].color : "#ffffff";
-    
-// =========================================================
-    // --- SURGERY: SIEGE DEFENDER OVERRIDE ---
-    // Forces enemy troops into a horizontal line deep inside the city
-    // =========================================================
-    if (typeof inSiegeBattle !== 'undefined' && inSiegeBattle && side === "enemy") {
-        let southGate = typeof overheadCityGates !== 'undefined' ? overheadCityGates.find(g => g.side === "south") : null;
-        if (southGate) {
-            // Push them 800 pixels North (deep inside the walls/plaza) — extra 300px keeps large armies clear of wall
-            spawnY = (southGate.y * BATTLE_TILE_SIZE) - 1100; 
-        } else {
-            spawnY = BATTLE_WORLD_HEIGHT - 1600; // Safe fallback deep inside walls
-        }
-    }
+ 
     let composition = [];
 // =========================================================
     // THE FIX: If it's the player, read EXACTLY what they bought
@@ -1654,37 +1742,92 @@ for (let i = 0; i < count; i++) {
             }
         } 
 
-//SIEGE 
-        else if (typeof inSiegeBattle !== 'undefined' && inSiegeBattle && side === "enemy") {
-            let southGate = typeof overheadCityGates !== 'undefined' ? overheadCityGates.find(g => g.side === "south") : null;
-            let plazaY = southGate ? (southGate.y * BATTLE_TILE_SIZE) - 1200 : (BATTLE_WORLD_HEIGHT / 2 - 300); // +300px north to keep large armies off the wall
+// SIEGE DEFENDER DEPLOYMENT
+else if (typeof inSiegeBattle !== 'undefined' && inSiegeBattle && side === "enemy") {
 
-            // 1. TIGHTEN SPACING: Lower personalSpace from 12 to 6 to pack units closer together
-            const personalSpace = 6; 
-            let angle = (i * 0.5) + (Math.random() * Math.PI * 2);
-            let dist = (Math.sqrt(i) * personalSpace) + (Math.random() * 10);
+    // City plaza is centered in the battlefield.
+    // Deploy defenders 300px south of it.
+    const siegePlazaY = BATTLE_WORLD_HEIGHT * 0.5;
+    const siegeDeployY = siegePlazaY + 300;
 
-            // 2. HORIZONTAL COMPRESSION: Multiply the X offset by 0.5 to force them toward the center line
-            finalX = spawnXCenter + (Math.cos(angle) * dist * 0.5); 
-            finalY = plazaY + (Math.random() - 0.5) * 35; // Slight Y-variance for a more natural look
+    // Narrow general line, with slight randomness.
+    const lineSpacing = 32;
+    const lineWidth = Math.min(count, 16);
+    const lineStartX = spawnXCenter - ((lineWidth - 1) * lineSpacing) / 2;
 
-            // 3. REDUCE JITTER: Lower random variance from 15 to 5 for a cleaner center cluster
-            finalX += (Math.random() - 0.5) * 5; 
-            finalY += (Math.random() - 0.5) * 10;
-        }
-		
+    let foundSafe = false;
+
+    for (let attempt = 0; attempt < 50 && !foundSafe; attempt++) {
+
+        const lineIndex = i % lineWidth;
+
+        const candidateX =
+            lineStartX +
+            lineIndex * lineSpacing +
+            (Math.random() - 0.5) * 18;
+
+        const candidateY =
+            siegeDeployY +
+            (Math.random() - 0.5) * 30;
+
+        // Reject buildings, trees, water, walls, towers, etc.
+        const hitsCityObstacle =
+            typeof isCityCollision === "function" &&
+            isCityCollision(candidateX, candidateY);
+
+        if (hitsCityObstacle) continue;
+
+        // Reject overlap with defenders already spawned.
+        const hitsOtherUnit = battleEnvironment.units.some(u =>
+            Math.hypot(u.x - candidateX, u.y - candidateY) < 28
+        );
+
+        if (hitsOtherUnit) continue;
+
+        finalX = candidateX;
+        finalY = candidateY;
+        foundSafe = true;
+    }
+
+    // Emergency fallback if every candidate was blocked.
+    if (!foundSafe) {
+        finalX = spawnXCenter + ((i % 12) - 5.5) * 32;
+        finalY = siegeDeployY;
+    }
+}
 		
 		
 		else {
-            // --- ORIGINAL GRID LOGIC ---
-            if (isFlank) {
-                let internalX = (col * spacingX) - (groupWidth / 2);
-                finalX = spawnXCenter + tacticalX + internalX;
+            // --- ORIGINAL GRID LOGIC (now direction-aware) ---
+            // acrossOffset = lateral spread (was pure world-X); the depth
+            // component (was pure world-Y via rankDir) now projects along
+            // this side's actual forward/rear vector instead. tacticalY is
+            // treated as already signed for the OLD player=-Y/enemy=+Y
+            // convention (that's what getTacticalPosition was built
+            // against), so it's normalized through oldForwardSign before
+            // combining with the new vectors — see computeSpawnGeometry /
+            // pickBattleSpawnAssignment above.
+            let acrossOffset = isFlank
+                ? (tacticalX + (col * spacingX) - (groupWidth / 2))
+                : (currentLineXOffset + (col * spacingX));
+
+            // SURGERY: river battles now also consume battleSpawnAssignment
+            // (were explicitly excluded here before — see the scope note
+            // above BATTLE_SPAWN_POSITIONS).
+            const geo = window.battleSpawnAssignment
+                ? window.battleSpawnAssignment[side] : null;
+
+            if (geo) {
+                const oldForwardSign = (side === "player") ? -1 : 1;
+                const forwardOffset = (tacticalY * oldForwardSign) - (row * spacingY);
+                finalX = geo.ax + geo.across.x * acrossOffset + geo.forward.x * forwardOffset;
+                finalY = geo.ay + geo.across.y * acrossOffset + geo.forward.y * forwardOffset;
             } else {
-                finalX = spawnXCenter + currentLineXOffset + (col * spacingX);
+                // River / fallback: original fixed north-south formula.
+                let gridY = row * spacingY * rankDir;
+                finalX = spawnXCenter + acrossOffset;
+                finalY = spawnY + tacticalY + gridY;
             }
-            let gridY = row * spacingY * rankDir;
-            finalY = spawnY + tacticalY + gridY;
             finalX += (Math.random() - 0.5) * 9;
             finalY += (Math.random() - 0.5) * 9;
         }
@@ -1713,13 +1856,25 @@ for (let i = 0; i < count; i++) {
         );
 
         if (isOutOfBounds) {
-            // Relocate to a safe cluster behind the main center line
+            // Relocate to a safe cluster just behind this side's own front
+            // line (was hardcoded to push player down / enemy up).
             let safeRadius = 150;
-            let fallbackDir = (side === "player") ? 1 : -1; // 1 pushes player down, -1 pushes enemy up
-            
-            // Scatter them near the spawn center
-            finalX = spawnXCenter + (Math.random() - 0.5) * safeRadius * 2;
-            finalY = spawnY + (fallbackDir * (40 + Math.random() * safeRadius));
+            // SURGERY: river battles now also consume battleSpawnAssignment
+            // (were explicitly excluded here before — see the scope note
+            // above BATTLE_SPAWN_POSITIONS).
+            const geo = window.battleSpawnAssignment
+                ? window.battleSpawnAssignment[side] : null;
+
+            if (geo) {
+                const acrossJitter = (Math.random() - 0.5) * safeRadius * 2;
+                const rearPush = 40 + Math.random() * safeRadius;
+                finalX = geo.ax + geo.across.x * acrossJitter + geo.rear.x * rearPush;
+                finalY = geo.ay + geo.across.y * acrossJitter + geo.rear.y * rearPush;
+            } else {
+                let fallbackDir = (side === "player") ? 1 : -1; // 1 pushes player down, -1 pushes enemy up
+                finalX = spawnXCenter + (Math.random() - 0.5) * safeRadius * 2;
+                finalY = spawnY + (fallbackDir * (40 + Math.random() * safeRadius));
+            }
             
             // Hard clamp mathematically to guarantee 100% they are inside the box
             finalX = Math.max(margin, Math.min(finalX, BATTLE_WORLD_WIDTH - margin));
@@ -1951,17 +2106,29 @@ function lastResort2(unit, worldWidth, worldHeight, side, index) {
    if (isOutOfBounds) {
         const row = Math.floor(index / UNITS_PER_ROW);
         const col = index % UNITS_PER_ROW;
-        const offsetX = col * STAGGER_GAP;
-        const offsetY = row * STAGGER_GAP;
+        const offsetAcross = col * STAGGER_GAP;
+        const offsetRear = row * STAGGER_GAP;
 
-        if (side === "player") {
-            unit.x = (worldWidth / 2) - (UNITS_PER_ROW * STAGGER_GAP / 2) + offsetX;
-            // SURGERY: Anchor to bottom of map (2000 for river, 3600 for land)
-            unit.y = worldHeight - PADDING - offsetY;
+        // SURGERY: relocate toward this side's own assigned corner (was
+        // hardcoded to bottom-center for player, top-center for enemy) —
+        // mirrors lastResort() in custom_battle_gui.js. Falls back to the
+        // old fixed anchor only if no assignment exists.
+        const geo = window.battleSpawnAssignment
+            ? window.battleSpawnAssignment[side] : null;
+
+        if (geo) {
+            unit.x = geo.ax + geo.across.x * offsetAcross + geo.rear.x * offsetRear;
+            unit.y = geo.ay + geo.across.y * offsetAcross + geo.rear.y * offsetRear;
+            unit.x = Math.max(PADDING, Math.min(worldWidth - PADDING, unit.x));
+            unit.y = Math.max(PADDING, Math.min(worldHeight - PADDING, unit.y));
+        } else if (side === "player") {
+            unit.x = (worldWidth / 2) - (UNITS_PER_ROW * STAGGER_GAP / 2) + offsetAcross;
+            // Fallback: anchor to bottom of map
+            unit.y = worldHeight - PADDING - offsetRear;
         } else {
-            unit.x = (worldWidth / 2) - (UNITS_PER_ROW * STAGGER_GAP / 2) + offsetX;
-            // SURGERY: Anchor to top of map
-            unit.y = PADDING + offsetY;
+            unit.x = (worldWidth / 2) - (UNITS_PER_ROW * STAGGER_GAP / 2) + offsetAcross;
+            // Fallback: anchor to top of map
+            unit.y = PADDING + offsetRear;
         }
     }
 }

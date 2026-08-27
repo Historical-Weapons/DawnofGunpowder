@@ -1,4 +1,70 @@
+// =========================================================================
+// SURGERY: 4-DIRECTIONAL CENTROID-BASED AIM LOCK
+// Exact mirror of infscript.js's _computeCentroidLock (used there by the
+// Repeater Crossbowman and Rocket cart) — deliberate 1:1 port, per the
+// same convention already used for this file's cannon lock. Looks at
+// where the ENEMY SIDE's units currently are ON AVERAGE (their centroid)
+// and locks toward whichever axis (X or Y) has the bigger gap: far apart
+// vertically -> lock up/down; far apart horizontally -> stay in the
+// normal side view, but pointed (via unit.facingDir, see call site) at
+// the correct side. Replaces the earlier battleSpawnAssignment.forward-
+// based guess, which only ever picked up/down — per direct request,
+// corner spawns can now put both armies side-by-side (east/west)
+// instead of north/south, so a vertical-only lock could aim at empty
+// sky in that layout.
+// =========================================================================
+function _computeCentroidLock(unit, side) {
+    let fallbackUp = (side === "player");
+    if (window.battleSpawnAssignment && window.battleSpawnAssignment[side]) {
+        fallbackUp = window.battleSpawnAssignment[side].forward.y < 0;
+    }
+    if (!unit || typeof unit.x !== 'number' || typeof unit.y !== 'number' ||
+        typeof battleEnvironment === 'undefined' || !battleEnvironment.units) {
+        return { axis: 'y', dir: fallbackUp ? -1 : 1 };
+    }
+    const enemySide = (side === "player") ? "enemy" : "player";
+    let sumX = 0, sumY = 0, n = 0;
+    for (let i = 0; i < battleEnvironment.units.length; i++) {
+        const u = battleEnvironment.units[i];
+        if (u.side === enemySide && u.hp > 0) { sumX += u.x; sumY += u.y; n++; }
+    }
+    if (n === 0) return { axis: 'y', dir: fallbackUp ? -1 : 1 };
+    const deltaX = (sumX / n) - unit.x;
+    const deltaY = (sumY / n) - unit.y;
+    if (Math.abs(deltaX) > Math.abs(deltaY)) {
+        return { axis: 'x', dir: deltaX < 0 ? -1 : 1 }; // -1 = west/left, 1 = east/right
+    }
+    return { axis: 'y', dir: deltaY < 0 ? -1 : 1 }; // -1 = up (north), 1 = down (south)
+}
+
 function drawCavalryUnit(ctx, x, y, moving, frame, factionColor, isAttacking, type, side, unitName, isFleeing, cooldown, unitAmmo, unit, reloadProgress) {
+	// VERTICAL FACING STATUS
+//
+// facingDirY:
+//   1  = facing down (toward camera)
+//  -1  = facing up/back
+//   0  = side view
+//
+// DONE (facingDirY===1):
+// - Mounted lancer melee lance.
+// - Horse archer melee lance fallback.
+// - Camel cannon sword mode.
+// - Horse archer bow animation.
+// - Camel cannon ranged mode (custom front-facing layout, not rotation).
+//
+// DONE (facingDirY===-1):
+// - Back-facing rider art for all armor tiers.
+//
+// NOT DONE:
+// - Horse/camel/elephant bodies still only use side-view sprites.
+//   Up/down mount poses remain a future feature.
+//
+// NOTES:
+// - Most weapon conversions only change pivot/rotation/translation.
+// - Camel cannon is the only full redraw/re-layout.
+// - Body armor required no back-view changes.
+// - Visuals have not been tested in-game.
+
 	
 	if (!unit || !unit.stats) {
         // If the unit object is missing or stats aren't loaded, 
@@ -14,158 +80,7 @@ function drawCavalryUnit(ctx, x, y, moving, frame, factionColor, isAttacking, ty
     // ctx.scale(-1,1) flips the entire sprite — no per-element changes needed
     ctx.scale(unit.facingDir || 1, 1);
 
-    // ═══════════════════════════════════════════════════════════════════
-    // VERTICAL FACING (bird's-eye up/down overhaul) — SESSION STATUS
-    // ═══════════════════════════════════════════════════════════════════
-    // unit.facingDirY is computed upstream in troop_draw.js's direction
-    // block (same hysteresis quality as the existing left/right
-    // facingDir). Meaning is identical to infscript.js: 1 = down-screen
-    // / toward the player camera (front view, melee weapons point
-    // down-screen), -1 = up-screen / into the canvas (back view — DONE
-    // for low-armor-tier riders, see BACKSHOT / UP below), 0 = normal
-    // side view.
-    //
-    // SCOPE PER THE USER: horse/elephant mount bodies still do NOT get
-    // an up/down pose — deferred to a later session ("mounts up and
-    // down animations if tokens allow"). The camel-cannon's wheeled gun
-    // carriage was ALSO originally filed under that same deferral (it's
-    // a vehicle, not a personal weapon), but the user explicitly asked
-    // for it anyway — see PORTED below, it's now done as a bespoke
-    // re-layout rather than a mount-body redesign, which sidesteps most
-    // of the original "does a wheel read correctly facing the viewer"
-    // concern by just re-drawing it deliberately instead of rotating it.
-    //
-    // PORTED (facingDirY===1 fully handled):
-    //   Melee — all three rider melee spots:
-    //   1. DEFAULT LANCER "MELEE LANCE" (search this file for that
-    //      comment). The regular mounted lancer's couched-lance 3-hit
-    //      combo — the main cavalry melee weapon. Redirected via a
-    //      +90° base rotation added to the existing lanceRot; the
-    //      thrust-phase reach (thrustX/thrustY) needed no separate axis
-    //      swap since it's baked into shape coordinates that already go
-    //      through that same rotation.
-    //   2. horse_archer's "OUT OF AMMO: Melee Lance Fallback" (search
-    //      "Melee Lance Fallback") — same +90° base-rotation trick, but
-    //      here the lunge (`thrust`) IS applied in the translate (before
-    //      the rotate), so it needed an explicit swap from the X to the
-    //      Y translate component to still reach toward the viewer.
-    //   3. camel-cannon / MOUNTED_GUNNER's "MODE A: SWORD COMBAT" (search
-    //      that comment) — shortsword swing, only visible once that
-    //      unit's ammo is depleted. Same pattern as #2: `lunge` (renamed
-    //      from the original inline `handX` mutation) swaps from the X
-    //      to the Y translate component for facingDown, plus the same
-    //      +90° base rotation added to swingAngle.
-    //   Ranged — bow-and-arrow, plus the camel-cannon:
-    //   4. horse_archer's "RANGED COMBAT: Has Ammo" full bow-draw cycle
-    //      (search "ACTIVE ARCHERY ANIMATION") — same two-technique
-    //      split as infscript.js's archer branch: the bowKhatra rotation
-    //      wrapper gets the same 45° base (DOWN_AIM_ANGLE, matching
-    //      infscript.js's archer after visual feedback — see that
-    //      file's archer branch for why 90°/straight-down looked wrong),
-    //      while the arrow+hand (drawn after that wrapper closes) use a
-    //      local rotateAroundPivot helper instead of an axis swap at the
-    //      source, to avoid double-rotating the string vertex that
-    //      already goes through the wrapper. The stowed lance prop
-    //      drawn just before this section is left untouched (static
-    //      accessory, same as every other stowed/strapped prop).
-    //   5. camel-cannon / MOUNTED_GUNNER's "MODE B: RANGED CANNON" —
-    //      DONE this session per direct user request (overriding the
-    //      earlier deferral — see SCOPE note above). Unlike every other
-    //      ranged weapon this session, this is a genuine RE-LAYOUT, not
-    //      a rotation: the wheelbarrow chassis, single wheel, and barrel
-    //      are individually repositioned with named constants
-    //      (CANNON_DOWN_Y / CANNON_WHEEL_Y / CANNON_BED_Y) so the wheel
-    //      and handle placement actually make sense facing the viewer,
-    //      rather than an automatic rotation of side-view art that
-    //      happened to carry a wheel along for the ride. Recoil (a
-    //      horizontal kick in the side view) becomes a vertical kick
-    //      here, matching "firing pushes the carriage away from the
-    //      target" now being up-screen instead of sideways. Muzzle
-    //      flash/smoke and the full swab/ball/ram/match-cord reload
-    //      sequence all reach down from the (now downward-pointing)
-    //      muzzle at the same relative depths/timings as the side view.
-    //      infscript.js's rocket cart (a pushed handcart, not mount-
-    //      integrated) got the same treatment and is a good side-by-
-    //      side reference if this needs revisiting.
-    //
-    // Every ported melee spot keeps its shaft/blade/limb/hilt/hand SHAPE
-    // code completely unchanged — only pivot/translate axes and base
-    // rotation offsets were redirected. The camel-cannon (#5) is the one
-    // exception that's a genuine re-layout rather than a redirect, since
-    // it's a vehicle rather than a held weapon. None of this has been
-    // visually tested (no way to render canvas output in this
-    // environment) — the camel-cannon re-layout in particular is a
-    // first-pass design following the reasoning in its own comments,
-    // not a verified result.
-    //
-    // NOT PORTED / OUT OF SCOPE FOR CAVALRY:
-    //   • Mount bodies (horse/camel/elephant) getting their own up/down
-    //     pose — explicitly deferred by the user to a later session.
-    //   • Backshot/up (facingDirY===-1) for all five ported spots above
-    //     — see BACKSHOT / UP below, now in progress.
-    // ─────────────────────────────────────────────────────────────
-    //
-    // ═══════════════════════════════════════════════════════════════════
-    // BROADER ROADMAP NOTE (applies to both infscript.js and this file,
-    // recorded here since cavscript.js is the more recently-touched
-    // file as of this session — check infscript.js top-of-function
-    // block too, they should be kept in sync):
-    //
-    // RANGED WEAPONS DOWN-FACING — DONE. Bow-and-arrow (archer,
-    // horse_archer), infscript.js's "gun" hand cannon and "Firelance"
-    // unit, infscript.js's "crossbow" (both Repeater and foot-stirrup
-    // sub-mechanisms, once the user clarified reload always stays side-
-    // view — only the aim/fire bookends redirect), infscript.js's
-    // rocket cart, and this file's camel-cannon are all ported. Nothing
-    // known remaining in this category — see the completeness sweep
-    // noted in infscript.js's matching bullet before backshot work began.
-    //
-    // JAVELINIER — no longer excluded, REVISED per direct user follow-up
-    // after seeing the archer's downward aim in action. The active
-    // javelin (both its melee-stab and throwing sub-modes, which share
-    // one render block in infscript.js) now aims perpendicular to the X
-    // axis when facing down. Bomber and Slinger were NOT re-included in
-    // this revision — still excluded, see infscript.js's "throwing"
-    // branch notes for the precise split.
-    //
-    // BACKSHOT / UP (facingDirY===-1) — DONE for ALL rider armor tiers as
-    // of this session (previously done for low-armor-tier only). See the
-    // dedicated comment block right before `drawRiderBody` (search
-    // "BACKSHOT COVERAGE UPDATE" in this file) for the full writeup —
-    // short version: riders always get SOME headgear even at low tier
-    // (unlike infantry's bare-hair fallback); low-tier designs were
-    // mostly already symmetric front-to-back (one exception, Xiaran's
-    // nasal guard, already handled); medium/high/elite/commander tiers
-    // needed real new back-view helmet art (drawBackHeadgear, a parallel
-    // function mirroring the front switch/if-chain case-for-case) since
-    // those tiers have genuine front-only detail (visors, chin ties,
-    // nasal guards, forehead bands, face-covering bandanas) that a
-    // low-tier design never had. Body ARMOR (capes/shields/pauldrons/
-    // vests) needed NO back-view changes at any tier — checked and
-    // confirmed symmetric by construction (see "RIDER ARMOR LAYERS"
-    // comment for the full reasoning); two pieces (commander's cape,
-    // elite's shield-on-back) are in fact more natural from behind.
-    // IMPORTANT DIFFERENCE FROM infscript.js: this file's isElephant
-    // early-return had to stay OUTSIDE the drawRiderBody closure —
-    // wrapping it would have changed elephant behavior (a `return`
-    // inside a closure only exits the closure, not drawCavalryUnit),
-    // verified before wrapping anything by checking save/restore
-    // balance and every `return` in the section first. No early-return
-    // branches exist in this file's weapons logic the way infscript.js's
-    // archer/crossbow melee fallbacks did, so only ONE deferred
-    // drawRiderBody() call was needed (at the true end of the
-    // function), not several.
-    // NOT DONE (unchanged from before): MOUNT UP/DOWN POSES — still
-    // deferred, whole feature. Horse/elephant bodies stay side-view-only
-    // regardless of facingDirY, for both the down case and the eventual
-    // up case. The camel-cannon's wheeled gun carriage is the one
-    // exception — see PORTED #5 above, it got a bespoke down-facing
-    // re-layout instead of waiting for general mount-facing work, since
-    // a small cart is a much smaller problem than a horse/camel/
-    // elephant body silhouette. This is a SEPARATE feature from the
-    // rider backshot work above — mount bodies were out of scope for
-    // both this session and last, and remain so.
-    // ═══════════════════════════════════════════════════════════════════
+
     
 // --- DYNAMIC ARMOR RETRIEVAL ---
     let armorVal = 2; 
@@ -188,6 +103,23 @@ function drawCavalryUnit(ctx, x, y, moving, frame, factionColor, isAttacking, ty
     const elephantRegex = /eleph|elefa/i; 
     const isElephant = elephantRegex.test(type) || (unitName && elephantRegex.test(unitName));
     const isCamel = type === "camel" || (unitName && /camel/i.test(unitName));
+    // Computed early (mirrors the later isCamelCannon check near
+    // drawRiderBody) so the mount-body branch selection below can use
+    // it: the camel gunner's ("Zamburak") camel keeps full directional
+    // (side + up/down) rendering, but every OTHER camel is simplified
+    // to side-profile-only per direct instruction — see the branch
+    // selection right before "DEDICATED CAMEL BLOCK" below.
+    // ROBUST DETECTION: primary check is the "camel_cannon" type string
+    // (what every caller should pass), with the old "camel cannon" name
+    // substring kept as a legacy fallback, PLUS a role-based fallback —
+    // ROLES.MOUNTED_GUNNER ("mounted_gunner") is unique to this unit in
+    // troop_system.js. This third check means this file no longer relies
+    // entirely on upstream callers getting the type/name string right:
+    // it's now a genuine self-contained special case for the artillery
+    // unit, immune to future renames of its key or display name.
+    const isCamelCannonType = type === "camel_cannon"
+        || (unitName && unitName.toLowerCase().includes("camel cannon"))
+        || (unit && unit.stats && unit.stats.role === "mounted_gunner");
   
 	
     if (unitName === "PLAYER" || unitName === "Commander") armorVal = Math.max(armorVal, 10);
@@ -204,10 +136,129 @@ function drawCavalryUnit(ctx, x, y, moving, frame, factionColor, isAttacking, ty
     // Keeping dir so all mount/rider offset math below compiles unchanged.
     let dir = 1;
 
+    // mountHeadDeferred — added this session to fix a z-order bug: the
+    // horse's head/chanfron (facing-down pose only) must draw AFTER
+    // the rider and their weapon/quiver, not as part of the early
+    // mount-body block (which runs well before either drawRiderBody()
+    // call site in this function). Defaults to a no-op so every OTHER
+    // code path (side-view, facing-up, elephant, camel) that never
+    // touches this variable can still safely "call" it at the end of
+    // the function without a crash.
+    let mountHeadDeferred = () => {};
+
+    // mountUpLegsDeferred — added this session per direct request: the
+    // facing-up (back view) NEAR leg pair must be the absolute LAST
+    // thing drawn in the whole function, on top of everything else
+    // (body, haunch, tail, rider, weapon). Previously this pair drew
+    // inline with the rest of the mount body, early in the function.
+    // Same no-op-default pattern as mountHeadDeferred above so every
+    // other code path that never touches this variable can still
+    // safely "call" it at the very end without a crash.
+    let mountUpLegsDeferred = () => {};
+
     // Shared vertical-facing flag — see the VERTICAL FACING comment block
     // above for full context. Read by all three ported rider melee/
     // ranged spots (search "facingDown" to find them all).
     const facingDown = (unit && unit.facingDirY === 1);
+
+    // facingUp/useBackView — declared here (moved up this session) so
+    // the mount body's up/down pose block, which sits earlier in this
+    // function than their old declaration point, can reference them.
+    // Same class of bug as infscript.js hit and fixed last session
+    // (temporal dead zone: a const used before its declaration line
+    // throws, even elsewhere in the same function) — caught here via
+    // an actual runtime test before shipping, not just node --check.
+    const facingUp = (unit && unit.facingDirY === -1);
+    const useBackView = facingUp;
+
+    // ═══════════════════════════════════════════════════════════════════
+    // INDEPENDENT WEAPON AIM (rider aims at target; mount/body keeps
+    // moving/facing in its own travel direction) — added this session.
+    //
+    // THE PROBLEM: facingDown/facingUp/dir above are 100% movement-
+    // derived (from unit.facingDir/facingDirY, which troop_draw.js
+    // computes from position deltas — see that file's VERTICAL FACING
+    // block). Every weapon branch in this file reads THOSE same three
+    // values to decide which way to aim. That's correct for melee (you
+    // face what you're attacking) but wrong for ranged riders: a horse
+    // archer running north still needs to shoot east if that's where
+    // the target is, without the whole horse spinning to face east.
+    //
+    // THE FIX: compute a separate aimAngle from this unit's own world
+    // position (x, y — the translate target at the top of this
+    // function) to unit.targetX/unit.targetY, IF the caller provides
+    // them. If it doesn't, every one of the three vars below collapses
+    // back to today's exact existing behavior (aimFacingDown ===
+    // facingDown, etc.) — so nothing changes for any unit whose caller
+    // hasn't been updated to supply a target yet. This is additive, not
+    // a replacement: the mount/body-facing facingDown/facingUp/dir
+    // above are UNTOUCHED and still drive movement/mount-body rendering
+    // exactly as before; only weapon branches need to switch from
+    // reading facingDown/facingUp/dir to reading
+    // aimFacingDown/aimFacingUp/aimDir instead.
+    //
+    // CONTRACT for upstream/combat code: set unit.targetX and
+    // unit.targetY (world-space coordinates, same space as this
+    // function's own x/y parameters) on any unit that should aim
+    // independently of its movement. Leave them unset/undefined for
+    // units that should keep aiming in their movement direction (today's
+    // behavior) — e.g. melee cavalry, or ranged units with no live
+    // target this frame.
+    //
+    // COORDINATE-SPACE NOTE: ctx.scale(unit.facingDir||1, 1) above
+    // mirrors this function's entire LOCAL drawing space horizontally.
+    // aimAngle below is computed in WORLD space (real dx/dy to the
+    // target, unaffected by that mirror), so it must be converted back
+    // into this function's local (possibly-mirrored) space before use
+    // — done by dividing the world-space dx by facingDir so the sign
+    // flips correctly when the sprite itself is flipped. Skipping this
+    // step would aim the weapon at the target's MIRROR IMAGE whenever
+    // facingDir === -1.
+    const hasIndependentTarget = !!(unit && typeof unit.targetX === 'number' && typeof unit.targetY === 'number');
+
+    let aimFacingDown = facingDown;
+    let aimFacingUp = facingUp;
+    let aimDir = dir;
+    let aimAngle = 0; // radians, 0 = pointing along local +X (right, post-mirror)
+
+    if (hasIndependentTarget) {
+        const worldDx = unit.targetX - x;
+        const worldDy = unit.targetY - y;
+        // Undo the horizontal mirror so local-space math (everything
+        // below, and every existing weapon branch) sees the correct
+        // sign regardless of which way facingDir flipped the sprite.
+        const localDx = worldDx / (unit.facingDir || 1);
+        const localDy = worldDy;
+
+        aimAngle = Math.atan2(localDy, localDx);
+
+        // Derive aimFacingDown/aimFacingUp/aimDir from the target
+        // angle using the SAME H_THRESH-style quadrant split
+        // troop_draw.js already uses for movement (steep enough
+        // vertical angle wins; otherwise horizontal aim, i.e. today's
+        // ordinary side-view weapon pose, which every existing branch
+        // already renders correctly via aimDir).
+        const steep = Math.abs(Math.sin(aimAngle));
+        if (steep > 0.55) {
+            // Target is steep enough (mostly above or below) to use
+            // the up/down weapon poses built in prior sessions.
+            aimFacingDown = localDy > 0;
+            aimFacingUp = localDy < 0;
+            aimDir = (localDx >= 0) ? 1 : -1; // kept for any branch that still multiplies by dir
+        } else {
+            // Target is mostly to the side — ordinary side-view aim,
+            // just possibly toward the opposite side from movement.
+            aimFacingDown = false;
+            aimFacingUp = false;
+            aimDir = (localDx >= 0) ? 1 : -1;
+        }
+    }
+    // From here down, weapon branches should read aimFacingDown/
+    // aimFacingUp/aimDir/aimAngle (target-independent aim) instead of
+    // facingDown/facingUp/dir (movement-only). Mount body / rider
+    // headgear sections keep reading the original three — a rider's
+    // helmet and the horse under them still face where they're
+    // walking, only the weapon itself redirects.
 
     // QUADRANT-BASED AIM ANGLE — see infscript.js's matching constant
     // (declared near its own facingUp/useBackView) for the full
@@ -234,7 +285,13 @@ if (isElephant) baseMountHeight = -80; // Lower spine relative to body center
 if (isCamel)    baseMountHeight = 7;
  
 
-    if (isElephant) {
+    if (isCamelCannonType) {
+        // No animal body at all -- see CAMEL CANNON / ZAMBURAK LOGIC
+        // further down in this function for the actual gunner+cart+
+        // barrel rig. This branch exists only to short-circuit out of
+        // the elephant/camel/vertical-facing/default-horse chain below,
+        // so nothing here draws anything.
+    } else if (isElephant) {
 		// Add a gentle, rhythmic weight shift so it doesn't statically lean
         let eSway = isMoving ? Math.sin(animFrame * 0.2) * 0.04 : 0;
         ctx.rotate(eSway);
@@ -351,9 +408,20 @@ if (isCamel)    baseMountHeight = 7;
 
  
 
-} else if (type === "camel") {
+} else if (isCamel && !isCamelCannonType) {
         // ==========================================
         //      DEDICATED CAMEL BLOCK (REVISED)
+        //   SIMPLIFIED this session per direct instruction: the plain
+        //   camel mount now ONLY ever renders this side-profile body
+        //   (mirrored left/right by the facingDir scale at the top of
+        //   the function, same as every other unit) — it no longer has
+        //   any path into the up/down "MOUNT VERTICAL FACING" branch
+        //   below, regardless of facingDown/facingUp. Widened from the
+        //   old `type === "camel"` check to `isCamel && !isCamelCannonType`
+        //   so this holds for any camel-named unit, not just an exact
+        //   "camel" type string. The camel GUNNER's camel (camel_cannon)
+        //   is explicitly excluded from this branch — it keeps full
+        //   side + up/down rendering via the branches below, unchanged.
         // ==========================================
         let mScale = 1.25; 
         let mBob = bob * mScale;
@@ -476,6 +544,761 @@ if (isCamel)    baseMountHeight = 7;
         riderHeightOffset = -14; 
         
     
+} else if (facingDown || (facingUp && useBackView)) {
+        // ==========================================
+        //   MOUNT VERTICAL FACING — HORSE & CAMEL
+        //   REWRITTEN this session per direct visual feedback (see
+        //   attached screenshot): the previous version had legs drawn
+        //   at nearly the same spot at both ends (no real front/back
+        //   separation), a head crudely stuck onto the body with no
+        //   neck, no armor at all, and — the core bug — WRONG Z-ORDER.
+        //   A painter's-algorithm sprite must draw the FARTHEST thing
+        //   first and the NEAREST thing last (so near things overlay
+        //   far things). Facing down (toward viewer): the head/neck is
+        //   the near end and must be painted LAST, legs/tail are far
+        //   and painted FIRST. Facing up (away from viewer): reversed —
+        //   the rear/tail/haunch is now the near end and painted LAST,
+        //   the head/neck is now the far end, painted FIRST (and kept
+        //   plain/silhouetted, same "no face visible from behind" rule
+        //   used for rider backshots elsewhere in this file).
+        //   Camel is explicitly NOT reworked this pass per direct
+        //   instruction — it still shares this branch structurally
+        //   (isCamel tweaks the palette/hump exactly as before) but its
+        //   proportions/anatomy are untouched; this rewrite's anatomy
+        //   changes are horse-focused.
+        // ==========================================
+        // CANTER CYCLE — replaces the old flat-walk sinusoid this
+        // session per direct request ("animations of cantering for the
+        // down and up directions"). A canter is a 3-beat gait with a
+        // real moment of suspension (all four hooves briefly off the
+        // ground) followed by a springy landing, so instead of a
+        // single smooth sine we use a faster base frequency plus a
+        // rectified/curved component that snaps down hard on landing
+        // and hangs near the top of the stride — reads as a lope
+        // rather than a flat walk. The `hBob`/`legSwingV`/`tailSwishV`/
+        // `headNodV` variable names are kept so every downstream use in
+        // this branch (legs, tail, body, head) picks up the new feel
+        // automatically with no further edits needed.
+        let walkSpeed = moving ? animFrame * 0.15 : 0;
+        let canterPhase = walkSpeed * 2;
+        // Rectified sine (0..1..0) gives a bounce that snaps at the
+        // bottom (landing) and lingers near the top (suspension),
+        // unlike a plain sine's symmetric up/down.
+        let canterLift = moving ? Math.pow(Math.max(0, Math.sin(canterPhase)), 0.6) : 0;
+        let hBob = moving ? (bob * 1.4) - canterLift * 2.2 : bob;
+        let legSwingV = moving ? Math.sin(canterPhase) * 4.5 : 0;
+        let tailSwishV = moving ? Math.sin(walkSpeed) * 2.8 : 0;
+        // Head drives down into the reach phase and snaps back up
+        // through the suspension phase, matching a real canter's neck
+        // bascule instead of a small constant nod.
+let headNodV = moving ? (canterLift - 0.5) * 1.0 : 0;
+        const vDir = facingDown ? 1 : -1; // +1: near end (head) points down-screen/toward viewer. -1: near end (haunch) points up-screen/toward viewer.
+
+        ctx.lineCap = "round"; ctx.lineJoin = "round";
+        const bodyColorV = isCamel ? "#c9a876" : "#795548";
+        const darkBodyColorV = isCamel ? "#a9885c" : "#5D4037";
+        const farLegColorV = isCamel ? "#8a6d47" : "#3e2723";
+        const nearLegColorV = isCamel ? "#c9a876" : "#6d4c41";
+        const lineColorV = "#3e2723";
+        const maneColorV = isCamel ? darkBodyColorV : "#2d1c15";
+
+        // Horse-head-armor (chanfron) tier, reusing the SAME armorVal
+        // thresholds the camel side-view barding above uses, so the
+        // tier boundaries stay consistent file-wide: >=40 steel plate,
+        // >=25 leather/padded, below that bare. Applies to horse only
+        // — camel has no rider (gunner walks beside, per this file's
+        // own established design) so it never wears rider-tier armor.
+        const mountArmorTier = isCamel ? 0 : (armorVal >= 40 ? 2 : (armorVal >= 25 ? 1 : 0));
+
+        // thighFillColor pulled out to one shared constant (rather than
+        // set inline per-iteration) so there is no possible way for the
+        // two thighs to end up different colors — both legs below read
+        // from this single value.
+        const thighFillColor = nearLegColorV;
+        // drawNearPairLegsV — HOISTED to this point in the function
+        // (was previously defined much later, right before its old
+        // call site after the body/neck) so it can be called FIRST,
+        // ahead of the far leg pair / neck / body, per direct request
+        // that horse legs draw at the bottom (i.e. painted first, with
+        // everything else layered on top) rather than on top of the
+        // body as before. Only the DEFINITION moved; the shape math
+        // and colors inside are unchanged from before.
+        const drawNearPairLegsV = (extendDown = 0, topOverride = null) => {
+            for (let lx of [-5.5, 5.5]) {
+                // Reset every iteration — the highlight stripe below
+                // (drawn once per leg) overwrites ctx.strokeStyle to
+                // "#8d6e63" and that value was previously still active
+                // when the SECOND leg's outline stroke() ran, since
+                // strokeStyle was only ever set to lineColorV once,
+                // before the loop started. That's why the two legs were
+                // rendering with mismatched outline colors — left leg
+                // got lineColorV, right leg got whatever the left leg's
+                // highlight stripe left behind. Setting it fresh here,
+                // every iteration, guarantees both legs' outlines use
+                // the same lineColorV regardless of draw order.
+                ctx.strokeStyle = lineColorV; ctx.lineWidth = 0.8;
+                let liftV = moving ? Math.max(0, Math.sin(walkSpeed + (lx < 0 ? Math.PI : 0))) * 3.2 : 0;
+                const topY = topOverride !== null ? topOverride : hBob + 7;
+                const hoofY = hBob + (25 - liftV) + extendDown;
+                // Knee sits ~55% of the way down — thigh (above) is
+                // wide, shin (below) is thin. One shape, one smooth
+                // taper, no line at the joint.
+                const kneeY = topY + (hoofY - topY) * 0.55;
+                // CANTER BEND: thigh (hip-to-knee) barely swings — real
+                // legs pivot mostly at the knee, not the hip — while the
+                // shin/hoof (knee-to-ground) swings the full amount, so
+                // the leg visibly BENDS at the knee during the stride
+                // instead of sliding sideways as one rigid rod. Both are
+                // driven by legSwingV, which is itself 0 when not
+                // moving, so the leg is a dead-straight taper at rest.
+                const kneeSwingX = legSwingV * 0.15;
+                const hoofSwingX = legSwingV * 0.55;
+                ctx.fillStyle = thighFillColor;
+                ctx.beginPath();
+                ctx.moveTo(lx - 2.3, topY);
+                ctx.quadraticCurveTo(lx - 2.1, kneeY, lx - 0.9 - kneeSwingX, kneeY + 1);
+                ctx.quadraticCurveTo(lx - 0.75 - hoofSwingX * 0.5, kneeY + (hoofY - kneeY) * 0.5, lx - 0.7 - hoofSwingX, hoofY);
+                ctx.lineTo(lx + 0.7 - hoofSwingX, hoofY);
+                ctx.quadraticCurveTo(lx + 0.75 - hoofSwingX * 0.5, kneeY + (hoofY - kneeY) * 0.5, lx + 0.9 - kneeSwingX, kneeY + 1);
+                ctx.quadraticCurveTo(lx + 2.1, kneeY, lx + 2.3, topY);
+                ctx.closePath(); ctx.fill(); ctx.stroke();
+                // Highlight stripe — soft lighter vertical line down the
+                // front-center of the leg so it reads as a rounded
+                // cylindrical limb instead of a flat-shaded silhouette.
+                ctx.strokeStyle = "#8d6e63"; ctx.lineWidth = 0.7; ctx.globalAlpha = 0.45;
+                ctx.beginPath();
+                ctx.moveTo(lx - 0.4 - kneeSwingX * 0.3, topY + 1);
+                ctx.quadraticCurveTo(lx - 0.3 - hoofSwingX * 0.5, kneeY, lx - 0.15 - hoofSwingX, hoofY - 1.5);
+                ctx.stroke();
+                ctx.globalAlpha = 1;
+                // Hoof — rounded base, flat top blending into the
+                // leg/fetlock, rounded bottom two corners.
+                ctx.fillStyle = "#212121";
+                const hL = lx - 1.3 - hoofSwingX, hR = lx + 1.3 - hoofSwingX, hT = hoofY - 1.8, hB = hoofY + 0.2;
+                ctx.beginPath();
+                ctx.moveTo(hL, hT);
+                ctx.lineTo(hR, hT);
+                ctx.lineTo(hR, hB - 0.6);
+                ctx.quadraticCurveTo(hR, hB, hR - 0.6, hB);
+                ctx.lineTo(hL + 0.6, hB);
+                ctx.quadraticCurveTo(hL, hB, hL, hB - 0.6);
+                ctx.closePath(); ctx.fill();
+            }
+        };
+
+        // LEGS FIRST — per direct request, the near/visible leg pair
+        // must be the absolute FIRST thing drawn for facingDown (the
+        // "bottom" of the paint order = drawn before anything else, so
+        // body/neck/head all layer on top of it).
+        if (facingDown) {
+            drawNearPairLegsV();
+        }
+
+        // drawFarPairLegsUpV — HOISTED here (next to drawNearPairLegsV)
+        // for the same reason: facingUp now also needs its legs drawn
+        // first, before the haunch/tail/body, so both this and
+        // drawNearPairLegsV must be defined and CALLED ahead of that
+        // point in the draw order. Shape/color math unchanged from
+        // before — only the definition's position and call timing moved.
+        const drawFarPairLegsUpV = () => {
+            // Facing UP: the near pair (drawn via drawNearPairLegsV,
+            // positive-Y side) is anatomically the near/haunch-adjacent
+            // legs — correct, since vDir puts the haunch at positive Y
+            // for this case. This FAR pair (near the now-distant head
+            // end, negative-Y side) still needs drawing; narrow stance,
+            // short length, mostly hidden behind the body so they don't
+            // splay outward past the silhouette.
+            ctx.strokeStyle = lineColorV; ctx.lineWidth = 0.8;
+            ctx.fillStyle = farLegColorV;
+            for (let lx of [-3.2, 3.2]) {
+                let liftV = moving ? Math.max(0, Math.sin(walkSpeed + (lx < 0 ? 0 : Math.PI))) * 1.5 : 0;
+                const topY = hBob - 6;
+                const hoofY = hBob - (11 - liftV);
+                const swingX = legSwingV * 0.2;
+                ctx.beginPath();
+                ctx.moveTo(lx - 1.6, topY);
+                ctx.lineTo(lx - 1.2 + swingX, hoofY);
+                ctx.lineTo(lx + 1.2 + swingX, hoofY);
+                ctx.lineTo(lx + 1.6, topY);
+                ctx.closePath(); ctx.fill(); ctx.stroke();
+                // Hoof — rounded bottom corners to match the near-pair
+                // treatment and the professional reference.
+                ctx.fillStyle = "#212121";
+                const fuL = lx - 1.5 + swingX, fuR = lx + 1.5 + swingX, fuT = hoofY - 1.6, fuB = hoofY + 0.2;
+                ctx.beginPath();
+                ctx.moveTo(fuL, fuT);
+                ctx.lineTo(fuR, fuT);
+                ctx.lineTo(fuR, fuB - 0.5);
+                ctx.quadraticCurveTo(fuR, fuB, fuR - 0.5, fuB);
+                ctx.lineTo(fuL + 0.5, fuB);
+                ctx.quadraticCurveTo(fuL, fuB, fuL, fuB - 0.5);
+                ctx.closePath(); ctx.fill();
+                ctx.fillStyle = farLegColorV;
+            }
+        };
+
+        // LEGS FIRST (facingUp) — per direct request ("remember to draw
+        // the horse legs first aka everything else is on top including
+        // body and tails"): previously BOTH leg pairs for facingUp were
+        // deferred all the way to the end of the function (after body/
+        // haunch/tail/rider/weapon) via mountUpLegsDeferred. That's
+        // removed — legs now draw here instead, before the haunch/tail
+        // block and before the body, matching facingDown's order above.
+        //
+        // GAP FIX: topOverride shifted from hBob+14 to hBob+10.5. The
+        // old value started the leg tops flush at/below the haunch
+        // shape's own lowest edge (hBob+13.5), leaving a visible seam/
+        // gap between leg-top and haunch as reported. hBob+10.5 pushes
+        // the leg tops a few units UP INTO the haunch instead, so the
+        // haunch (painted after, per this order) fully overlaps and
+        // conceals the leg tops with real margin instead of a hairline
+        // or exact-edge match. extendDown left at 9 — only the top edge
+        // moves; hooves keep the same downward reach as before.
+        if (facingUp) {
+            drawNearPairLegsV(9, hBob + 10.5);
+            drawFarPairLegsUpV();
+        }
+
+        // ── FAR STRUCTURES FIRST (painted first = farthest from viewer) ──
+        // For facingDown: far legs (rear pair, near the tail end) go
+        // first, THEN the tail itself (truly the farthest point of all).
+        // For facingUp: the roles swap — the FAR end is now the head,
+        // so the head/neck get painted in this "far" pass instead.
+
+        if (facingDown) {
+            // Rear/far leg pair — sits near the tail end (negative Y
+            // side). REPOSITIONED this session: previously stanced at
+            // ±6.5 with long hooves reaching well past the body's own
+            // ±8.5 silhouette, which read as legs splaying outward like
+            // outstretched arms in the front view. A real front-view
+            // horse's far/hind legs are mostly HIDDEN behind the body
+            // mass — only short stubs/hooves should peek out beneath
+            // it. Narrowed stance to ±3.2 and shortened so the hoof
+            // sits just below the body's far edge, not far past it.
+            ctx.strokeStyle = lineColorV; ctx.lineWidth = 0.8;
+            ctx.fillStyle = farLegColorV;
+            for (let lx of [-3.2, 3.2]) {
+                let liftV = moving ? Math.max(0, Math.sin(walkSpeed + (lx < 0 ? 0 : Math.PI))) * 1.5 : 0;
+                const topY = hBob - 6;
+                const hoofY = hBob - (11 - liftV);
+                const swingX = legSwingV * 0.2;
+                ctx.beginPath();
+                ctx.moveTo(lx - 1.6, topY);
+                ctx.lineTo(lx - 1.2 + swingX, hoofY);
+                ctx.lineTo(lx + 1.2 + swingX, hoofY);
+                ctx.lineTo(lx + 1.6, topY);
+                ctx.closePath(); ctx.fill(); ctx.stroke();
+                // Hoof — ROUNDED this session to match the professional
+                // reference (soft rounded base, not a sharp-cornered
+                // box). Flat top where it meets the leg, rounded bottom
+                // two corners where the hoof meets the ground.
+                ctx.fillStyle = "#212121";
+                const rfL = lx - 1.5 + swingX, rfR = lx + 1.5 + swingX, rfT = hoofY - 1.6, rfB = hoofY + 0.2;
+                ctx.beginPath();
+                ctx.moveTo(rfL, rfT);
+                ctx.lineTo(rfR, rfT);
+                ctx.lineTo(rfR, rfB - 0.5);
+                ctx.quadraticCurveTo(rfR, rfB, rfR - 0.5, rfB);
+                ctx.lineTo(rfL + 0.5, rfB);
+                ctx.quadraticCurveTo(rfL, rfB, rfL, rfB - 0.5);
+                ctx.closePath(); ctx.fill();
+                ctx.fillStyle = farLegColorV;
+            }
+
+            // EARLY NECK — facingDown, drawn here (before the rider) per
+            // direct request: previously the neck lived inside
+            // mountHeadDeferred and painted AFTER the rider, covering the
+            // rider's body/armor. Split out so the neck now sits UNDER
+            // the rider while the head/muzzle (still in mountHeadDeferred,
+            // below) keeps painting over the rider's spear/quiver as
+            // before. Same 70%-scale-anchored-at-hBob+8 transform as the
+            // deferred closure so the seam at hBob+21.5 still connects
+            // seamlessly to the head with no visible gap or jump.
+            ctx.save();
+            ctx.translate(0, hBob + 8);
+            ctx.scale(0.7, 0.7);
+            ctx.translate(0, -(hBob + 8));
+            ctx.translate(0, -3 / 0.7);
+
+            ctx.fillStyle = bodyColorV; ctx.strokeStyle = lineColorV; ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(-6.5, hBob + 8);
+            ctx.quadraticCurveTo(-7, hBob + 13, -6, hBob + 17);
+            ctx.quadraticCurveTo(-5.3, hBob + 20, -4.5, hBob + 21.5);
+            ctx.lineTo(4.5, hBob + 21.5);
+            ctx.quadraticCurveTo(5.3, hBob + 20, 6, hBob + 17);
+            ctx.quadraticCurveTo(7, hBob + 13, 6.5, hBob + 8);
+            ctx.closePath(); ctx.fill(); ctx.stroke();
+            // Center neck shading highlight.
+            ctx.strokeStyle = "#8d6e63"; ctx.lineWidth = 1; ctx.globalAlpha = 0.4;
+            ctx.beginPath();
+            ctx.moveTo(0, hBob + 9); ctx.quadraticCurveTo(0.4, hBob + 15, 0, hBob + 20);
+            ctx.stroke();
+            ctx.globalAlpha = 1;
+            // Neck hair — side tufts.
+            ctx.strokeStyle = maneColorV; ctx.lineWidth = 1;
+            for (let sx of [-1, 1]) {
+                ctx.beginPath();
+                ctx.moveTo(sx * 6.8, hBob + 10);
+                ctx.lineTo(sx * 7.2, hBob + 15);
+                ctx.moveTo(sx * 6.3, hBob + 13);
+                ctx.lineTo(sx * 6.6, hBob + 18);
+                ctx.moveTo(sx * 5.3, hBob + 17);
+                ctx.lineTo(sx * 5.6, hBob + 21.5);
+                ctx.stroke();
+            }
+            ctx.restore();
+        } else {
+            // Facing UP: head/neck are now the FAR structures — drawn
+            // first, kept deliberately plain (no chanfron detail, no
+            // eyes) since we're looking at the back of the neck, not
+            // the face.
+            // NECK — re-added this session per direct feedback ("add
+            // here to complete the horse back neck"): the previous
+            // pass cut the poll shape entirely, leaving the ears
+            // floating with a gap before the body. This is a genuine
+            // tapered neck column instead — narrow up near the ears,
+            // widening smoothly down into the withers/body — so it's
+            // a real connecting shape rather than the old rounded-
+            // rectangle "collar" that sat flat across the top.
+            // SURGERY FIX (sideburns bug): neck/ears were already painted
+            // before the rider (this whole block runs early, well before
+            // drawRiderBody), so the "over the rider" look was never a
+            // z-order bug — it was the ears sitting wide (out to +-3.5)
+            // and low (top at hBob-19) so their outer tips poked out past
+            // the sides of the rider's narrower head/helmet silhouette
+            // and read as sideburns even though they were technically
+            // behind it. Fixed by pulling the ears in narrower (+-2.6
+            // outer tip, was +-3.5) and taller/higher (base/tip raised
+            // ~2-3.5px) so they clear above the helmet instead of
+            // flanking the face. Neck top narrowed to match (+-1.6, was
+            // +-2.2) and lengthened to reach the new higher ear base.
+            ctx.fillStyle = darkBodyColorV; ctx.strokeStyle = lineColorV; ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(-1.6, hBob - 21 - headNodV);
+            ctx.quadraticCurveTo(-3.4, hBob - 15, -5, hBob - 8);
+            ctx.quadraticCurveTo(-5.5, hBob - 3, -5, hBob + 1);
+            ctx.lineTo(5, hBob + 1);
+            ctx.quadraticCurveTo(5.5, hBob - 3, 5, hBob - 8);
+            ctx.quadraticCurveTo(3.4, hBob - 15, 1.6, hBob - 21 - headNodV);
+            ctx.closePath(); ctx.fill(); ctx.stroke();
+            // Ears — RE-ADDED per direct request ("just missing the
+            // upward angle's ears of horse head"). Previous two attempts
+            // sat the ears wide and low enough that their outer tips
+            // poked past the rider's helmet silhouette and read as
+            // sideburns, so last pass deleted them outright. This time
+            // they're anchored tight to the narrow poll tip itself
+            // (±1.6, matching the neck's own narrowest point at
+            // hBob-21-headNodV) rather than flared out to ±2.6+ like
+            // before, and angled inward/up instead of outward — small,
+            // close-set, pointing straight up past the top of the
+            // helmet instead of out to its sides. No side tufts re-added
+            // (only "ears" were called out as missing).
+            ctx.fillStyle = darkBodyColorV;
+            ctx.strokeStyle = "#000000"; ctx.lineWidth = 0.6;
+            ctx.beginPath();
+            ctx.moveTo(-1.4, hBob - 21 - headNodV); ctx.lineTo(-1.9, hBob - 25.5 - headNodV); ctx.lineTo(-0.4, hBob - 22.5 - headNodV);
+            ctx.closePath();
+            ctx.moveTo(1.4, hBob - 21 - headNodV); ctx.lineTo(1.9, hBob - 25.5 - headNodV); ctx.lineTo(0.4, hBob - 22.5 - headNodV);
+            ctx.closePath();
+            ctx.fill(); ctx.stroke();
+        }
+
+        // --- BODY — REWORKED this session to match the reference
+        // (blocky, wide-chested, end-on view rather than a slim oval).
+        // Previous version was a narrow ±5.5 vertical oval that read as
+        // a thin blob. Reference art shows a wide, roughly barrel/shield
+        // -shaped chest/hindquarter mass: broad and flat-topped near the
+        // shoulders/haunch (±8.5), tapering only slightly toward the
+        // belly midline, NOT pinching to a point. Kept vDir-mirrored so
+        // facingUp (haunch) and facingDown (chest) both use this shape —
+        // anatomically both ends are broad muscle masses, not tapered. ---
+        ctx.fillStyle = bodyColorV; ctx.strokeStyle = lineColorV; ctx.lineWidth = 1.2;
+        let mountBodyV = new Path2D();
+        mountBodyV.moveTo(-8.5, hBob + 5 * vDir);
+        mountBodyV.quadraticCurveTo(-9.5, hBob + 0, -8.5, hBob - 5 * vDir);
+        mountBodyV.quadraticCurveTo(-8, hBob - 9 * vDir, -4, hBob - 10 * vDir);
+        mountBodyV.quadraticCurveTo(-1.5, hBob - 10.5 * vDir, 0, hBob - 10.5 * vDir);
+        mountBodyV.quadraticCurveTo(1.5, hBob - 10.5 * vDir, 4, hBob - 10 * vDir);
+        mountBodyV.quadraticCurveTo(8, hBob - 9 * vDir, 8.5, hBob - 5 * vDir);
+        mountBodyV.quadraticCurveTo(9.5, hBob + 0, 8.5, hBob + 5 * vDir);
+        mountBodyV.quadraticCurveTo(8, hBob + 9 * vDir, 4, hBob + 10 * vDir);
+        mountBodyV.quadraticCurveTo(1.5, hBob + 10.5 * vDir, 0, hBob + 10.5 * vDir);
+        mountBodyV.quadraticCurveTo(-1.5, hBob + 10.5 * vDir, -4, hBob + 10 * vDir);
+        mountBodyV.quadraticCurveTo(-8, hBob + 9 * vDir, -8.5, hBob + 5 * vDir);
+        mountBodyV.closePath();
+        ctx.fill(mountBodyV); ctx.stroke(mountBodyV);
+
+        if (!isCamel) {
+            // Chest/pectoral cleft — a soft center groove running down
+            // the near-facing muscle mass, matching the reference art's
+            // visible sternum crease splitting the chest (and haunch,
+            // when facing up) into two rounded lobes. Subtle shading
+            // line, not a hard outline.
+            ctx.strokeStyle = darkBodyColorV; ctx.lineWidth = 1;
+            ctx.globalAlpha = 0.55;
+            ctx.beginPath();
+            ctx.moveTo(0, hBob + 9.5 * vDir);
+            ctx.quadraticCurveTo(0.4 * vDir, hBob + 2 * vDir, 0, hBob - 3 * vDir);
+            ctx.stroke();
+            ctx.globalAlpha = 1;
+        }
+
+        if (isCamel) {
+            // Camel hump — untouched this session per direct instruction
+            // to leave camel anatomy alone; kept exactly as before.
+            ctx.fillStyle = darkBodyColorV;
+            ctx.beginPath();
+            ctx.ellipse(0, hBob - 2 * vDir, 5, 6, 0, 0, Math.PI * 2);
+            ctx.fill(); ctx.stroke();
+        } else {
+            // Horse body armor / saddle blanket — same tier scheme as
+            // the camel's side-view barding above (>=40 plate, >=25
+            // leather), so a heavily-armored rider's mount visibly
+            // matches their own equipment tier, same as requested.
+            if (mountArmorTier === 2) {
+                ctx.fillStyle = "#9e9e9e"; ctx.strokeStyle = "rgba(0,0,0,0.5)"; ctx.lineWidth = 0.5;
+                ctx.fillRect(-4.5, hBob - 7 * vDir, 9, 12 * vDir);
+                for (let i = -4; i <= 4; i += 2) {
+                    ctx.beginPath(); ctx.moveTo(i, hBob - 7 * vDir); ctx.lineTo(i, hBob + 5 * vDir); ctx.stroke();
+                }
+            } else if (mountArmorTier === 1) {
+                ctx.fillStyle = "#5d4037"; ctx.strokeStyle = "#271610"; ctx.lineWidth = 0.5;
+                ctx.fillRect(-4, hBob - 6 * vDir, 8, 10 * vDir);
+            } else if (isCommander) {
+                ctx.fillStyle = factionColor;
+                ctx.fillRect(-3.5, hBob - 8 * vDir, 7, 6 * vDir);
+                ctx.strokeStyle = "#3e2723"; ctx.lineWidth = 0.5;
+                ctx.strokeRect(-3.5, hBob - 8 * vDir, 7, 6 * vDir);
+            }
+        }
+
+        if (facingDown) {
+            // Tail — SHRUNK BACK DOWN this session per direct feedback:
+            // the previous long/swung-out version read as sticking way
+            // out to the side, unrealistic for a bird's-eye/front view
+            // where the tail is mostly hidden behind the horse's body
+            // and only a small tip should peek out. Short stub, barely
+            // extending past the body's far edge (hBob-10.5), no wide
+            // side swing — just a small hint of tail visible from above.
+            ctx.strokeStyle = maneColorV; ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(0, hBob - 9);
+            ctx.quadraticCurveTo(1 + tailSwishV * 0.3, hBob - 11.5, 0.5, hBob - 13.5);
+            ctx.stroke();
+        }
+
+        // ── NEAR STRUCTURES: legs/haunch/tail drawn here as before.
+        // HEAD IS NO LONGER DRAWN HERE — extracted into a deferred
+        // closure (drawMountHeadV, stored on a scope-shared variable)
+        // called at the TRUE end of drawCavalryUnit, after the rider
+        // and their weapon/quiver have already been drawn. This fixes
+        // a real z-order bug reported after testing: the head was
+        // drawing BEFORE the rider (this whole mount block runs early
+        // in the function, well before either drawRiderBody() call
+        // site), so a facing-down commander's spear/quiver appeared to
+        // sit on top of the horse's head instead of the head correctly
+        // overlaying them as the closest-to-viewer element. ──
+        if (facingDown) {
+            mountHeadDeferred = () => {
+            // HEAD/NECK — REWORKED this session per direct visual
+            // feedback against the rendered screenshot:
+            //  - whole head scaled to 70% of its previous size, anchored
+            //    at the neck/body seam so it still connects cleanly
+            //  - neck taper "shoulders" rounded off (was a hard-edged
+            //    squarish trapezoid)
+            //  - eyes redone as dark holes (no white sclera) with a
+            //    small yellow crescent accent, not solid white ovals
+            //  - the commander helmet's center ridge line removed (read
+            //    as a stray "cross" through the face) along with its
+            //    shading band, which was the other half of that cross
+            //  - ears outlined in solid black
+            //  - side neck-hair tufts added (previously bare)
+            //  - nostrils shrunk further
+            ctx.save();
+            // Anchor the 70% scale at the neck/body seam (hBob+8) so the
+            // head shrinks toward the body instead of drifting in place.
+            ctx.translate(0, hBob + 8);
+            ctx.scale(0.7, 0.7);
+            ctx.translate(0, -(hBob + 8));
+            // FIX: the -10px version of this shift moved the WHOLE
+            // closure up by 10 screen units — including the neck-base
+            // anchor point above, which was specifically set up to stay
+            // pinned to the body seam (hBob+8). That pin only holds for
+            // points AT y=hBob+8 when nothing else moves them afterward;
+            // this translate moved them anyway, so the neck detached
+            // from the body by ~12.5 units and floated as a disconnected
+            // block above the ears (reported as "a weird rectangle on
+            // top of the ears the size of a neck/body"). Reduced to a
+            // 3px shift — small enough that the neck's own width still
+            // overlaps the body's chest taper at the seam, so there's
+            // no visible gap, while still nudging the head slightly
+            // closer to the rider as originally requested. If the head
+            // needs to sit noticeably closer than this, the correct fix
+            // is to lengthen the neck geometry itself (or anchor the
+            // scale further up the neck) rather than raising this
+            // number further, since any bigger uniform shift reopens
+            // the same gap.
+            ctx.translate(0, -3 / 0.7);
+
+            // SURGERY FIX (per direct request): the neck used to be built
+            // right here, inside this deferred closure — which fires
+            // AFTER drawRiderBody(), so the neck was painting over the
+            // rider's body/armor. Neck (+its side-hair tufts) has been
+            // moved OUT to an early pass, drawn before the rider, in the
+            // "FAR STRUCTURES FIRST" section above (search "EARLY NECK —
+            // facingDown"). It uses the exact same 70%-scale transform as
+            // this closure so the seam at hBob+21.5 still lines up. Only
+            // the head/muzzle/ears/eyes/helmet stay in this deferred
+            // closure — those are the near-to-viewer parts that
+            // legitimately need to paint over the rider's spear/quiver.
+            ctx.strokeStyle = lineColorV; ctx.lineWidth = 1;
+            // Head/muzzle — REBUILT this session to match the reference
+            // art: previously a narrow wedge tapering to a point, which
+            // read as thin/toylike. Reference shows a long, roughly
+            // RECTANGULAR muzzle (nearly parallel sides, not a sharp
+            // taper) with a distinct wider brow/jaw shelf up top before
+            // narrowing only slightly toward the nose, giving the head
+            // a blockier, more grounded look.
+            ctx.fillStyle = bodyColorV;
+            ctx.beginPath();
+            ctx.moveTo(-7, hBob + 21.5);
+            // Top corners SOFTENED this session (were hard lineTo
+            // corners where the muzzle met the neck/jowl) to match the
+            // professional reference's smooth, rounded contour there.
+            ctx.quadraticCurveTo(-7.2, hBob + 25, -6.5, hBob + 27.5);
+            ctx.quadraticCurveTo(-6.3, hBob + 33.5 + headNodV, -5, hBob + 38.5 + headNodV);
+            ctx.quadraticCurveTo(-4.3, hBob + 41.5 + headNodV, -2.8, hBob + 42.5 + headNodV);
+            ctx.lineTo(2.8, hBob + 42.5 + headNodV);
+            ctx.quadraticCurveTo(4.3, hBob + 41.5 + headNodV, 5, hBob + 38.5 + headNodV);
+            ctx.quadraticCurveTo(6.3, hBob + 33.5 + headNodV, 6.5, hBob + 27.5);
+            ctx.quadraticCurveTo(7.2, hBob + 25, 7, hBob + 21.5);
+            ctx.closePath(); ctx.fill(); ctx.stroke();
+
+            // Brow ridge — a soft shading band across the upper muzzle,
+            // just below the eyeline, giving the flat plane of the face
+            // seen in the reference instead of an unbroken smooth curve.
+            ctx.strokeStyle = darkBodyColorV; ctx.lineWidth = 1;
+            ctx.globalAlpha = 0.4;
+            ctx.beginPath();
+            ctx.moveTo(-6, hBob + 29.5);
+            ctx.quadraticCurveTo(0, hBob + 31, 6, hBob + 29.5);
+            ctx.stroke();
+            ctx.globalAlpha = 1;
+
+// COMMANDER HORSE HELMET. Per direct instruction, ONLY
+            // commanders' horses wear a horse helmet at all. Silver,
+            // covers the entire head, with cut-outs for the ears.
+            // Clip path updated to match the new blockier head outline.
+            if (isCommander && !isCamel) {
+                ctx.save();
+                const headClip = new Path2D();
+                headClip.moveTo(-7, hBob + 21.5);
+                headClip.quadraticCurveTo(-7.2, hBob + 25, -6.5, hBob + 27.5);
+                headClip.quadraticCurveTo(-6.3, hBob + 33.5 + headNodV, -5, hBob + 38.5 + headNodV);
+                headClip.quadraticCurveTo(-4.3, hBob + 41.5 + headNodV, -2.8, hBob + 42.5 + headNodV);
+                headClip.lineTo(2.8, hBob + 42.5 + headNodV);
+                headClip.quadraticCurveTo(4.3, hBob + 41.5 + headNodV, 5, hBob + 38.5 + headNodV);
+                headClip.quadraticCurveTo(6.3, hBob + 33.5 + headNodV, 6.5, hBob + 27.5);
+                headClip.quadraticCurveTo(7.2, hBob + 25, 7, hBob + 21.5);
+                headClip.closePath();
+                ctx.clip(headClip);
+                
+                // SURGERY: Silver plate covering the whole head (COLOR FIXED to match side view #9e9e9e)
+                ctx.fillStyle = "#9e9e9e"; ctx.strokeStyle = "#424242"; ctx.lineWidth = 0.5;
+                ctx.fillRect(-8, hBob + 19.5, 16, 27 + headNodV);
+                
+                // NOTE: the old center ridge/crest line (a straight
+                // vertical stroke from hBob+12 to hBob+29) and its
+                // shading band were REMOVED this session...
+                ctx.restore();
+                
+                // Eye-guard rims — small darker ovals framing where the
+                // eyes show through the helmet, so the helmet reads as
+                // fitted rather than a flat mask with holes punched.
+                ctx.strokeStyle = "#707070"; ctx.lineWidth = 0.8;
+                ctx.beginPath();
+                ctx.ellipse(-3.8, hBob + 28.5, 1.7, 1.4, 0, 0, Math.PI * 2);
+                ctx.ellipse(3.8, hBob + 28.5, 1.7, 1.4, 0, 0, Math.PI * 2);
+                ctx.stroke();
+
+       
+            }
+
+            // Ears — REPOSITIONED/RESHAPED this session to sit forward
+            // and alert (pointing up and slightly in, per the reference)
+            // rather than the previous small side-swept triangles, and
+            // sized up to match the wider head. Still outlined in solid
+            // black so they read as a crisp separate shape.
+            // OUTER TONE LIGHTENED this session (darkBodyColorV → the
+            // lighter bodyColorV) to match the reference's two-tone
+            // ears — light outer shell, darker inner shading — instead
+            // of a single flat dark tone for the whole ear.
+            ctx.fillStyle = bodyColorV;
+            ctx.strokeStyle = "#000000"; ctx.lineWidth = 0.7;
+            ctx.beginPath();
+            ctx.moveTo(-5.5, hBob + 22.5); ctx.lineTo(-6, hBob + 15.5); ctx.lineTo(-1.5, hBob + 21);
+            ctx.closePath();
+            ctx.moveTo(5.5, hBob + 22.5); ctx.lineTo(6, hBob + 15.5); ctx.lineTo(1.5, hBob + 21);
+            ctx.closePath();
+            ctx.fill(); ctx.stroke();
+            // Inner-ear shading — DARKENED/OPACIFIED (was #3e2723 at
+            // 0.5 alpha against a dark outer ear, barely visible; now
+            // full-strength against the new lighter outer tone so the
+            // two-tone contrast actually reads).
+            ctx.fillStyle = "#3e2723"; ctx.globalAlpha = 0.85;
+            ctx.beginPath();
+            ctx.moveTo(-5, hBob + 21.5); ctx.lineTo(-5.3, hBob + 17.5); ctx.lineTo(-2.5, hBob + 20.8);
+            ctx.closePath();
+            ctx.moveTo(5, hBob + 21.5); ctx.lineTo(5.3, hBob + 17.5); ctx.lineTo(2.5, hBob + 20.8);
+            ctx.closePath();
+            ctx.fill();
+            ctx.globalAlpha = 1;
+
+            // Eyes — dark holes with a thin yellow crescent highlight,
+            // repositioned slightly to sit on the wider brow shelf.
+            ctx.fillStyle = "#150e0a";
+            ctx.beginPath();
+            ctx.ellipse(-3.8, hBob + 28.5, 1.7, 2.1, 0, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.beginPath();
+            ctx.ellipse(3.8, hBob + 28.5, 1.7, 2.1, 0, 0, Math.PI * 2);
+            ctx.fill();
+            // Yellow crescent — a thin arc hugging the upper-inner rim
+            // of each dark eye hole.
+            ctx.strokeStyle = "#e8b923"; ctx.lineWidth = 0.6;
+            ctx.beginPath();
+            ctx.arc(-3.8, hBob + 27.8, 1.3, Math.PI * 1.15, Math.PI * 1.85);
+            ctx.stroke();
+            ctx.beginPath();
+            ctx.arc(3.8, hBob + 27.8, 1.3, Math.PI * 1.15, Math.PI * 1.85);
+            ctx.stroke();
+
+            // Nostrils — ENLARGED and moved wider/lower this session to
+            // match the reference's flared, low-set nostrils on the
+            // blockier muzzle (was small and close-set at 0.65x0.95,
+            // sized for the old narrow wedge head).
+            ctx.fillStyle = "#2a1810";
+            ctx.beginPath();
+            ctx.ellipse(-2.6, hBob + 40 + headNodV, 1.1, 1.4, -0.3, 0, Math.PI * 2);
+            ctx.ellipse(2.6, hBob + 40 + headNodV, 1.1, 1.4, 0.3, 0, Math.PI * 2);
+            ctx.fill();
+            // Muzzle/mouth line
+            ctx.strokeStyle = lineColorV; ctx.lineWidth = 0.7;
+            ctx.beginPath(); ctx.moveTo(-2.8, hBob + 42.5 + headNodV); ctx.lineTo(2.8, hBob + 42.5 + headNodV); ctx.stroke();
+
+            ctx.restore(); // closes the 70% head-scale save from the top of this closure
+            };
+        }
+        // facingUp legs already drawn earlier in this branch (see the
+        // "LEGS FIRST (facingUp)" call right after drawFarPairLegsUpV's
+        // definition, before this haunch/tail block) — nothing to do
+        // here anymore.
+        if (!facingDown) {
+            // Haunch/rear — the near end when facing up, painted LAST
+            // so it correctly overlays the body. Tail sits on top of
+            // this, closest of all to the viewer. WIDENED this session
+            // to match the new blockier body (was sized for the old
+            // ±5.5 slim body); also split visually into two rounded
+            // haunch lobes via a center dip, matching the reference's
+            // rear-view muscle definition either side of the tail.
+            ctx.fillStyle = darkBodyColorV; ctx.strokeStyle = lineColorV; ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(-8, hBob + 9);
+            ctx.quadraticCurveTo(-4, hBob + 13.5, 0, hBob + 11.5);
+            ctx.quadraticCurveTo(4, hBob + 13.5, 8, hBob + 9);
+            ctx.lineTo(7, hBob + 4);
+            ctx.lineTo(-7, hBob + 4);
+            ctx.closePath(); ctx.fill(); ctx.stroke();
+            // FIX — crotch/undercarriage gusset: the haunch curve above
+            // only dips to hBob+11.5 at its center (x=0), while the near
+            // leg pair (drawn later, deferred to the very end via
+            // mountUpLegsDeferred, at lx=±5.5) never covers the central
+            // strip between their inner top edges (roughly -3.2..+3.2).
+            // Nothing was ever drawn across that strip, so it showed
+            // bare terrain right at the tail base instead of horse —
+            // this was the reported leg gap for the backshot/up-facing
+            // view. Filled here, same pass as the haunch and with no
+            // stroke so it reads as part of it rather than a separate
+            // patch; the deferred near-leg pair still paints over its
+            // outer edges same as always, so z-order is unaffected.
+            ctx.fillStyle = darkBodyColorV;
+            ctx.beginPath();
+            ctx.moveTo(-4.5, hBob + 6);
+            ctx.lineTo(4.5, hBob + 6);
+            ctx.lineTo(4, hBob + 22);
+            ctx.lineTo(-4, hBob + 22);
+            ctx.closePath();
+            ctx.fill();
+            // Tail — REBUILT this session against the professional
+            // reference: was a single 3px-wide STROKED line, which
+            // read as thin/wiry. Reference shows a real voluminous,
+            // flowing mass that sweeps to one side and tapers to a
+            // point. Rebuilt as a filled tapered shape (wide ~3.6 unit
+            // base at the haunch, sweeping out via tailSwishV, tapering
+            // to a point) — same construction as the leg taper shapes,
+            // just applied to the tail.
+            ctx.fillStyle = maneColorV; ctx.strokeStyle = lineColorV; ctx.lineWidth = 0.8;
+            ctx.beginPath();
+            ctx.moveTo(-1.8, hBob + 9);
+            ctx.quadraticCurveTo(2.5 + tailSwishV * 1.2, hBob + 14, 4.5 + tailSwishV * 1.6, hBob + 20);
+            ctx.quadraticCurveTo(6 + tailSwishV * 1.6, hBob + 25, 3 + tailSwishV, hBob + 29);
+            ctx.quadraticCurveTo(2 + tailSwishV * 0.7, hBob + 23, 1.2 + tailSwishV * 0.4, hBob + 17);
+            ctx.quadraticCurveTo(0.8 + tailSwishV * 0.2, hBob + 12, 1.8, hBob + 9);
+            ctx.closePath(); ctx.fill(); ctx.stroke();
+        }
+
+        // --- LEGS, NEAR PAIR (drawn on top, at whichever end is
+        // currently the "near" end per vDir — for facingDown this is
+        // near the head/positive-Y side; for facingUp it's near the
+        // haunch/positive-Y side too, since vDir already flips the
+        // FAR leg pair to the opposite/negative-Y side above for the
+        // facingUp case via the shared vDir math below) ---
+        // Legs SLIMMED and SMOOTHED this session per direct feedback:
+        // previous version was a thick, hard-edged rectangular column
+        // with a sharply-defined joint band that read as boxy/blocky.
+        // Now a smooth continuous taper (single curve, no straight-line
+        // joint kink) with a soft translucent shading gradient standing
+        // in for the knee instead of a hard stripe — narrower overall
+        // (~65% of previous width) so it reads as a slender, natural
+        // leg rather than a stacked rectangle.
+        //
+        // DEFERRED FOR facingUp this session per direct request: the
+        // back-view near leg pair must be the absolute LAST thing drawn
+        // in the whole function (on top of rider/weapon/everything), so
+        // for facingUp this draw call is packaged into a closure and
+        // fired at the very end via mountUpLegsDeferred instead of
+        // running inline here.
+        //
+        // MOVED this session per direct request ("horse legs need to be
+        // drawn in the bottom before anything else"): drawNearPairLegsV
+        // itself is now DEFINED much earlier in this branch (right after
+        // the vDir/color constants, before "FAR STRUCTURES FIRST"), and
+        // for facingDown it is now CALLED there too — before the far leg
+        // pair, before the neck, before the body — so the near/visible
+        // leg pair is the very first thing painted and everything else
+        // (body, haunch, neck/head) layers on top of it, exactly like a
+        // real painter's-algorithm "legs are the ground-level/farthest-
+        // back structural element" pass. The function definition only
+        // stays hoisted; the facingUp case still fires it later via
+        // mountUpLegsDeferred exactly as before (unaffected by this
+        // change — see that closure below).
+        //
+        // Nothing below this point calls drawNearPairLegsV directly for
+        // facingDown anymore — search "LEGS FIRST" near the top of this
+        // branch for the new call site. drawFarPairLegsUpV has likewise
+        // been hoisted up next to drawNearPairLegsV (search "HOISTED")
+        // since facingUp now calls it before the haunch/tail block,
+        // earlier in the draw order than this comment's old position.
+        // facingUp legs are now drawn earlier in this branch, before
+        // the haunch/tail block above — see the "MOVED this session"
+        // comment near the top of the !facingDown block for the actual
+        // call site and rationale. Nothing fires here anymore.
+
+        // Riders (horse only — camel has no rider, gunner walks beside
+        // it as a separate unit) still mount at roughly this height;
+        // no change to riderHeightOffset needed here since the body's
+        // vertical extent is similar to the side view's.
 } else {
         // ==========================================
         //   REVISED FWD-WALKING MUSCULAR HORSE
@@ -686,26 +1509,6 @@ if (isCommander) {
     ctx.fill(); 
     ctx.stroke();
 
-    // --- 3. HELMET DETAILING (Based on historical references) ---
-    ctx.strokeStyle = "#fbc02d"; // Brass/Gold ceremonial trim
-    ctx.lineWidth = 1;
-    
-    // Central reinforced ridge down the nose
-    ctx.beginPath(); 
-    ctx.moveTo(-17, hBob - 16 + hn); 
-    ctx.lineTo(-24, hBob - 10 + hn); 
-    ctx.stroke();
-
-    // Flared brow guard over the eye (Protective ridge)
-    ctx.fillStyle = "#757575"; 
-    ctx.beginPath();
-    ctx.arc(-19, hBob - 10 + hn, 2.5, Math.PI, 0); // Arch resting above the eye
-    ctx.fill(); 
-    
-    ctx.strokeStyle = "#fbc02d";
-    ctx.beginPath();
-    ctx.arc(-19, hBob - 10 + hn, 2.5, Math.PI, 0); 
-    ctx.stroke();
 
     // Darkened cutout for the eye socket
     // (The base script will draw the black pupil inside this at (-19, -10) right after)
@@ -714,16 +1517,7 @@ if (isCommander) {
     ctx.arc(-19, hBob - 10 + hn, 1.5, 0, Math.PI * 2);
     ctx.fill();
 
-    // Red Ceremonial Forehead Plume/Tassel
-    ctx.fillStyle = "#d32f2f";
-    ctx.beginPath();
-    ctx.moveTo(-16.5, hBob - 15 + hn); // Anchor on upper forehead
-    ctx.quadraticCurveTo(-18, hBob - 18 + hn, -14, hBob - 19 + hn); // Sweep up and back
-    ctx.quadraticCurveTo(-15, hBob - 16 + hn, -16.5, hBob - 15 + hn); // Return to anchor
-    ctx.fill();
-    ctx.strokeStyle = "#b71c1c";
-    ctx.lineWidth = 0.5;
-    ctx.stroke();
+   
 }
 // >>> END SURGERY <<<
 		
@@ -799,8 +1593,10 @@ if (isCommander) {
 // facingUp, same as infscript.js's equivalent update. Low-tier
 // headgear/armor logic (described in the block above) is unchanged —
 // it was already correct for both facings.
-const facingUp = (unit && unit.facingDirY === -1);
-const useBackView = facingUp;
+// facingUp/useBackView are now declared earlier in this function
+// (see the comment right after facingDown, near the top) — moved
+// there this session so the mount body's up/down pose block could
+// reference them without a temporal-dead-zone error.
 
 // ═══════════════════════════════════════════════════════════════
 // BACK-VIEW HEADGEAR (facingUp / useBackView) — full sweep, this
@@ -1153,7 +1949,10 @@ const drawBackHeadgear = () => {
 
 const drawRiderBody = () => {
 ctx.save();
-    let isCamelCannon = (type === "camel_cannon" || (unitName && unitName.toLowerCase().includes("camel cannon")));
+    // Kept in sync with isCamelCannonType above — same three-way check.
+    let isCamelCannon = (type === "camel_cannon"
+        || (unitName && unitName.toLowerCase().includes("camel cannon"))
+        || (unit && unit.stats && unit.stats.role === "mounted_gunner"));
 
 // --- 2. THE RIDER TRANSLATION ---
 // We combine the base animal height + animation bob + the massive elephant offset
@@ -2113,7 +2912,7 @@ break;
 
 // Normal order: body first, then weapon on top (unchanged today for
 // every rider that isn't a facing-up, low-armor-tier rider).
-if (!useBackView) {
+if (!useBackView && !isCamelCannonType) {
     drawRiderBody();
 }
 
@@ -2236,6 +3035,15 @@ if (facingDown) {
 } else {
     ctx.translate(2 + thrust, -4 + b);
 }
+// FLIP FIX (reverted): same correction as the default lancer's "MELEE
+// LANCE" branch. Re-verified via trig — the tip is built at local
+// (25..33, 0), positive X; rotating by DOWN_QUADRANT_ANGLE (45°) alone
+// puts it at positive X/positive Y (down-and-toward-viewer, matching
+// the horse's own head direction in this pose), which is forward. The
+// +Math.PI previously added here flipped it to negative X/negative Y —
+// backward, over the horse's tail — which is the bug being reported.
+// Reverting to 45°-only so this stays consistent with the never-flipped
+// bow/arrow code just below, which has always pointed forward correctly.
 const haLanceBaseRot = facingDown ? DOWN_QUADRANT_ANGLE : 0;
 ctx.rotate(haLanceBaseRot + (isSwing ? swingAngle : 0));
 
@@ -2320,47 +3128,25 @@ if (cycle < 0.2) {
 }
 // Draw Bow
 // ═══════════════════════════════════════════════════════════════
-// DOWNWARD FACING (facingDirY===1) — ranged aiming. Structurally
-// near-identical to infscript.js's archer branch (see that branch's
-// comments for the full reasoning) — same two-technique split applies
-// here for the same reason:
-//
-// (1) LIMBS + STRING are drawn inside this same bowKhatra rotation
-//     wrapper, so adding DOWN_AIM_ANGLE to bowKhatra redirects the
-//     whole bow shape for free. topTipY/botTipY/topDipY/botDipY and
-//     the string's inner vertex (stringX, rightHandY) below are all
-//     left completely unchanged.
-// (2) ARROW + RIGHT HAND are drawn in their own transform AFTER this
-//     wrapper's ctx.restore() (see below), so they need the SAME
-//     rotateAroundPivot manual point-rotation infscript.js's archer
-//     uses — redirecting the phase logic's rightHandX/rightHandY
-//     values at the source (like the melee weapons did) would double-
-//     rotate the string vertex above, which already gets the ambient
-//     wrapper rotation for free.
-//
-// UPDATED per visual feedback on the infantry archer (same fix applied
-// here): a full 90° straight-down rotation with no position change
-// looked disconnected — floating at chest height aiming at their own
-// feet. Fixed to 45° (DOWN_AIM_ANGLE) with the pivot lowered 30px
-// (DOWN_Y_OFFSET), same numbers as infscript.js's archer for visual
-// consistency between the two. No head-dip equivalent here — cavalry
-// riders don't have the same exposed head-bow read as standing
-// infantry, and mount-seated posture is a separate, deferred problem
-// (see this file's MOUNT UP/DOWN POSES notes) — left alone for now.
-//
-// NOT touched: the stowed lance prop drawn just above this block —
-// a strapped weapon is a static accessory regardless of aim
-// direction, same reasoning as every other stowed/strapped prop this
-// session (quivers, shields, stowed bows).
+// INDEPENDENT AIM — added this session. Replaces the old binary
+// "facingDown ? 36° : 0°" snap with the CONTINUOUS aimAngle computed
+// near the top of this function (from unit.x/y to unit.targetX/Y).
+// This is the correct fit for a ranged weapon: a horse archer running
+// in any direction should be able to aim at a target in ANY other
+// direction, not just "toward camera" or "not toward camera" — a
+// continuous angle covers the full circle where the old quadrant
+// system only covered two discrete poses.
+// FALLBACK: when the caller hasn't set unit.targetX/targetY (see the
+// hasIndependentTarget contract at the top of this function),
+// aimAngle defaults to 0 and aimFacingDown mirrors facingDown exactly
+// — so a unit with no live target still gets today's old behavior
+// (36° snap while facing down, flat otherwise) rather than silently
+// losing its aim pose. hasIndependentTarget below picks between the
+// two modes explicitly rather than trying to make one formula cover
+// both, since the quantized fallback and the continuous target-aim
+// are genuinely different behaviors, not the same math at different
+// precision.
 // ═══════════════════════════════════════════════════════════════
-// REVISED (offset bug fix — see screenshot: bow rendering far from the
-// rider, disconnected from hands/body). 45°/30px pushed the pivot too
-// far below the rider and rotated too aggressively for this rider's
-// tighter body scale. Tightened to 15px / ~40% of a quarter-turn (36°)
-// — same shared numbers now used by infscript.js's archer (see that
-// file's DOWN_AIM_OFFSET/DOWN_AIM_ROT) — keeping the whole bow+arrow+
-// hand assembly closer to the rider's actual hand position instead of
-// swinging out on a long, steep arc.
 const DOWN_AIM_ANGLE = 0.4 * (Math.PI / 2);  // 36°, matches infscript.js's archer
 // NOTE: DOWN_Y_OFFSET is now a LOCAL override, no longer numerically
 // tied to infscript.js's foot archer (still 15px there). Per direct
@@ -2372,7 +3158,17 @@ const DOWN_AIM_ANGLE = 0.4 * (Math.PI / 2);  // 36°, matches infscript.js's arc
 // If infscript.js's foot archer offset ever changes, this does NOT
 // need to follow it anymore — they're intentionally decoupled now.
 const DOWN_Y_OFFSET = 9;              // lower the whole aiming assembly (was 15)
-const pivotY = facingDown ? (handY + DOWN_Y_OFFSET) : handY;
+
+// haBowRot / haPivotY: the actual rotation and pivot used below. In
+// target mode, haBowRot is the FULL continuous aimAngle (clamped away
+// from the horizontal quadrant logic entirely — a real angle, not a
+// quantized pose) and haPivotY shifts proportionally to how steep that
+// angle is, so a shallow target angle doesn't yank the pivot down/up
+// as hard as a steep one does. In fallback mode, behavior matches the
+// old code exactly.
+const haBowRot = hasIndependentTarget ? aimAngle : (facingDown ? DOWN_AIM_ANGLE : 0);
+const haPivotOffset = hasIndependentTarget ? (DOWN_Y_OFFSET * Math.sin(aimAngle)) : (facingDown ? DOWN_Y_OFFSET : 0);
+const pivotY = handY + haPivotOffset;
 
 const rotateAroundPivot = (px, py, angle) => {
     const ddx = px - handX, ddy = py - pivotY;
@@ -2385,7 +3181,7 @@ const rotateAroundPivot = (px, py, angle) => {
 
 ctx.save();
 ctx.translate(handX, pivotY); 
-ctx.rotate(bowKhatra + (facingDown ? DOWN_AIM_ANGLE : 0)); 
+ctx.rotate(bowKhatra + haBowRot); 
 ctx.translate(-handX, -pivotY);
 
 // isJapan already declared at top of function
@@ -2396,7 +3192,15 @@ let botTipY = isJapan ? handY + 4  : handY + 8;
 let topDipY = isJapan ? handY - 14 : handY - 4; 
 let botDipY = isJapan ? handY - 1  : handY + 8;  
 
-ctx.strokeStyle = isJapan ? "#1a1a1a" : "#3e2723"; // Black lacquer vs Wood/Horn
+// Horse archer bow color, changed to light brown per direct request
+// to visually distinguish it from other bows — was dark "#3e2723"
+// (Wood/Horn), matching infscript.js's foot archer. Now diverges:
+// only THIS bow (the nomad/horse-archer style, isJapan===false) uses
+// the lighter tone. Japan's Yumi (isJapan===true, black lacquer) is
+// untouched, and infantry bows live in an entirely separate file
+// (infscript.js) so they're unaffected by construction, not just by
+// this branch.
+ctx.strokeStyle = isJapan ? "#1a1a1a" : "#b8895f"; // Black lacquer vs light brown Wood/Horn
 ctx.lineWidth = isJapan ? 2 : 1.5;
 
 // Draw the bow stave
@@ -2427,7 +3231,7 @@ ctx.stroke();
 
 ctx.restore();
             // Draw Arrow (Only renders if hasArrow is true, which is fixed to start at 0.2)
-            const haArrowPt = facingDown ? rotateAroundPivot(rightHandX, rightHandY, DOWN_AIM_ANGLE) : { x: rightHandX, y: rightHandY };
+            const haArrowPt = rotateAroundPivot(rightHandX, rightHandY, haBowRot);
             if (hasArrow) {
                 ctx.save();
                 ctx.translate(haArrowPt.x, haArrowPt.y); 
@@ -2437,7 +3241,7 @@ ctx.restore();
                     let nockProgress = (cycle - 0.2) / 0.2;
                     haNockRot = (-Math.PI / 4) * (1 - nockProgress);
                 }
-                ctx.rotate(haNockRot + (facingDown ? DOWN_AIM_ANGLE : 0));
+                ctx.rotate(haNockRot + haBowRot);
                 ctx.fillStyle = "#8d6e63"; ctx.fillRect(-4, -0.5, 16, 1); 
                 ctx.fillStyle = "#9e9e9e"; ctx.beginPath(); ctx.moveTo(12, -1); ctx.lineTo(16, 0); ctx.lineTo(12, 1); ctx.fill(); 
                 ctx.fillStyle = "#d32f2f"; 
@@ -2452,388 +3256,728 @@ ctx.restore();
         
         ctx.restore();
     }
-// Triggers for camels, the specific Zamburak role, or units equipped with Hand Cannons
-// --- CAMEL CANNON / ZAMBURAK LOGIC ---
-// --- CAMEL CANNON / ZAMBURAK LOGIC ---
+// Triggers for the Cannon (formerly Camel Cannon / Zamburak — see the
+// isCamelCannonType regex above, kept as-is for filtering/lookups; only
+// the DISPLAYED name changed, not the internal type/matching logic).
+// --- CANNON LOGIC (fully mountless artillery piece) ---
+//
+// REBUILT this session, replacing the prior version's accumulated
+// issues: (1) the file-wide unconditional drawRiderBody() calls (fixed
+// separately, above, via !isCamelCannonType guards on both call sites)
+// were drawing a generic humanoid rider with no gate for this unit at
+// all; (2) THIS block's own side-view gunner used to draw unconditionally
+// before branching into up/down poses, which ALSO drew their own gunner
+// — i.e. two overlapping figures for any up/down frame; (3) up/down
+// selection was a steep-threshold three-way pose split, not a lock, so
+// it never actually held a pose the way the user wanted.
+//
+// Fixed here by construction, not by patching:
+//   - Exactly ONE gunner draw call, gated inside whichever single pose
+//     branch actually fires — never both.
+//   - Direction lock mirrors infscript.js's rocket cart EXACTLY (same
+//     engage/hold/release state machine, same 300ms debounce, same
+//     40px target-offset threshold, same faction-preference fallback)
+//     per direct user request ("use the rocket launcher as a
+//     reference"). Fields are namespaced _cannon* (not _rocket*) so a
+//     unit mistyped between the two can never cross-contaminate state.
+//   - Angles are the exact user spec ("up is 90 degrees up, down is 90
+//     degrees down, sideways is parallel to x axis"): +-Math.PI/2 for
+//     up/down, 0 for side — identical constants to the rocket's
+//     ROCKET_PERPENDICULAR_UP/DOWN.
+//   - Geometry is the side-view wheelbarrow silhouette (verified against
+//     the user's reference screenshot) ROTATED by the locked angle,
+//     same technique as the rocket's tubeBaseRot wrapping its tube draw
+//     — one canonical drawing, rotated, not three hand-built re-layouts.
+//     This guarantees the up/down poses can never desync from the side
+//     silhouette the user confirmed looks right, and makes doubling
+//     structurally impossible since there's only one draw call site.
 else if (
-    type === "MOUNTED_GUNNER" || 
+    // NOTE: the old `type === "MOUNTED_GUNNER"` check here never matched
+    // anything (visType values are lowercase, e.g. "camel_cannon" — the
+    // ROLES constant "mounted_gunner" is what's role-compared, not this
+    // string) so it was dead. Replaced with the same robust role-based
+    // check used by isCamelCannonType above, keeping this gate in sync.
     type === "camel_cannon" ||
-    (unitName && unitName.toLowerCase().includes("camel cannon"))
+    (unitName && unitName.toLowerCase().includes("camel cannon")) ||
+    (unit && unit.stats && unit.stats.role === "mounted_gunner")
 ) {
     let b = (typeof bob !== 'undefined') ? bob : 0;
-    let reducedBob = b * 0.1; 
+    let reducedBob = b * 0.1;
     let ammo = (typeof unitAmmo !== 'undefined') ? unitAmmo : 1;
     let cd = (typeof cooldown !== 'undefined') ? cooldown : 0;
-    let maxCd = (typeof unit !== 'undefined' && unit.stats && unit.stats.cooldown) ? unit.stats.cooldown : 1000; 
-    
-    // Unified cycle logic for flicker-free movement
+    let maxCd = (typeof unit !== 'undefined' && unit.stats && unit.stats.cooldown) ? unit.stats.cooldown : 1000;
     let cycle = isAttacking ? Math.max(0, maxCd - cd) / maxCd : 1.0;
+    const hasAmmo = ammo > 0;
 
-    // ==========================================
-    // 1. DRAW RIDER
-    // ==========================================
-    ctx.save();
-    ctx.translate(2.0, reducedBob + 11.0); 
-    ctx.scale(1.275, 1.275); 
-    
-    ctx.strokeStyle = "#1a1a1a"; 
-    ctx.lineJoin = "round";
+    // ── SINGLE GUNNER DRAW — called once, from inside whichever pose
+    // branch fires below. Local function (not inline) so there is
+    // exactly one place this geometry is defined, matching the
+    // rocket's "ONE hand visible" fix reasoning: duplicating a figure
+    // across branches is exactly how the old two-gunner bug happened.
+    const drawGunner = () => {
+        ctx.strokeStyle = "#3e2723"; ctx.lineWidth = 1.8; ctx.lineJoin = "round";
+        let gLegSwing = moving ? Math.sin(animFrame * 0.4) * 2 : 0;
+        ctx.beginPath();
+        ctx.moveTo(-1.5, -1); ctx.lineTo(-3 + gLegSwing, 6);
+        ctx.moveTo(1.5, -1); ctx.lineTo(3 - gLegSwing, 6);
+        ctx.stroke();
+        ctx.fillStyle = factionColor; ctx.lineWidth = 1.0; ctx.strokeStyle = "#1a1a1a";
+        ctx.beginPath(); ctx.rect(-3.5, -8, 7, 8.5); ctx.fill(); ctx.stroke();
+        ctx.fillStyle = "#ffccbc";
+        ctx.beginPath(); ctx.arc(0, -10.5, 3, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+        ctx.fillStyle = factionColor; ctx.strokeStyle = "#212121"; ctx.lineWidth = 1.8;
+        ctx.beginPath(); ctx.moveTo(-3.5, -12); ctx.lineTo(3.5, -12); ctx.stroke();
+    };
 
-    // Legs
-   // Old line: let gLegSwing = Math.sin(animFrame * 0.4) * 2;
-let gLegSwing = moving ? Math.sin(animFrame * 0.4) * 2 : 0;
-    ctx.strokeStyle = "#3e2723"; 
-    ctx.lineWidth = 1.8; 
-    ctx.beginPath();
-    ctx.moveTo(-1.5, -1); ctx.lineTo(-3 + gLegSwing, 6); 
-    ctx.moveTo(1.5, -1); ctx.lineTo(3 - gLegSwing, 6);
-    ctx.stroke();
-
-    // Body (Thobe)
-    ctx.fillStyle = factionColor;
-    ctx.lineWidth = 1.0;
-    ctx.strokeStyle = "#1a1a1a";
-    ctx.beginPath(); ctx.rect(-3.5, -8, 7, 8.5); ctx.fill(); ctx.stroke();
-
-    // Head & Keffiyeh
-    ctx.fillStyle = "#ffccbc"; 
-    ctx.beginPath(); ctx.arc(0, -10.5, 3, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
-    ctx.fillStyle = factionColor;
-    ctx.strokeStyle = "#212121"; ctx.lineWidth = 1.8;
-    ctx.beginPath(); ctx.moveTo(-3.5, -12); ctx.lineTo(3.5, -12); ctx.stroke();
-
-    ctx.restore();
-
-    // ==========================================
-    // 2. COMBAT LOGIC (Ranged vs Melee)
-    // ==========================================
     if (ammo <= 0) {
-        // --- MODE A: SWORD COMBAT (CANNON STOWED) ---
-        
-        // 1. Draw Cannon stowed on back (Inside Rider space)
+        // ── MODE A: SWORD COMBAT (CANNON STOWED) — unchanged from
+        // before; melee fallback is orthogonal to the aim-lock/pose
+        // work above and wasn't part of what broke.
         ctx.save();
-        ctx.translate(-1, reducedBob + 6); // Position on rider's back
-        ctx.rotate(Math.PI / 4); // Slanted across back
-        ctx.fillStyle = "#4e342e"; ctx.fillRect(-4, -1, 8, 2); // Stock
-        ctx.fillStyle = "#424242"; ctx.fillRect(2, -1.5, 12, 3); // Barrel
+        ctx.translate(2.0, reducedBob + 11.0);
+        ctx.scale(1.275, 1.275);
+        drawGunner();
         ctx.restore();
 
-        // 2. Shortsword Animation Logic
-        // ═══════════════════════════════════════════════════════════
-        // DOWNWARD FACING (facingDirY===1) — ported this session.
-        // Same rotation-offset trick as the other two cavalry melee
-        // branches: blade/guard/hand shapes below (step 3) are drawn
-        // along local +X and stay completely unchanged. `lunge` replaces
-        // the original inline `handX = 4 + (p*6)` / `10 - (p*6)` — same
-        // 0→6→0 shape across the swing cycle, just pulled into its own
-        // variable so it can be applied to whichever axis the current
-        // facing needs (X for the side view's sideways lunge, Y for the
-        // down view's toward-the-viewer lunge) without duplicating the
-        // phase-timing math twice.
-        // ═══════════════════════════════════════════════════════════
-        var meleeCycle = cycle; 
-        var swingAngle = -Math.PI / 2; // Ready position
+        ctx.save();
+        ctx.translate(-1, reducedBob + 6);
+        ctx.rotate(Math.PI / 4);
+        ctx.fillStyle = "#4e342e"; ctx.fillRect(-4, -1, 8, 2);
+        ctx.fillStyle = "#424242"; ctx.fillRect(2, -1.5, 12, 3);
+        ctx.restore();
+
+        var meleeCycle = cycle;
+        var swingAngle = -Math.PI / 2;
         var handX = 4, handY = 8;
         var lunge = 0;
 
         if (isAttacking) {
-            if (meleeCycle < 0.2) { 
-                // Wind up
-                swingAngle = -Math.PI / 1.2; 
-            } else if (meleeCycle < 0.5) { 
-                // Swing down
+            if (meleeCycle < 0.2) {
+                swingAngle = -Math.PI / 1.2;
+            } else if (meleeCycle < 0.5) {
                 var p = (meleeCycle - 0.2) / 0.3;
                 swingAngle = -Math.PI / 1.2 + (Math.PI * 1.5 * p);
                 lunge = p * 6;
-            } else { 
-                // Recover
+            } else {
                 var p = (meleeCycle - 0.5) / 0.5;
                 swingAngle = Math.PI * 0.3 - (Math.PI * 0.8 * p);
                 lunge = 6 - (p * 6);
             }
         }
-		else{}
 
         if (facingDown) {
-            handX = 1;          // small centered offset — no sideways drift while facing camera
-            handY = 8 + lunge;  // lunge now reaches down-screen, toward the viewer
+            handX = 1;
+            handY = 8 + lunge;
         } else {
-            handX = 4 + lunge;  // original sideways lunge (unchanged behavior)
-            // handY stays at its 8 baseline, as before
+            handX = 4 + lunge;
         }
 
-        // 3. Render Shortsword
         ctx.save();
         ctx.translate(handX, handY + reducedBob);
         ctx.rotate(swingAngle + (facingDown ? DOWN_QUADRANT_ANGLE : 0));
-        
-        // Blade
-        ctx.fillStyle = "#cfd8dc"; // Steel
+        ctx.fillStyle = "#cfd8dc";
         ctx.beginPath();
-        ctx.moveTo(0, 0);
-        ctx.lineTo(12, -1);
-        ctx.lineTo(14, 0); // Point
-        ctx.lineTo(12, 1);
-        ctx.closePath();
-        ctx.fill();
-        ctx.strokeStyle = "#90a4ae";
-        ctx.lineWidth = 0.5;
-        ctx.stroke();
-
-        // Crossguard & Hilt
-        ctx.fillStyle = "#ffca28"; // Gold/Brass
-        ctx.fillRect(-1, -3, 2, 6); // Guard
-        ctx.fillStyle = "#4e342e"; 
-        ctx.fillRect(-4, -1, 4, 2); // Handle
-        
-        // Hand
+        ctx.moveTo(0, 0); ctx.lineTo(12, -1); ctx.lineTo(14, 0); ctx.lineTo(12, 1);
+        ctx.closePath(); ctx.fill();
+        ctx.strokeStyle = "#90a4ae"; ctx.lineWidth = 0.5; ctx.stroke();
+        ctx.fillStyle = "#ffca28"; ctx.fillRect(-1, -3, 2, 6);
+        ctx.fillStyle = "#4e342e"; ctx.fillRect(-4, -1, 4, 2);
         ctx.fillStyle = "#ffccbc";
         ctx.beginPath(); ctx.arc(0, 0, 2.2, 0, Math.PI * 2); ctx.fill();
-        
-        ctx.restore();
-
- 
-} else {
-    // --- MODE B: RANGED CANNON (SURGERY FIX REPLICATED) ---
-    // ═══════════════════════════════════════════════════════════════
-    // DOWNWARD FACING (facingDirY===1) — ported this session, per
-    // explicit user request (overriding this session's earlier
-    // deferral, which filed this under "mounts, later" reasoning that
-    // no longer applies now that the user has asked for it directly).
-    //
-    // Same "genuine re-layout, not just a rotation" approach as
-    // infscript.js's rocket cart (a good side-by-side reference if this
-    // needs revisiting) — the wheelbarrow chassis, single wheel, and
-    // barrel are re-positioned with named constants below rather than
-    // just rotated, so the wheel/handle placement actually makes sense
-    // from this angle instead of an automatic rotation of side-view art
-    // that happened to carry a wheel along for the ride.
-    //
-    // DESIGN, for a future session to tune:
-    //   - The barrel points down-screen (toward the viewer/target)
-    //     instead of sideways; the muzzle end is at the LARGEST Y
-    //     (furthest from the rider, closest to camera).
-    //   - The frame's "back handles" (gripped near the rider in the
-    //     side view) sit at the smallest Y (closest to the rider);
-    //     the "front bed" extends toward the muzzle end.
-    //   - The single wheel sits centered along the frame's length,
-    //     same relative position as the side view.
-    //   - recoil (a horizontal kick in the side view) becomes a
-    //     vertical kick here — firing pushes the carriage AWAY from
-    //     the target, i.e. up-screen (smaller Y), so it's now
-    //     subtracted from the down-offset rather than added to X.
-    //   - Muzzle flash/smoke and the whole swab/ball/ram/match-cord
-    //     reload sequence all reach down from the muzzle instead of
-    //     sideways, same relative depths/timings as the side view.
-    // ═══════════════════════════════════════════════════════════════
-    
-    // 1. Unified Timing Logic (Matches Hand Cannoner success)
-    let maxCd = 300; 
-    let cd = (typeof cooldown !== 'undefined') ? cooldown : 0;
-    let cycle = isAttacking ? Math.max(0, maxCd - cd) / maxCd : 1.0;
-
-    // 2. Recuperation & Positioning
-    // Recoil kicks back hard during the first 15% of the cycle
-    let recoil = (isAttacking && cycle < 0.15) ? Math.sin((cycle / 0.15) * Math.PI) * 5 : 0;
-    
-    let gunAngle = -Math.PI / 30; 
-    let gunY = 0;
-    // Tilt up for swabbing/loading phases
-    if (isAttacking && cycle > 0.15 && cycle < 0.95) { 
-        gunAngle = Math.PI / 20; 
-        gunY = 1.0; 
-    }
-
-    if (facingDown) {
-        const CANNON_DOWN_Y = 20;   // how far below the rider the whole assembly sits
-        const CANNON_WHEEL_Y = 8;   // wheel position along the frame's length
-        const CANNON_BED_Y = 16;    // front bed / muzzle-end of the frame
-
-        ctx.save();
-        ctx.translate(0, CANNON_DOWN_Y + gunY + (reducedBob || 0) - recoil);
-        ctx.rotate(gunAngle);
-
-        // --- CHINESE WHEELBARROW WAGON CHASSIS ---
-        ctx.save();
-        ctx.translate(0, 3);
-
-        // Frame — back handles (near rider) to front bed (toward muzzle)
-        ctx.fillStyle = "#5d4037"; ctx.strokeStyle = "#3e2723"; ctx.lineWidth = 1.5;
-        ctx.beginPath();
-        ctx.moveTo(-3, -10);
-        ctx.lineTo(3, -10);
-        ctx.lineTo(3, CANNON_BED_Y);
-        ctx.lineTo(-3, CANNON_BED_Y);
-        ctx.closePath();
-        ctx.fill(); ctx.stroke();
-
-        // Wheel Strut / Axle Mount
-        ctx.fillRect(-2, CANNON_WHEEL_Y - 4, 4, 8);
-        ctx.strokeRect(-2, CANNON_WHEEL_Y - 4, 4, 8);
-
-        // The Central Wheel
-        let wheelRot = moving ? animFrame * 0.4 : 0;
-        ctx.save();
-        ctx.translate(0, CANNON_WHEEL_Y);
-        ctx.rotate(wheelRot);
-        ctx.fillStyle = "#4e342e"; ctx.strokeStyle = "#212121"; ctx.lineWidth = 1.5;
-        ctx.beginPath(); ctx.arc(0, 0, 6, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
-        ctx.strokeStyle = "#212121"; ctx.lineWidth = 1;
-        for (let w = 0; w < 4; w++) {
-            ctx.beginPath(); ctx.moveTo(-6, 0); ctx.lineTo(6, 0); ctx.stroke();
-            ctx.rotate(Math.PI / 4);
-        }
-        ctx.restore();
-        ctx.restore();
-
-        // Barrel — pointing down-screen, muzzle at the far end
-        ctx.fillStyle = "#424242"; ctx.strokeStyle = "#212121"; ctx.lineWidth = 1;
-        ctx.beginPath(); ctx.moveTo(-2, 2); ctx.lineTo(-1.5, 20); ctx.lineTo(2.5, 20); ctx.lineTo(3, 2); ctx.fill(); ctx.stroke();
-        ctx.fillStyle = "#616161"; ctx.fillRect(-2.5, 20, 6, 3); // Muzzle ring
-
-        // Support hand holding the stock
-        ctx.fillStyle = "#ffccbc"; ctx.beginPath(); ctx.arc(2, 10, 2, 0, Math.PI * 2); ctx.fill();
-
-        // Muzzle flash & smoke — reaching down from the muzzle
-        if (isAttacking && cd > 270) {
-            ctx.fillStyle = "#fff176"; ctx.beginPath();
-            ctx.arc(0.5, 23, 3 + Math.random() * 2, 0, Math.PI * 2); ctx.fill();
-            ctx.fillStyle = "#ff5722"; ctx.beginPath();
-            ctx.arc(0.5, 25, 5 + Math.random() * 3, 0, Math.PI * 2); ctx.fill();
-            ctx.fillStyle = "rgba(180, 180, 180, 0.7)";
-            ctx.beginPath();
-            ctx.arc(-2, 30, 7 + Math.random() * 4, 0, Math.PI * 2);
-            ctx.arc(1, 35, 5 + Math.random() * 4, 0, Math.PI * 2);
-            ctx.fill();
-        }
-        // Reload sequence (swab -> ball -> ram) — same relative depths,
-        // now reaching down from the muzzle instead of sideways
-        else if (isAttacking && cycle < 0.55) {
-            let p = (cycle - 0.15) / 0.40;
-            let depth = Math.sin(p * Math.PI) * 15;
-            ctx.strokeStyle = "#546e7a"; ctx.lineWidth = 2;
-            ctx.beginPath(); ctx.moveTo(0.5, 23 - depth); ctx.lineTo(0.5, 33 - depth); ctx.stroke();
-        }
-        else if (isAttacking && cycle < 0.65) {
-            ctx.fillStyle = "#212121";
-            ctx.beginPath(); ctx.arc(-1 + Math.sin(cycle * 40) * 2, 22, 2, 0, Math.PI * 2); ctx.fill();
-        }
-        else if (isAttacking && cycle < 0.90) {
-            let p = (cycle - 0.65) / 0.25;
-            let depth = Math.sin(p * Math.PI) * 18;
-            ctx.strokeStyle = "#cfd8dc"; ctx.lineWidth = 2;
-            ctx.beginPath(); ctx.moveTo(0.5, 23 - depth); ctx.lineTo(0.5, 35 - depth); ctx.stroke();
-        }
-        else if (isAttacking && cycle < 0.99) {
-            let matchDip = Math.sin((cycle - 0.90) * 15) * 4;
-            ctx.strokeStyle = "#ff5722"; ctx.lineWidth = 1.5;
-            ctx.beginPath(); ctx.moveTo(-7 + matchDip, 4); ctx.lineTo(-2, 4); ctx.stroke();
-        }
-
         ctx.restore();
 
     } else {
-    ctx.save();
-    // Offset for the camel's back and apply bobbing
-    ctx.translate(8.0 + recoil, gunY + (reducedBob || 0) + 8); 
-    ctx.rotate(gunAngle); 
+        // ── MODE B: RANGED CANNON ──
+        const isLaunching = isAttacking && hasAmmo;
 
-// --- CHINESE WHEELBARROW WAGON CHASSIS ---
-    ctx.save();
-    // Lower the cart slightly relative to the gun so it sits underneath
-    ctx.translate(0, 3);
-    
-    // 1. Wooden Frame/Handles
-    ctx.fillStyle = "#5d4037"; ctx.strokeStyle = "#3e2723"; ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    ctx.moveTo(-10, 0); // Back handles held by the rider
-    ctx.lineTo(16, 0);  // Front bed
-    ctx.lineTo(16, 3);
-    ctx.lineTo(-10, 3);
-    ctx.closePath();
-    ctx.fill(); ctx.stroke();
+        // DIRECTION LOCK — exact mirror of infscript.js's rocket cart
+        // ENGAGE/HOLD/RELEASE state machine. See that file's own
+        // top-of-file _computeCentroidLock comment for the full
+        // reasoning; not re-derived here since it's a deliberate 1:1
+        // port, per direct request.
+        // SURGERY: direction now comes from the ENEMY SIDE's live
+        // centroid instead of a spawn-corner guess, and can now lock
+        // horizontal (side-by-side spawns) as well as vertical. Also,
+        // per direct request ("this determination switches every
+        // reload for cannon"), the lock now also releases on every
+        // reload — an edge-detect on isAttacking dropping to false
+        // (the narrow per-shot windup flash ending, same signal the
+        // Repeater's isRepeaterFiring already keys off) — not just
+        // when ammo fully runs out. Unlike the Rocket, which
+        // intentionally holds for its whole volley.
+        let lockedFacingY = 0; // 0 = side, 1 = down, -1 = up
 
-    // 2. Wheel Strut / Axle Mount
-    ctx.fillRect(6, 3, 4, 8);
-    ctx.strokeRect(6, 3, 4, 8);
+        if (unit) {
+            const CANNON_LOCK_DEBOUNCE_MS = 300;
+            if (typeof unit._cannonLockChangeAt !== 'number') unit._cannonLockChangeAt = 0;
+            const sinceCannonChange = Date.now() - unit._cannonLockChangeAt;
 
-    // 3. The Central Wheel
-    let wheelRot = moving ? animFrame * 0.4 : 0;
-    ctx.save();
-    ctx.translate(8, 12); // Center of the wheel
-    ctx.rotate(wheelRot);
-    
-    // Outer rim
-    ctx.fillStyle = "#4e342e"; ctx.strokeStyle = "#212121"; ctx.lineWidth = 1.5;
-    ctx.beginPath(); ctx.arc(0, 0, 6, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
-    
-    // Spokes
-    ctx.strokeStyle = "#212121"; ctx.lineWidth = 1;
-    for (let w = 0; w < 4; w++) {
-        ctx.beginPath(); ctx.moveTo(-6, 0); ctx.lineTo(6, 0); ctx.stroke();
-        ctx.rotate(Math.PI / 4);
-    }
-    ctx.restore(); // Restore wheel rotation
-    ctx.restore(); // Restore cart translation
-	
-	
-    ctx.fillStyle = "#424242"; ctx.strokeStyle = "#212121"; ctx.lineWidth = 1;
-    ctx.beginPath(); ctx.moveTo(2, -2); ctx.lineTo(20, -1.5); ctx.lineTo(20, 2.5); ctx.lineTo(2, 3); ctx.fill(); ctx.stroke();
-    ctx.fillStyle = "#616161"; ctx.fillRect(20, -2.5, 3, 6); // Muzzle ring
+            // RELOAD EDGE-RELEASE — fires once per shot, right as the
+            // windup flash ends and the reload/cooldown phase begins.
+            if (!isAttacking && unit._cannonWasAttacking && unit._cannonLocked) {
+                unit._cannonLocked = false;
+                unit._cannonLockChangeAt = Date.now();
+            }
+            unit._cannonWasAttacking = isAttacking;
 
-    // Support hand holding the stock
-    ctx.fillStyle = "#ffccbc"; ctx.beginPath(); ctx.arc(10, 2, 2, 0, Math.PI*2); ctx.fill();
+            if (isLaunching && !unit._cannonLocked && sinceCannonChange >= CANNON_LOCK_DEBOUNCE_MS) {
+                const _cannonLock = _computeCentroidLock(unit, side);
+                unit._cannonFacingY = (_cannonLock.axis === 'y') ? _cannonLock.dir : 0;
+                unit._cannonFacingX = (_cannonLock.axis === 'x') ? _cannonLock.dir : 0;
+                unit._cannonLocked = true;
+                unit._cannonLockChangeAt = Date.now();
+            } else if (!hasAmmo && unit._cannonLocked) {
+                // Belt-and-suspenders: guarantees the lock clears when
+                // ammo hits zero even on the frame the edge-release above
+                // didn't catch.
+                unit._cannonLocked = false;
+                unit._cannonLockChangeAt = Date.now();
+            }
 
-    // ==========================================
-    // 1. REPLICATED MUZZLE FLASH & CLOUD
-    // ==========================================
-    // Triggering via CD check (like the infantry) ensures it never skips frames
-    if (isAttacking && cd > 270) { 
-        // CORE FLASH
-        ctx.fillStyle = "#fff176"; ctx.beginPath(); 
-        ctx.arc(23, 0.5, 3 + Math.random() * 2, 0, Math.PI * 2); ctx.fill();
-        
-        // OUTER FLASH
-        ctx.fillStyle = "#ff5722"; ctx.beginPath(); 
-        ctx.arc(25, 0.5, 5 + Math.random() * 3, 0, Math.PI * 2); ctx.fill();
-        
-        // THE SMOKE CLOUD
-        ctx.fillStyle = "rgba(180, 180, 180, 0.7)"; 
-        ctx.beginPath(); 
-        ctx.arc(30, -2, 7 + Math.random() * 4, 0, Math.PI * 2); // Main puff
-        ctx.arc(35, 1, 5 + Math.random() * 4, 0, Math.PI * 2);  // Forward puff
-        ctx.fill();
-    }
-    // ==========================================
-    // 2. RELOAD SEQUENCE (SWAB -> BALL -> RAM)
-    // ==========================================
-    else if (isAttacking && cycle < 0.55) { 
-        let p = (cycle - 0.15) / 0.40; 
-        let depth = Math.sin(p * Math.PI) * 15;
-        ctx.strokeStyle = "#546e7a"; ctx.lineWidth = 2;
-        ctx.beginPath(); ctx.moveTo(23 - depth, 0.5); ctx.lineTo(33 - depth, 0.5); ctx.stroke();
-    }
-    else if (isAttacking && cycle < 0.65) { 
-        ctx.fillStyle = "#212121"; 
-        ctx.beginPath(); ctx.arc(22, -1 + Math.sin(cycle*40)*2, 2, 0, Math.PI*2); ctx.fill();
-    } 
-    else if (isAttacking && cycle < 0.90) { 
-        let p = (cycle - 0.65) / 0.25;
-        let depth = Math.sin(p * Math.PI) * 18; 
-        ctx.strokeStyle = "#cfd8dc"; ctx.lineWidth = 2;
-        ctx.beginPath(); ctx.moveTo(23 - depth, 0.5); ctx.lineTo(35 - depth, 0.5); ctx.stroke();
-    }
-    else if (isAttacking && cycle < 0.99) { 
-        let matchDip = Math.sin((cycle - 0.90) * 15) * 4;
-        ctx.strokeStyle = "#ff5722"; ctx.lineWidth = 1.5;
-        ctx.beginPath(); ctx.moveTo(4, -7 + matchDip); ctx.lineTo(4, -2); ctx.stroke();
-    }
+            lockedFacingY = unit._cannonLocked ? (unit._cannonFacingY ?? 0) : 0;
 
-    ctx.restore();
+            // SURGERY: while locked onto a horizontally-dominant enemy
+            // centroid (lockedFacingY===0 but a horizontal lock is
+            // active), force the unit's mirror to face that side.
+            if (unit._cannonLocked && lockedFacingY === 0 && unit._cannonFacingX) {
+                unit.facingDir = unit._cannonFacingX;
+            }
+        } else {
+            lockedFacingY = facingDown ? 1 : (facingUp ? -1 : 0);
+        }
+
+        // PERPENDICULAR ANGLES — exact user spec: up = 90 deg up, down =
+        // 90 deg down, side = parallel to x-axis. Same constants as the
+        // rocket's ROCKET_PERPENDICULAR_UP/DOWN.
+        const CANNON_PERPENDICULAR_DOWN = Math.PI / 2;
+        const CANNON_PERPENDICULAR_UP = -Math.PI / 2;
+        const cannonBaseRot = (lockedFacingY === 1) ? CANNON_PERPENDICULAR_DOWN
+                            : (lockedFacingY === -1) ? CANNON_PERPENDICULAR_UP
+                            : 0;
+
+        // RECOIL — was a flat +X slide applied once here regardless of
+        // pose, so for the up/down poses (whose barrels don't point
+        // along X at all) it read as a meaningless sideways jiggle
+        // instead of a kickback. Now applied per-pose below, along each
+        // pose's own actual firing axis (backward = -muzzleDir), so it
+        // visibly reads as "the gun kicks back when it fires" in every
+        // pose instead of just(ish) the side view.
+        let recoil = (isAttacking && cycle < 0.15) ? Math.sin((cycle / 0.15) * Math.PI) * 5 : 0;
+        let gunAngle = -Math.PI / 30;
+        let gunY = 0;
+        if (isAttacking && cycle > 0.15 && cycle < 0.95) {
+            gunAngle = Math.PI / 20;
+            gunY = 1.0;
+        }
+
+        ctx.save();
+        ctx.translate(8.0, gunY + (reducedBob || 0) + 8);
+
+        // --- CANNON CARRIAGE — THREE DISTINCT HAND-BUILT POSES ---
+        // Per direct user feedback, a single side silhouette rotated
+        // wholesale for up/down looked like a "lazy rotation" and didn't
+        // match the reference image's genuinely different up/down poses
+        // (reference "up" is a back/top view with the gunner standing
+        // upright beside a vertical barrel; reference "down" looks along
+        // the barrel at the viewer, showing the bore as a circle, with
+        // the gunner leaning over the breech from behind/above). So each
+        // pose is now its own layout instead of one shape rotated by
+        // cannonBaseRot. gunAngle (recoil kick) is still applied as a
+        // small rotation local to each pose's own barrel draw.
+        //
+        // A shared bronze gradient is used for the barrel in all three
+        // poses so the metal reads as actual cast bronze (dark-light-dark
+        // banding) instead of the old flat brown fill.
+        function bronzeGradient(x0, y0, x1, y1) {
+            let g = ctx.createLinearGradient(x0, y0, x1, y1);
+            g.addColorStop(0, "#3e2f16");
+            g.addColorStop(0.45, "#8d6e3a");
+            g.addColorStop(0.55, "#8d6e3a");
+            g.addColorStop(1, "#5c4423");
+            return g;
+        }
+
+        // Wheel spin — already tied to the unit's actual movement state
+        // (isMoving -> "moving" param, upstream in troop_draw.js), not a
+        // separate flag, so slowing the Cannon down (see troop_system.js)
+        // doesn't disconnect this; it just means a slower, heavier-
+        // feeling roll instead of no roll at all.
+        let wheelRot = moving ? animFrame * 0.4 : 0;
+
+        // Muzzle world-position per pose, used below for muzzle
+        // flash/smoke and the swab/ram reload animation so those effects
+        // still anchor to the actual muzzle instead of a fixed (23,0.5)
+        // that only made sense for the old rotate-everything side pose.
+        let muzzleX = 0, muzzleY = 0, muzzleDirX = 1, muzzleDirY = 0;
+        // Touch-hole/ignition-match anchor — separate from muzzleX
+        // because the match is lit at the BREECH (rear), not the muzzle.
+        // Defaults to the side/down poses' existing spot; the up pose
+        // overrides this to sit near its own barrel instead of the
+        // gunner (see that pose's block for why).
+        let igniteX = 4;
+
+        // Reload phase computed ONCE, up front, before any pose draws —
+        // so the "draw the rod/ball BEFORE the barrel" calls inside each
+        // pose below and the "draw the flash AFTER everything" call at
+        // the very end both agree on exactly which single phase is
+        // active. This preserves the original if/else-if priority
+        // (flash > swab > ball > ram > ignite) exactly; it's just split
+        // by where each phase needs to sit relative to the barrel now.
+        let reloadPhase = "none";
+        // Flash/smoke duration HALVED per direct request. Was a fixed
+        // cd>270 threshold; expressed as a fraction of maxCd instead so
+        // "half the old duration" holds regardless of maxCd (which
+        // itself just got faster below) rather than silently drifting
+        // if the reload time is tuned again later.
+        const FLASH_END_CD = (maxCd + 270) / 2; // duration (maxCd-FLASH_END_CD) = (maxCd-270)/2, i.e. exactly half of the old (maxCd-270)
+        if (isAttacking && cd > FLASH_END_CD) reloadPhase = "flash";
+        else if (isAttacking && cycle < 0.55) reloadPhase = "swab";
+        else if (isAttacking && cycle < 0.65) reloadPhase = "ball";
+        else if (isAttacking && cycle < 0.90) reloadPhase = "ram";
+        else if (isAttacking && cycle < 0.99) reloadPhase = "ignite";
+
+        // SWAB / BALL / RAM — factored into one function (same reasoning
+        // as drawGunner above: one definition, called from wherever it's
+        // needed, so there's no risk of the three poses drifting out of
+        // sync) and called from INSIDE each pose below, immediately
+        // BEFORE that pose's barrel is drawn. That ordering is the whole
+        // fix: the barrel's own fill/stroke then paints OVER the rod, so
+        // it reads as physically inserted into the bore rather than
+        // floating in front of the gun, per direct request. IGNITE (the
+        // lit match at the touch-hole) and FLASH are deliberately NOT
+        // part of this function — a match at the touch-hole and a muzzle
+        // blast both belong in FRONT of the gun, so they stay drawn
+        // after, unchanged in spirit from before.
+        const drawReloadSequence = () => {
+            if (reloadPhase === "swab") {
+                let p = (cycle - 0.15) / 0.40;
+                let depth = Math.sin(p * Math.PI) * 15;
+                ctx.strokeStyle = "#546e7a"; ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.moveTo(muzzleX - muzzleDirX * depth, muzzleY - muzzleDirY * depth);
+                ctx.lineTo(muzzleX - muzzleDirX * (depth - 10), muzzleY - muzzleDirY * (depth - 10));
+                ctx.stroke();
+            } else if (reloadPhase === "ball") {
+                ctx.fillStyle = "#212121";
+                ctx.beginPath();
+                ctx.arc(muzzleX - muzzleDirX * 1, muzzleY - muzzleDirY * 1 + Math.sin(cycle * 40) * 2, 2, 0, Math.PI * 2);
+                ctx.fill();
+            } else if (reloadPhase === "ram") {
+                let p = (cycle - 0.65) / 0.25;
+                let depth = Math.sin(p * Math.PI) * 18;
+                ctx.strokeStyle = "#cfd8dc"; ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.moveTo(muzzleX - muzzleDirX * depth, muzzleY - muzzleDirY * depth);
+                ctx.lineTo(muzzleX - muzzleDirX * (depth - 12), muzzleY - muzzleDirY * (depth - 12));
+                ctx.stroke();
+            }
+        };
+
+        if (lockedFacingY === 0) {
+            // ── SIDE POSE — matches reference "side left" ──
+            ctx.save();
+            // Recoil kicks backward along -X (this pose fires along
+            // +X) — the whole carriage jumps back briefly on firing,
+            // appropriate for an early gun with no recoil-sled
+            // mechanism of its own.
+            ctx.translate(0 - recoil, 3);
+            ctx.rotate(gunAngle);
+
+            // Splayed trail leg — single wooden beam running back from
+            // the carriage body (reference shows one visible trail beam
+            // from this angle, not a V of two).
+            ctx.strokeStyle = "#3e2723"; ctx.lineWidth = 2.6; ctx.lineCap = "round";
+            ctx.beginPath();
+            ctx.moveTo(-6, 2); ctx.lineTo(-23, 9);
+            ctx.stroke();
+            ctx.lineCap = "butt";
+
+            // Carriage body
+            ctx.fillStyle = "#5d4037"; ctx.strokeStyle = "#3e2723"; ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            ctx.moveTo(-7, 0); ctx.lineTo(9, 0);
+            ctx.lineTo(9, 4); ctx.lineTo(-7, 4);
+            ctx.closePath();
+            ctx.fill(); ctx.stroke();
+
+            // Wheel — two-tone rim + hub
+            ctx.save();
+            ctx.translate(1, 10);
+            ctx.rotate(wheelRot);
+            ctx.fillStyle = "#4e342e"; ctx.strokeStyle = "#212121"; ctx.lineWidth = 1.5;
+            ctx.beginPath(); ctx.arc(0, 0, 7, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+            ctx.fillStyle = "#3e2723";
+            ctx.beginPath(); ctx.arc(0, 0, 7, Math.PI * 0.5, Math.PI * 1.5); ctx.fill();
+            ctx.strokeStyle = "#212121"; ctx.lineWidth = 1.2;
+            for (let w = 0; w < 4; w++) {
+                ctx.beginPath(); ctx.moveTo(-7, 0); ctx.lineTo(7, 0); ctx.stroke();
+                ctx.rotate(Math.PI / 4);
+            }
+            ctx.fillStyle = "#212121";
+            ctx.beginPath(); ctx.arc(0, 0, 2, 0, Math.PI * 2); ctx.fill();
+            ctx.restore();
+
+            // Muzzle anchor set BEFORE the barrel draws (was after) so
+            // drawReloadSequence() below can use it and still get
+            // painted over by the barrel's own fill/stroke.
+            muzzleX = 22; muzzleY = 0; muzzleDirX = 1; muzzleDirY = 0;
+            igniteX = 4;
+
+            drawReloadSequence();
+
+            // Barrel — CONSISTENT diameter cylinder (matches the up
+            // pose's near-uniform barrel, per direct request, instead of
+            // the old taper down to half its breech width — which also
+            // makes the ramrod running along y=0 read as properly
+            // centered, since there's no longer a narrowing profile to
+            // visually second-guess it against) with raised reinforcing
+            // rings for a genuinely segmented cast-bronze look, plus a
+            // flared muzzle swell.
+            const barrelHW = 2.6; // half-width, held constant along the whole tube
+            ctx.fillStyle = bronzeGradient(0, -barrelHW, 0, barrelHW);
+            ctx.strokeStyle = "#2b1b10"; ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(-4, -barrelHW);
+            ctx.lineTo(22, -barrelHW);
+            ctx.lineTo(22, barrelHW);
+            ctx.lineTo(-4, barrelHW);
+            ctx.closePath();
+            ctx.fill(); ctx.stroke();
+            // Reinforcing rings — raised bands slightly wider than the
+            // tube itself, spaced along its length, reading as cast
+            // segmentation rather than the old single hairline strokes.
+            ctx.fillStyle = "#6b5330"; ctx.strokeStyle = "#3e2f16"; ctx.lineWidth = 0.7;
+            [0, 6, 12, 18].forEach(bx => {
+                ctx.beginPath();
+                ctx.rect(bx - 0.8, -barrelHW - 0.5, 1.6, (barrelHW + 0.5) * 2);
+                ctx.fill(); ctx.stroke();
+            });
+            // Muzzle swell — flared beyond the tube's own diameter.
+            ctx.fillStyle = "#7d5a3a";
+            ctx.fillRect(19, -3.0, 3, 6.0);
+            ctx.strokeRect(19, -3.0, 3, 6.0);
+            // Bore
+            ctx.fillStyle = "#1a1a1a";
+            ctx.beginPath(); ctx.ellipse(22, 0, 2.0, 1.9, 0, 0, Math.PI * 2); ctx.fill();
+            ctx.strokeStyle = "#616161"; ctx.lineWidth = 0.6;
+            ctx.beginPath(); ctx.ellipse(22, 0, 2.0, 1.9, 0, 0, Math.PI * 2); ctx.stroke();
+
+            // Gunner — stands LOWER, roughly level with the wheel hub,
+            // behind the trail handle (per user: "the side profile needs
+            // the soldier to stand lower"). The old second stick pointing
+            // up off the wagon handle has been removed entirely — only
+            // the single trail beam above remains.
+            ctx.save();
+            ctx.translate(-16, 4.5);
+            drawGunner();
+            ctx.restore();
+
+            ctx.restore();
+
+        } else if (lockedFacingY === -1) {
+            // ── UP POSE — matches reference "up": carriage on the left
+            // with the barrel pointing straight up/away, gunner standing
+            // fully upright to the right, both on the same ground line
+            // (not a rotated side view). ──
+            ctx.save();
+            // Recoil kicks toward the viewer (+Y) — this pose fires
+            // up/away (-Y), so recoiling means moving opposite that,
+            // toward camera.
+            ctx.translate(0, 3 + recoil);
+
+            const gY = 0;
+
+            // TWO wheels — shifted UP toward the barrel (was sitting
+            // right at ground level with a big empty gap up to the
+            // carriage; per direct request, closer to the barrel now).
+            // REBUILT this session: the previous version drew a flat
+            // rotating rectangle with a straight hub seam, which never
+            // read as a wheel at all (a rotating plank, not a rotating
+            // disc) — that was the "wheels don't look realistic"
+            // report. Replaced with the same real circular
+            // rim/spoke/hub construction the side pose already uses
+            // (see the side-pose wheel above), just foreshortened
+            // slightly via scale(1, 0.8) since we're viewing this pose
+            // from the front/above rather than dead-on from the side.
+            // Radius shrunk to 3 (from the side pose's 7) so two of
+            // them fit side by side under the narrower up-pose post
+            // without overlapping — the wheel centers below are 7
+            // units apart (drawTopWheel(-10.5) / drawTopWheel(-3.5)),
+            // so radius 4 would have collided by 1 unit; radius 3
+            // leaves a clean 1-unit gap between them.
+            const drawTopWheel = (wx) => {
+                ctx.save();
+                ctx.translate(wx, gY - 8);
+                ctx.scale(1, 0.8);
+                ctx.rotate(wheelRot);
+                ctx.fillStyle = "#4e342e"; ctx.strokeStyle = "#212121"; ctx.lineWidth = 1.1;
+                ctx.beginPath(); ctx.arc(0, 0, 3, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+                // Two-tone rim shading, same technique as the side-pose wheel.
+                ctx.fillStyle = "#3e2723";
+                ctx.beginPath(); ctx.arc(0, 0, 3, Math.PI * 0.5, Math.PI * 1.5); ctx.fill();
+                // Spokes — four evenly-spaced diameters through the hub,
+                // rotating with the wheel so the spin actually reads.
+                ctx.strokeStyle = "#212121"; ctx.lineWidth = 0.8;
+                for (let w = 0; w < 4; w++) {
+                    ctx.beginPath(); ctx.moveTo(-3, 0); ctx.lineTo(3, 0); ctx.stroke();
+                    ctx.rotate(Math.PI / 4);
+                }
+                ctx.fillStyle = "#212121";
+                ctx.beginPath(); ctx.arc(0, 0, 1.0, 0, Math.PI * 2); ctx.fill();
+                ctx.restore();
+            };
+            drawTopWheel(-10.5); // left wheel, under the post's left edge
+            drawTopWheel(-3.5);  // right wheel, under the post's right edge
+
+            // Carriage post — LENGTHENED (was 7 units tall, now 9) so
+            // the whole assembly reads as tall/sturdy instead of squat
+            // next to the side view, per direct request.
+            ctx.fillStyle = "#5d4037"; ctx.strokeStyle = "#3e2723"; ctx.lineWidth = 1.3;
+            ctx.beginPath();
+            ctx.moveTo(-10.5, gY); ctx.lineTo(-3.5, gY);
+            ctx.lineTo(-4.5, gY - 9); ctx.lineTo(-9.5, gY - 9);
+            ctx.closePath();
+            ctx.fill(); ctx.stroke();
+
+            // NEW — wide, flatter carriage bed sitting under the barrel,
+            // capping the post and spanning noticeably wider than it
+            // (the actual gun cradle/axle-bed a barrel would rest in),
+            // per direct request. The narrow post alone read as the
+            // barrel floating on a stick; this gives it a real base.
+            ctx.fillStyle = "#4a352b"; ctx.strokeStyle = "#2b1f19"; ctx.lineWidth = 1.3;
+            ctx.beginPath();
+            ctx.moveTo(-12, gY - 7.5); ctx.lineTo(-2, gY - 7.5);
+            ctx.lineTo(-2, gY - 10); ctx.lineTo(-12, gY - 10);
+            ctx.closePath();
+            ctx.fill(); ctx.stroke();
+
+            // Muzzle anchor + reload rod drawn BEFORE the barrel (was
+            // after) so the barrel's own fill/stroke paints over the
+            // rod, same fix as the side pose above. Y shifted -2 to
+            // match the barrel's new base on the taller carriage bed.
+            muzzleX = -8; muzzleY = gY - 29; muzzleDirX = 0; muzzleDirY = -1;
+            // Ignition match anchor — was the shared default x=4, which
+            // is exactly this pose's gunner x-position (see the gunner's
+            // own translate(4, gY) below), so the lit match was
+            // animating right on top of the soldier instead of near the
+            // touch-hole. Shifted a few pixels left, toward the barrel/
+            // carriage post (which sits around x=-3.5 to -10.5 in this
+            // pose), per direct request.
+            igniteX = -3;
+
+            drawReloadSequence();
+
+            // Barrel — bronze, pointing straight up/away, with a small
+            // recoil kick (gunAngle) nudging it slightly when firing.
+            // Base shifted up 2 units to sit on the new carriage bed;
+            // full length unchanged. Reinforcing rings added to match
+            // the side pose's segmented look, per direct request.
+            ctx.save();
+            ctx.translate(-7, gY - 8.5);
+            ctx.rotate(gunAngle * 0.6);
+            ctx.translate(7, -(gY - 8.5));
+            ctx.fillStyle = bronzeGradient(-9.5, 0, -4.5, 0);
+            ctx.strokeStyle = "#2b1b10"; ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(-9.5, gY - 8);
+            ctx.lineTo(-10, gY - 29);
+            ctx.lineTo(-6, gY - 29);
+            ctx.lineTo(-4.5, gY - 8);
+            ctx.closePath();
+            ctx.fill(); ctx.stroke();
+            // Reinforcing rings, spaced along the barrel's length.
+            // FIXED this session: this barrel tapers (base edges at
+            // x=-9.5/-4.5, tip edges at x=-10/-6 — see the polygon
+            // above), but every ring used the SAME fixed rect
+            // (x=-10.2, width 6.0), sized for the base only. Below the
+            // base that's just wrong; above it, since the barrel
+            // narrows toward the tip while the ring stayed the base's
+            // width, the ring hung off-center relative to the actual
+            // local barrel edges at that height — the "rings not
+            // symmetrical to the barrel" report. Each ring's left/right
+            // edge is now interpolated along the SAME two barrel edges
+            // the polygon itself uses (base -9.5/-4.5 -> tip -10/-6),
+            // at that ring's own y, so it always hugs the true local
+            // width and is centered on it, the same way the side pose's
+            // rings already sit centered on that (there, constant)
+            // barrel width.
+            const barrelBaseY = gY - 8, barrelTipY = gY - 29;
+            const barrelBaseL = -9.5, barrelTipL = -10;
+            const barrelBaseR = -4.5, barrelTipR = -6;
+            ctx.fillStyle = "#6b5330"; ctx.strokeStyle = "#3e2f16"; ctx.lineWidth = 0.6;
+            [gY - 12, gY - 17, gY - 22, gY - 26].forEach(ry => {
+                const t = (ry - barrelBaseY) / (barrelTipY - barrelBaseY);
+                const localL = barrelBaseL + (barrelTipL - barrelBaseL) * t;
+                const localR = barrelBaseR + (barrelTipR - barrelBaseR) * t;
+                const localW = localR - localL;
+                // Ring slightly wider than the local tube, same margin
+                // (0.2 either side) the old fixed rect used relative to
+                // its own base width.
+                ctx.beginPath();
+                ctx.rect(localL - 0.2, ry - 0.65, localW + 0.4, 1.3);
+                ctx.fill(); ctx.stroke();
+            });
+            // Muzzle cap — no bore visible since we're looking at the
+            // outside/back of it, only the rounded top.
+            ctx.fillStyle = "#6b5330"; ctx.strokeStyle = "#2b1b10"; ctx.lineWidth = 0.8;
+            ctx.beginPath(); ctx.ellipse(-8, gY - 29, 2.4, 1.1, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+            ctx.restore();
+
+            // Gunner — full standing height, feet on the SAME ground
+            // line as the wheel (not floating), positioned to the right
+            // of the carriage as in the reference, steadying the trail
+            // handle with one arm.
+            ctx.save();
+            ctx.translate(4, gY);
+            ctx.strokeStyle = "#5d4037"; ctx.lineWidth = 2.4;
+            let gLegSwing2 = moving ? Math.sin(animFrame * 0.4) * 2 : 0;
+            ctx.beginPath();
+            ctx.moveTo(-1.7, -1); ctx.lineTo(-2.8 + gLegSwing2, 7);
+            ctx.moveTo(1.7, -1); ctx.lineTo(2.8 - gLegSwing2, 7);
+            ctx.stroke();
+            ctx.fillStyle = factionColor; ctx.strokeStyle = "#1a1a1a"; ctx.lineWidth = 1;
+            ctx.beginPath(); ctx.rect(-3.7, -10, 7.4, 9.5); ctx.fill(); ctx.stroke();
+            ctx.strokeStyle = factionColor; ctx.lineWidth = 1.8;
+            ctx.beginPath(); ctx.moveTo(-3.7, -6); ctx.lineTo(-8, -3); ctx.stroke();
+            ctx.fillStyle = "#ffccbc";
+            ctx.beginPath(); ctx.arc(0, -12.3, 3.1, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+            // Hat — SHRUNK and shifted UP so more bare head shows below
+            // the brim, per direct request (was covering most of the
+            // head, leaving barely a sliver of face visible).
+            ctx.fillStyle = "#1a1a1a";
+            ctx.beginPath(); ctx.ellipse(0, -14.4, 3.7, 1.5, 0, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = "#212121";
+            ctx.beginPath(); ctx.arc(0, -15.6, 3.0, Math.PI, Math.PI * 2); ctx.fill();
+            ctx.restore();
+
+            ctx.restore();
+
+        } else {
+            // ── DOWN POSE — matches reference "down": looking along the
+            // barrel toward the viewer, bore visible as a dark circle,
+            // wheel/trail forming a splayed base below, gunner leaning
+            // over the breech from behind/above, aiming down. ──
+            ctx.save();
+            // Recoil kicks away from the viewer (-Y) — this pose fires
+            // toward the viewer (+Y), so recoiling means moving
+            // opposite that.
+            ctx.translate(0, -2 - recoil);
+
+            const gY = 0;
+
+            // Trail legs splayed toward the viewer.
+            ctx.strokeStyle = "#4e342e"; ctx.lineWidth = 2.4; ctx.lineCap = "round";
+            ctx.beginPath();
+            ctx.moveTo(-2, gY - 6); ctx.lineTo(-9, gY + 10);
+            ctx.moveTo(2, gY - 6); ctx.lineTo(9, gY + 10);
+            ctx.stroke();
+            ctx.lineCap = "butt";
+
+            // Wheel behind, foreshortened.
+            ctx.save();
+            ctx.translate(0, gY + 2);
+            ctx.scale(1, 0.55);
+            ctx.rotate(wheelRot);
+            ctx.fillStyle = "#4e342e"; ctx.strokeStyle = "#212121"; ctx.lineWidth = 1.3;
+            ctx.beginPath(); ctx.arc(0, 0, 7, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+            for (let w = 0; w < 4; w++) {
+                ctx.beginPath(); ctx.moveTo(-7, 0); ctx.lineTo(7, 0); ctx.stroke();
+                ctx.rotate(Math.PI / 4);
+            }
+            ctx.restore();
+
+            // Carriage body block, behind the barrel.
+            ctx.fillStyle = "#5d4037"; ctx.strokeStyle = "#3e2723"; ctx.lineWidth = 1.3;
+            ctx.beginPath(); ctx.rect(-6, gY - 8, 12, 7); ctx.fill(); ctx.stroke();
+
+            // Muzzle anchor + reload rod drawn BEFORE the barrel (was
+            // after) so the barrel's own fill/stroke paints over the
+            // rod, same fix as the other two poses.
+            muzzleX = 0; muzzleY = gY - 1.5; muzzleDirX = 0; muzzleDirY = 1;
+            igniteX = 4;
+
+            drawReloadSequence();
+
+            // Barrel foreshortened toward the viewer — bronze cone with
+            // a small recoil kick, ending in the muzzle rim + bore.
+            ctx.save();
+            ctx.translate(0, gY - 1.5);
+            ctx.rotate(gunAngle * 0.6);
+            ctx.translate(0, -(gY - 1.5));
+            let bg = ctx.createRadialGradient(0, gY - 2, 1, 0, gY - 2, 10);
+            bg.addColorStop(0, "#8d6e3a"); bg.addColorStop(1, "#3e2f16");
+            ctx.fillStyle = bg; ctx.strokeStyle = "#2b1b10"; ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(-4, gY - 9); ctx.lineTo(4, gY - 9);
+            ctx.lineTo(6, gY - 2); ctx.lineTo(-6, gY - 2);
+            ctx.closePath();
+            ctx.fill(); ctx.stroke();
+            // Muzzle rim + bore, facing the viewer.
+            ctx.fillStyle = "#6b4f28"; ctx.strokeStyle = "#2b1b10"; ctx.lineWidth = 1;
+            ctx.beginPath(); ctx.arc(0, gY - 1.5, 4.6, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+            ctx.fillStyle = "#0d0a05";
+            ctx.beginPath(); ctx.arc(0, gY - 1.5, 2.8, 0, Math.PI * 2); ctx.fill();
+            ctx.strokeStyle = "#4a3420"; ctx.lineWidth = 0.6;
+            ctx.beginPath(); ctx.arc(0, gY - 1.5, 2.8, 0, Math.PI * 2); ctx.stroke();
+            ctx.restore();
+
+            // Gunner — crouched over the breech from above, leaning down
+            // to aim, matching the reference's hunched-over silhouette.
+            ctx.save();
+            ctx.translate(0, gY - 13);
+            ctx.strokeStyle = "#5d4037"; ctx.lineWidth = 2.4;
+            ctx.beginPath();
+            ctx.moveTo(-2, 2); ctx.lineTo(-3, 7);
+            ctx.moveTo(2, 2); ctx.lineTo(3, 7);
+            ctx.stroke();
+            ctx.save();
+            ctx.rotate(0.35);
+            ctx.fillStyle = factionColor; ctx.strokeStyle = "#1a1a1a"; ctx.lineWidth = 1;
+            ctx.beginPath(); ctx.rect(-3.5, -6, 7, 7.5); ctx.fill(); ctx.stroke();
+            ctx.restore();
+            ctx.fillStyle = "#ffccbc";
+            ctx.beginPath(); ctx.arc(1.5, -6.5, 3, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+            ctx.fillStyle = "#1a1a1a";
+            ctx.beginPath(); ctx.ellipse(1.5, -8, 3.6, 1.4, 0.35, 0, Math.PI * 2); ctx.fill();
+            ctx.restore();
+
+            ctx.restore();
+        }
+
+        // ==========================================
+        // MUZZLE FLASH & SMOKE — drawn AFTER every pose's barrel (a
+        // blast bursts out in FRONT of the gun), anchored to this pose's
+        // actual muzzle position/direction. SWAB/BALL/RAM used to also
+        // live here, drawn after (i.e. on top of) the barrel — which is
+        // exactly backwards for a rod that's supposed to look inserted
+        // INSIDE the bore. Those three now draw from inside each pose,
+        // before that pose's own barrel fill (see drawReloadSequence()
+        // above), so the barrel paints over them instead. Only FLASH and
+        // IGNITE (a match held at the touch-hole — also meant to be
+        // visible, not occluded) remain here, both gated on the single
+        // reloadPhase computed up front so priority (flash > swab > ball
+        // > ram > ignite) is unchanged from before.
+        // ==========================================
+        if (reloadPhase === "flash") {
+            ctx.fillStyle = "#fff176"; ctx.beginPath();
+            ctx.arc(muzzleX + muzzleDirX * 1, muzzleY + muzzleDirY * 1, 3 + Math.random() * 2, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = "#ff5722"; ctx.beginPath();
+            ctx.arc(muzzleX + muzzleDirX * 3, muzzleY + muzzleDirY * 3, 5 + Math.random() * 3, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = "rgba(180, 180, 180, 0.7)";
+            ctx.beginPath();
+            ctx.arc(muzzleX + muzzleDirX * 8 - muzzleDirY * 2, muzzleY + muzzleDirY * 8 + muzzleDirX * 2, 7 + Math.random() * 4, 0, Math.PI * 2);
+            ctx.arc(muzzleX + muzzleDirX * 13 + muzzleDirY * 1, muzzleY + muzzleDirY * 13 - muzzleDirX * 1, 5 + Math.random() * 4, 0, Math.PI * 2);
+            ctx.fill();
+        } else if (reloadPhase === "ignite") {
+            let matchDip = Math.sin((cycle - 0.90) * 15) * 4;
+            ctx.strokeStyle = "#ff5722"; ctx.lineWidth = 1.5;
+            ctx.beginPath(); ctx.moveTo(igniteX, -7 + matchDip); ctx.lineTo(igniteX, -2); ctx.stroke();
+        }
+
+        ctx.restore();
     }
-}}
+}
  else {
- 
 
         // --- MELEE LANCE ---
         let b = bob || 0; // Ensure 'b' (bob) from the top of drawCavalryUnit is used
@@ -2874,6 +4018,23 @@ let gLegSwing = moving ? Math.sin(animFrame * 0.4) * 2 : 0;
         // view per the user's explicit simplification — only this
         // rider-held weapon redirects.
         // ═══════════════════════════════════════════════════════════
+        // FLIP FIX (reverted): a prior session added +Math.PI here on the
+        // theory that the lance tip was pointing backward over the horse's
+        // tail. Re-verified with the actual geometry: the tip is built at
+        // local (26..38, 0) — positive X. Rotating by DOWN_QUADRANT_ANGLE
+        // (45°) alone puts the tip at positive X AND positive Y, i.e.
+        // down-and-toward-the-viewer — which is genuinely forward in this
+        // pose, since the horse's own head (see mountHeadDeferred above)
+        // sits at increasingly positive Y from the neck seam, same
+        // direction. Adding +180° flipped the tip to negative X/negative Y
+        // instead — up and away from the viewer, back over the rider —
+        // which is the actual bug reported after that change shipped. The
+        // bow/arrow code was never given an equivalent flip and has always
+        // pointed down-and-toward-viewer correctly under its own rotation
+        // (DOWN_AIM_ANGLE, 36°, no +180 added) — this makes the lance
+        // consistent with that already-correct reference instead of
+        // fighting it. Reverting to 45°-only; same +45° camera-facing lean
+        // as before, tip now reads as forward instead of backward.
         const lanceBaseRot = facingDown ? DOWN_QUADRANT_ANGLE : 0;
 
         if (isAttacking) {
@@ -2935,19 +4096,48 @@ let gLegSwing = moving ? Math.sin(animFrame * 0.4) * 2 : 0;
 		ctx.restore(); // 1. Restores the Melee Lance rotation
     } // Closes the final 'else' weapon block
 
-    ctx.restore(); // 2. Restores the Rider's 'bob' and elevation layer 
-
 // Backshot z-order: for facing-up, low-armor-tier riders, the body was
 // deliberately NOT drawn earlier (see useBackView above) — draw it now,
 // on top of everything the weapons-logic section above just drew, so
-// the weapon reads as held behind/away from the viewer. Every other
-// rider already drew its body before the weapons logic and does
-// nothing here. No early-return branches exist in this file's weapons
-// logic (unlike infscript.js's archer/crossbow melee fallbacks), so
-// this single call at the true end of the function is sufficient —
-// nothing else to guard against.
-if (useBackView) {
+// the weapon reads as held behind/away from the viewer.
+//
+// BUGFIX (rider head rendering ~40px away from the neck / off in raw
+// canvas space): this call used to sit AFTER the ctx.restore() below
+// (was "2. Restores the Rider's bob and elevation layer"), which is
+// the SAME restore that pops the outer ctx.save()/ctx.translate(x,y)/
+// ctx.scale(facingDir,1) set up at the very top of drawCavalryUnit.
+// Once that transform is popped, there is NO active translate/scale
+// left at all — drawRiderBody() then drew the head at raw, untransformed
+// canvas coordinates (e.g. local (0,-11) landing at device (0,-11)
+// instead of near the unit's actual (x,y) position), which is exactly
+// the "head is offset ~40px from the neck" bug reported after testing.
+// FIX: call drawRiderBody() BEFORE this restore, while the outer
+// transform is still active, then let the single restore below close
+// both the weapon-logic layer AND the outer wrapper together (they
+// were already sharing this one restore for every OTHER unit type in
+// this function — horse_archer's useBackView path was the only one
+// trying to run code after it).
+if (useBackView && !isCamelCannonType) {
     drawRiderBody();
 }
+
+// Deferred horse head/chanfron (facing-down only; no-op otherwise) —
+// called here, after the rider/weapon in BOTH z-order paths above,
+// so the head genuinely overlays spear/quiver/rider-legs as the
+// closest-to-viewer element, fixing the z-order bug reported after
+// testing. Placed before the final ctx.restore() so it still draws
+// within the same transform space as everything else in this function.
+mountHeadDeferred();
+
+// Deferred back-view (facing-up) near+far leg pairs — called last of
+// all, per direct request that these legs sit at the bottom of the
+// draw order (i.e. drawn on top of/after everything else: body,
+// haunch, tail, rider, weapon, and even the horse head deferred call
+// just above). No-op for every other facing/unit type.
+mountUpLegsDeferred();
+
+    ctx.restore(); // 2. Restores the Rider's 'bob' and elevation layer (and, for
+    // every unit type including horse_archer, the outer translate/scale
+    // set up at the very top of the function — see BUGFIX note above)
 
 }

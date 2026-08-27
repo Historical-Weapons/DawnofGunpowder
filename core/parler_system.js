@@ -825,6 +825,19 @@ playerEffectivePower *= 1.10;//10 percent bonus
     player.troops = getRosterTotal(player.roster);
     npc.count = getRosterTotal(npc.roster);
 
+    // SAFEGUARD: player.troops/roster must never be able to read 0, even
+    // transiently. The old clamp for this only lived inside the "Continue"
+    // button's click handler in displayAutoresolveResults, which left a
+    // window — from right here until the player clicked Continue — where
+    // player.troops was genuinely 0 (the UI text update a few lines below
+    // in displayAutoresolveResults would even show "0" during that window).
+    // Enforce the floor immediately, at the source, instead.
+    if (!player.roster || player.roster.length === 0 || player.troops < 1) {
+        player.roster = (player.roster && player.roster.length > 0) ? player.roster : [{ type: "Militia", exp: 1 }];
+        player.troops = Math.max(1, getRosterTotal(player.roster));
+        console.log("Autoresolve Safety Clamp: floored player troops/roster to minimum of 1.");
+    }
+
     // ────────────────────────────────────────────────────────────────────────
     // FIX: Lead Troops cooldown also responds to autoresolve outcomes
     // ────────────────────────────────────────────────────────────────────────
@@ -1103,10 +1116,14 @@ function displayAutoresolveResults(npc, playerWon, playerLosses, npcLosses) {
         } else {
             // ========================================================================
             // ---> SURGERY: THE AUTORESOLVE ROSTER SAFETY CLAMP <---
+            // Backstop only — the real fix now runs immediately in
+            // processAutoresolveMath so player.troops/roster never actually
+            // read 0 in the first place. This stays as a defensive re-check
+            // in case anything between here and there mutated player.troops.
             // ========================================================================
-            if (player.troops <= 0 || !player.roster || player.roster.length === 0) {
-                player.troops = 1;
-                player.roster = [{ type: "Militia", exp: 1 }];
+            if (player.troops < 1 || !player.roster || player.roster.length === 0) {
+                player.roster = (player.roster && player.roster.length > 0) ? player.roster : [{ type: "Militia", exp: 1 }];
+                player.troops = Math.max(1, getRosterTotal(player.roster));
                 console.log("Autoresolve Safety Clamp: Injected 1 Militia.");
             }
 

@@ -1,3 +1,13 @@
+// =============================================================================
+// SESSION CHANGELOG (for fusion with the other diverging Story 3 session)
+// =============================================================================
+//   - Added the missing `if (story.id === 2)` launch block. It was absent
+//     entirely (only id===1 and id===3 existed), so Story 2 never called
+//     window.initGame_story2() and silently failed to load. Not narrative —
+//     pure engine wiring, safe to keep regardless of which Story 3
+//     continuation wins.
+// =============================================================================
+
 (function () {
     let menuActive = false;
     let menuAnimFrameId = null;
@@ -247,6 +257,17 @@ const customBattleBtn = createBtn("Custom Battle", () => {
     }
 });
 
+// --- SURVIVAL MODE BUTTON ---
+const survivalBtn = createBtn("🏹 Survival", () => {
+    // This calls the GUI function from battle_engine/survival_mode.js
+    if (typeof window.showSurvivalSetupMenu === "function") {
+        window.showSurvivalSetupMenu();
+        uiContainer.style.display = "none"; // Hide the main menu buttons
+    } else {
+        alert("Survival module not loaded!");
+    }
+});
+
 // ── CAMPAIGN BUTTON ────────────────────────────────────────────────────────
 const campaignBtn = createBtn("⚔️ Campaign Mode", () => {
     uiContainer.style.display = "none";
@@ -313,25 +334,24 @@ function showCampaignScreen(menuEl, onBack, onLaunch) {
             available: true,
             underConstruction: true
         },
-        {
-            id:       3,
-            title:    "Life on the Wall",
-            subtitle: "Datong Frontier — c. 1450",
-            desc:     "You are a wall officer of the Ming garrison, posted to the northern " +
-                      "frontier in the shadow of the Tumu Crisis. Patrol the fortifications, " +
-                      "drill the levies, and watch the steppe horizon for Yuan riders. " +
-                      "Most days are mundane. Some are not.",
-            tag:      "WALL GARRISON",
-            tagColor: "#5d4037",
-            available: true,
-            underConstruction: true
-        },
+{
+    id:       3,
+    title:    "Life on the Wall",
+    subtitle: "Liaodong Frontier — 1578",
+    desc:     "You are Liu Sheng, a young Ming recruit stationed at Black Sand Fort " +
+              "on the restless northeastern frontier. Repair the walls, drill with the " +
+              "garrison, and endure the long quiet between raids. The border is calm " +
+              "for now—but quiet years do not last forever.",
+    tag:      "MING FRONTIER",
+    tagColor: "#5d4037",
+    available: true,
+    underConstruction: true
+},
         {
             id:       4,
-            title:    "The Great Divergence",
-            subtitle: "Korea — coming soon",
-            desc:     "Lead the Goryeo court through decades of Mongol subjugation " +
-                      "and fight for the peninsula's independence.",
+            title:    "??",
+            subtitle: " — coming soon",
+            desc:     "??.",
             tag:      "UNDER CONSTRUCTION",
             tagColor: "#555",
             available: false
@@ -581,6 +601,31 @@ card.onclick = async () => {
     //
     // To add Story 3: copy this block, replace every "2" with "3", point it at
     // window.initGame_story3 and set window.__campaignStory3Active = true.
+    if (story.id === 2) {
+        try {
+            window.__campaignStory2Active = true;
+            window.__campaignStoryId      = 2;
+            console.log("[Campaign] Campaign-mode flag set → Story 2.");
+
+            if (typeof window.initGame_story2 !== 'function') {
+                throw new Error(
+                    "window.initGame_story2() not found.\n" +
+                    "Ensure story2_map_and_update.js is loaded in index.html " +
+                    "AFTER sandboxmode_overworld.js and AFTER mongolconquestxia_scenario.js."
+                );
+            }
+
+            setTimeout(function () {
+                window.initGame_story2();
+            }, 120);
+
+        } catch (err) {
+            console.error("[Campaign] Story 2 load failed:", err);
+            alert("Failed to load Story 2 campaign.\n\nReason: " +
+                  (err && err.message ? err.message : String(err)));
+        }
+    }
+
     // ── Story 3: Life on the Wall ────────────────────────────────────────────
     // Uses initGame_story3() from story3_map_and_update.js — generates the
     // Song-Jin frontier wall map procedurally (no .json file needed for now;
@@ -690,6 +735,7 @@ optionsBtn.style.display = "block";
 
 // Start hidden to match your "Manual First" flow
 customBattleBtn.style.display = "none";
+survivalBtn.style.display = "none";
 
 
 // --- ENHANCED START ENGINE WRAPPER ---
@@ -718,6 +764,7 @@ const instrBtn = createBtn("Manual", () => {
 	instrBtn.remove(); // <--- NEW SURGERY: DESTROYS THE MANUAL BUTTON AFTER CLICKING
     playBtn.style.display = "block";
     customBattleBtn.style.display = "block"; 
+    survivalBtn.style.display = "block";
     campaignBtn.style.display = "block"; // STORY1: show campaign button
     const unitsBtn = document.getElementById("units-guide-btn");
     if (unitsBtn) unitsBtn.style.display = "block";
@@ -860,6 +907,7 @@ uiContainer.appendChild(instrBtn);
 uiContainer.appendChild(playBtn);
 uiContainer.appendChild(campaignBtn);
 uiContainer.appendChild(customBattleBtn);
+uiContainer.appendChild(survivalBtn);
 uiContainer.appendChild(loadGameBtn); // Surgery 7: Appended here
 uiContainer.appendChild(optionsBtn);
         menu.appendChild(uiContainer);

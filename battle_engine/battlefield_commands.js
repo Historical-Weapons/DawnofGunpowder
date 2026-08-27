@@ -208,27 +208,46 @@ function getCityNavTarget(unit, realTarget) {
     let dy = realTarget.y - unit.y;
     let dist = Math.hypot(dx, dy);
     if (dist < 1) return realTarget;
+
+    // SURGERY: combat always wins over path-finding detours. A unit already
+    // within striking distance of realTarget must never get swapped onto a
+    // dummy steering point instead — dummies (isDummy:true) aren't real
+    // combatants, so nothing the unit "attacks" while carrying one ever
+    // resolves as a hit. That was silently preventing attacks from landing
+    // for any assault_complete unit whose look-ahead ray clipped a wall/
+    // building tile while already toe-to-toe with an enemy.
+    const meleeRange = (unit.stats && unit.stats.range) ? Math.max(unit.stats.range, 40) : 40;
+    if (dist <= meleeRange) return realTarget;
+
     dx /= dist; dy /= dist;
 
     const ts = (typeof BATTLE_TILE_SIZE !== 'undefined') ? BATTLE_TILE_SIZE : 8;
     const lookX = unit.x + dx * ts * 1.5;
     const lookY = unit.y + dy * ts * 1.5;
 
-    if (lazyIsWallTile(lookX, lookY)) {
-        let gateX = typeof SiegeTopography !== 'undefined' ? SiegeTopography.gatePixelX : unit.x;
-        let gateY = typeof SiegeTopography !== 'undefined' ? SiegeTopography.gatePixelY : unit.y;
-        let distToGate = Math.hypot(unit.x - gateX, unit.y - gateY);
-
-        if (distToGate > 60) {
-            // Can't get past this wall from here — head back to the gate first.
-            return { x: gateX + (Math.random() - 0.5) * 40, y: gateY, hp: 9999, isDummy: true, priority: "wall_recover_gate" };
-        }
-        // Back at the gate — resume heading north into the city so this
-        // doesn't just orbit the gate forever once wall-recovery kicks in.
-        return { x: gateX + (Math.random() - 0.5) * 60, y: gateY - 100, hp: 9999, isDummy: true, priority: "wall_recover_north" };
-    }
-
-    if (lazyIsBuildingTile(lookX, lookY)) {
+    // SURGERY: the old wall-handling branch assumed the ONLY wall tile a
+    // unit could ever run into was the south gate's own — "far from the
+    // gate -> go back to the gate, near the gate -> head 100px past it" —
+    // and routed back toward SiegeTopography's fixed south-gate coordinates
+    // no matter where the blocking tile actually was. fortification_
+    // system.js stamps tile 6/7 along the ENTIRE city perimeter (all four
+    // walls, every tower, every other gate), so brushing the north wall, a
+    // tower base, or the far side of the plaza — all common once a unit is
+    // actually fighting deep in the city — triggered the exact same "go
+    // back to the south gate" reroute. That's the "walking toward the
+    // plaza but never actually landing a hit" symptom: every few frames the
+    // target silently swapped from the real enemy to a dummy point back
+    // near the gate, so the unit kept drifting rather than closing in and
+    // fighting.
+    //
+    // Fix: treat any blocked tile — wall or building — the same way, with
+    // no assumption about WHERE the obstacle is: sidestep it laterally,
+    // exactly like the building-detour case just below already does. A
+    // continuous wall won't clear in one sidestep the way a discrete
+    // building does, but the unit will keep re-evaluating every frame and
+    // walk itself along the wall face until it finds the gap, instead of
+    // being teleported in target-choice back to a fixed point far away.
+    if (lazyIsWallTile(lookX, lookY) || lazyIsBuildingTile(lookX, lookY)) {
         const now = Date.now();
         if (!unit._bldgDetourUntil || now > unit._bldgDetourUntil) {
             unit._bldgDetourSide = Math.random() < 0.5 ? -1 : 1;
@@ -326,16 +345,7 @@ function lazyOrderEngage(u) {
 
 // ── SPEED SCALING (advance/skirmish pacing without permanently touching base stats) ──
 function lazyBackupSpeed(u) { if (u._lazyOrigSpeed === undefined && u.stats) u._lazyOrigSpeed = u.stats.speed; }
-function lazyRestoreSpeed(u) {
-    if (u._lazyOrigSpeed !== undefined && u.stats) { u.stats.speed = u._lazyOrigSpeed; delete u._lazyOrigSpeed; }
-    // SURGERY: autoAttack.js's smart-target speed adjustments (and the new
-    // siege pace boost) use a differently-named backup (origSmartSpeed), so
-    // a unit scaled through that system wasn't being reverted here at all —
-    // meaning selecting it manually left it stuck at whatever autoAttack.js
-    // last set. Cross-check both, same reasoning as restoreSpeeds() in
-    // autoAttack.js checking this file's property.
-    if (u.origSmartSpeed !== undefined && u.stats) { u.stats.speed = u.origSmartSpeed; delete u.origSmartSpeed; }
-}
+function lazyRestoreSpeed(u) { if (u._lazyOrigSpeed !== undefined && u.stats) { u.stats.speed = u._lazyOrigSpeed; delete u._lazyOrigSpeed; } }
 function lazySetSpeedScale(u, scale) { lazyBackupSpeed(u); if (u.stats && u._lazyOrigSpeed !== undefined) u.stats.speed = u._lazyOrigSpeed * scale; }
 
 // ── ADVANCE WAYPOINT MATH (role + doctrine + formation-shape aware) ──────
@@ -565,7 +575,15 @@ function lazyMicroShooters(groups, opposingUnits, opposingCentroid, doctrine, ph
         // Ranged infantry (archers/crossbows): real hit-and-run kiting, same shape as horse archers.
         groups.RANGED_INF.forEach((u, i) => {
             lazyRestoreSpeed(u);
-            const ammoLeft = Math.max(u.ammo || 0, u.stats?.ammo || 0);
+            // BUGFIX: was Math.max(u.ammo || 0, u.stats?.ammo || 0) — u.ammo is a
+            // one-time snapshot stamped at spawn in battlefield_launch.js and never
+            // updated again (real combat only ever decrements u.stats.ammo, see
+            // ai_categories.js's _handleCombatExecution). Taking the max against
+            // that stale, permanently-high value meant ammoLeft could never actually
+            // reach 0 as long as the snapshot was positive — this branch kept
+            // treating the unit as having ammo forever, part of the "almost all
+            // units have infinite ammo" report. Read the live stat directly.
+            const ammoLeft = (u.stats && typeof u.stats.ammo === 'number') ? u.stats.ammo : (u.ammo || 0);
             if (ammoLeft <= 0) { lazyOrderEngage(u); return; }
             let closest = null, closestD = Infinity;
             opposingUnits.forEach(p => { const d = lazyDist(u, p); if (d < closestD) { closestD = d; closest = p; } });
@@ -644,7 +662,10 @@ function lazyMicroLightCav(groups, opposingUnits, opposingCentroid, doctrine, ph
     if (phase === 'ADVANCING' || phase === 'SKIRMISHING') {
         lcav.forEach((u, i) => {
             lazyRestoreSpeed(u);
-            const ammoLeft = Math.max(u.ammo || 0, u.stats?.ammo || 0);
+            // BUGFIX: same stale-snapshot issue as the RANGED_INF branch above —
+            // u.ammo never updates after spawn, so Math.max against it masked the
+            // real depleting u.stats.ammo value. Read the live stat directly.
+            const ammoLeft = (u.stats && typeof u.stats.ammo === 'number') ? u.stats.ammo : (u.ammo || 0);
             if (ammoLeft <= 0) { lazyOrderEngage(u); return; }
             let closest = null, closestD = Infinity;
             opposingUnits.forEach(p => { const d = Math.hypot(u.x - p.x, u.y - p.y); if (d < closestD) { closestD = d; closest = p; } });
@@ -819,33 +840,11 @@ function lazyGeneralTick() {
 
 // ── START / STOP ─────────────────────────────────────────────────────────
 function startLazyGeneral() {
-    if (!lazyIsAllowedBattle()) return; // Siege / naval never run this AI
-
-    if (lazyGeneralTickInterval) clearInterval(lazyGeneralTickInterval);
-
-    lazyGeneralFormingTicks   = 0;
-    lazyGeneralSkirmishTicks  = 0;
-    lazyGeneralStrategyTick   = 0;
-    lazyGeneralCrisisActive   = false;
-    lazyGeneralDoctrine       = 'COMBINED_ARMS';
-    lazyGeneralFormationShape = 'LINE';
-    lazyGeneralPersonality    = lazyPickPersonality();
-    lazyGeneralPersonalityMod = LAZY_PERSONALITIES[lazyGeneralPersonality] || LAZY_PERSONALITIES.BALANCED;
-    lazyGeneralIsRiverCached  = lazyIsRiverBattle();
-    lazyGeneralPhase          = lazyGeneralIsRiverCached ? 'RIVER_ADVANCING' : 'FORMING';
-
-    if (typeof battleEnvironment !== 'undefined' && battleEnvironment && battleEnvironment.units) {
-        battleEnvironment.units.forEach(u => {
-            if (u.side === "player" && !u.isCommander) {
-                u._lazyManual = false;
-                delete u._lazyOrigSpeed;
-                delete u._lazyKiteSign;
-                delete u._lazyEscortFor;
-            }
-        });
-    }
-
-    lazyGeneralTickInterval = setInterval(lazyGeneralTick, LAZY_TICK_MS);
+    // REMOVED: Lazy General AI no longer runs, in any battle type. Player
+    // attacker units that aren't selected simply stay idle with no orders
+    // until the player commands them — no autopilot forming/advancing/
+    // skirmishing/charging behavior runs on their behalf anymore.
+    return;
 }
 
 function stopLazyGeneral() {
@@ -868,8 +867,26 @@ function lazyTakeManualControl(units) {
 }
 
 // Called wherever a unit is deselected — hands it straight back to the autopilot.
+//
+// FIX ("shield/hold units barely move"): this used to unconditionally clear
+// _lazyManual on every deselect, with NO aiTacticGroup guard, despite
+// RTSControls.js's own AI-TACTIC-GROUPS doc comment claiming one existed
+// here ("never on mere deselection — see lazyReleaseManualControl's
+// aiTacticGroup guard"). Since deselecting happens constantly during normal
+// play (clicking empty ground, selecting a different group, drag-box
+// missing a unit), a Shield/Hold/Skirm/Charge-tagged unit got silently
+// re-admitted to getLivePlayers() — the shared autoAttack.js engine — the
+// moment it was deselected, even though it still had its OWN dedicated
+// tactic logic actively driving it (the Shield tick interval, HOLD's
+// formation lock-in, etc.). Two controllers fighting over the same unit
+// every tick is what read as "barely moves." A unit with an independent
+// tactic tag must stay opted out of the shared engine regardless of
+// selection state — only a real Cancel (Cmd.cancelAiTactic), the tactic
+// owner dying, or the battle ending should ever hand it back.
 function lazyReleaseManualControl(unit) {
-    if (unit) unit._lazyManual = false;
+    if (!unit) return;
+    if (unit.aiTacticGroup && unit.aiTacticGroup !== 'auto') return;
+    unit._lazyManual = false;
 }
 
 // Bridges the desktop Q/E/R/F/Z/X/V/C/B command handlers (above/below) to the
@@ -899,7 +916,21 @@ const COMMAND_GROUPS = {
 document.addEventListener("keydown", (event) => {
     // 1. TOP-LEVEL SAFETY CHECK (Must come first to prevent crashes)
     if (!inBattleMode || !event || !battleEnvironment || !Array.isArray(battleEnvironment.units)) return;
-    
+
+    // POLISH: guard against typing into any text field stealing these
+    // single-letter shortcuts (1-5, Z/X/V/C/B all double as ordinary
+    // characters someone could be typing). No known text input is created
+    // by THIS file during battle, but the scenario/dialogue/parley systems
+    // loaded alongside it plausibly could show one without this file's
+    // knowledge — and unlike this listener, unit-hover-tooltip.js's own
+    // spacebar listener already guards exactly this way, so this brings
+    // the two in line rather than leaving one keyboard path unprotected.
+    // Cheap insurance either way: typing "box" into any future text field
+    // during a battle should never silently reformat the player's army.
+    const activeTag = event.target && event.target.tagName;
+    if (activeTag === 'INPUT' || activeTag === 'TEXTAREA' || activeTag === 'SELECT' ||
+        (event.target && event.target.isContentEditable)) return;
+
     const key = (typeof event.key === "string") ? event.key.toLowerCase() : null;
     if (!key) return;
 
@@ -919,7 +950,25 @@ const activeCommander = battleEnvironment.units.find(u =>
     }
 
     // 3. DEFINE SCOPES
-    const playerUnits = battleEnvironment.units.filter(u => u.side === "player" && !u.isCommander && !u.disableAICombat && u.hp > 0);
+    // BUGFIX ("1-5 keys and the selection buttons select nothing at the
+    // start of a siege battle"): this used to exclude disableAICombat
+    // units. customsiegebattle.js's launch routine deliberately sets
+    // disableAICombat=true on every player unit at siege start (a freeze,
+    // lifted only by pressing the auto-attack button or by drag-box
+    // selecting a unit), so at that point every unit in the battle was
+    // being filtered out here — the 1-5 handler and any UI button that
+    // reuses this same scope had nothing left to select, no matter what
+    // was pressed. Land battles never set disableAICombat at launch, which
+    // is why 1-5 always worked there from the first frame.
+    // Drag-box selection (below, ~line 2303) never had this exclusion —
+    // it selects on side/commander/hp alone — which is why dragging a box
+    // worked immediately and "unstuck" 1-5 afterward: lazyTakeManualControl()
+    // (called whenever a unit actually becomes selected, here or via drag-box)
+    // already clears disableAICombat on the units it touches; the bug was
+    // units never becoming selectable in the first place. Matching the
+    // drag-box scope exactly (dropping the disableAICombat check) fixes this
+    // for every command that shares this variable, not just 1-5.
+    const playerUnits = battleEnvironment.units.filter(u => u.side === "player" && !u.isCommander && u.hp > 0);
     const commander = activeCommander; // Alias for use in formation math
 
     // =========================
@@ -995,7 +1044,7 @@ const activeCommander = battleEnvironment.units.find(u =>
     if (selectedUnits.length === 0) return;
 
    // =========================
-    // Z, X, C, V, B: FORMATIONS (ANCHORED TO GENERAL)
+    // Z, X, C, V, B: FORMATIONS (ANCHORED TO SELECTION CENTROID)
     // =========================
     if (["z", "x", "v", "c", "b"].includes(key)) {
         
@@ -1004,21 +1053,56 @@ const activeCommander = battleEnvironment.units.find(u =>
         lazyTakeManualControl(selectedUnits);
         _mc3RevertRobotOnCommand(); // real formation command — robot reverts to manual
 
+        // Formation keys put units in a shape and STOP — a "form up here"
+        // command, not an order to advance. lazyTakeManualControl above
+        // opts the unit out of autoAttack.js's own tactical engine, but
+        // that alone isn't enough: any leftover brain-emoji AI tactic
+        // (SKIRM/HOLD/CHARGE/ADAPT/SHIELD) from an earlier command is
+        // still tagged on the unit via aiTacticGroup/aiTacticNumber, and
+        // ai_categories.js keys its own per-frame behavior off exactly
+        // that tag — so the instant this one-time move order finishes,
+        // an old CHARGE tag (say) would resume driving the unit straight
+        // at the enemy. Clearing it here is what makes "form up" actually
+        // mean "stop," not just "pause before resuming whatever I was
+        // doing before."
+        if (window.MobileControls && window.MobileControls.Cmd &&
+            typeof window.MobileControls.Cmd._clearAiTacticSilent === 'function') {
+            window.MobileControls.Cmd._clearAiTacticSilent(selectedUnits);
+        }
+
         if (key === "z") currentFormationStyle = "tight";  
         if (key === "x") currentFormationStyle = "standard";  
         if (key === "v") currentFormationStyle = "line";   
         if (key === "c") currentFormationStyle = "circle"; 
         if (key === "b") currentFormationStyle = "square"; 
         
-        // SURGERY: Anchor the offsets to the General instead of a static map centroid
-        calculateFormationOffsets(selectedUnits, currentFormationStyle, commander);
+        // FIX: anchor the offsets to the centroid of the SELECTED units, not
+        // the commander. Previously every formation press also forced
+        // orderType = "follow", which re-derives each unit's target every
+        // tick as commander.x/y + offset — so units never actually "formed
+        // up" where they stood, they permanently chased the commander's
+        // position instead (and snapped into a new shape any time the
+        // commander moved). Now: compute the centroid once, bake the
+        // formation shape onto that fixed point, and give each unit a
+        // one-time move_to_point order to its own spot in the shape — a
+        // real, stable formation the units walk into and hold.
+        const selectionCentroid = lazyCentroid(selectedUnits);
+        calculateFormationOffsets(selectedUnits, currentFormationStyle, selectionCentroid);
 
-        // SURGERY: Automatically apply the "Follow" command (Mirroring 'F')
         selectedUnits.forEach(u => {
             u.hasOrders = true;
-            u.orderType = "follow"; 
-            u.orderTargetPoint = null; 
+            u.orderType = "move_to_point";
+            u.orderTargetPoint = {
+                x: selectionCentroid.x + (u.formationOffsetX || 0),
+                y: selectionCentroid.y + (u.formationOffsetY || 0)
+            };
             u.formationTimer = 240; 
+            // Remember what shape this unit is currently holding, per-unit —
+            // lets a later drag-to-form (see executeBoxFormationMove) detect
+            // "this selection already has a formation" and redraw/preserve
+            // that same shape instead of always falling back to a fresh
+            // varied line.
+            u.assignedFormationStyle = currentFormationStyle;
 			//u.reactionDelay = Math.floor(Math.random() * 15) + 5; // Add this line
         });
 		
@@ -1076,9 +1160,22 @@ case "f": // FOLLOW COMMANDER
                 u.hasOrders = true;
                 u.orderType = "retreat";
                 let stagger = (Math.random() * 20); 
-                // Define the raw target
-                let targetX = u.x;
-                let targetY = BATTLE_WORLD_HEIGHT - 50 - stagger;
+                // SURGERY: retreat toward the player's own assigned spawn
+                // direction (was hardcoded to the bottom of the map, which
+                // assumed the player always spawned south). Each unit keeps
+                // its own lateral spread -- it falls back toward its own
+                // column on the rear line rather than regrouping to one
+                // point, matching the old "targetX = u.x unchanged" feel.
+                const geo = window.battleSpawnAssignment && window.battleSpawnAssignment.player;
+                let targetX, targetY;
+                if (geo) {
+                    const acrossOffset = (u.x - geo.ax) * geo.across.x + (u.y - geo.ay) * geo.across.y;
+                    targetX = geo.ax + geo.across.x * acrossOffset - geo.rear.x * stagger;
+                    targetY = geo.ay + geo.across.y * acrossOffset - geo.rear.y * stagger;
+                } else {
+                    targetX = u.x;
+                    targetY = BATTLE_WORLD_HEIGHT - 50 - stagger;
+                }
 
                 // HOOK CLAMP HERE
                 u.orderTargetPoint = getSafeMapCoordinates(targetX, targetY);
@@ -1264,6 +1361,51 @@ const commander = battleEnvironment.units.find(u =>
         // SURGERY 1: Protect specialized AI crews from having their targets wiped by formation logic
         if (unit.side !== "player" || unit.isCommander || unit.disableAICombat || unit.hp <= 0) return;
 
+        // FORMATION-LOCK: a unit currently marching to a Total War-style
+        // drag-waypoint (see battlefield_commands.js's executeBoxFormationMove
+        // and ai_categories.js's processAction) must be completely invisible
+        // to this function. This is a SEPARATE function from processAction —
+        // it has its own top-level filter here and is called independently
+        // once per frame (battlefield_logic.js), so ai_categories.js's own
+        // _formationLocked gate (which only protects code *inside*
+        // processAction) never actually stopped this file's "canShootWhileMoving"
+        // branch and 100px survival override from reassigning unit.target to
+        // whatever enemy was nearby and letting ranged units fire mid-march —
+        // which is what was pulling units off their ordered line toward
+        // whatever they could see/shoot instead of the drawn waypoint. This
+        // unit's own leftover AI tactic was already cleared the moment the
+        // order was issued (executeBoxFormationMove), so there is nothing
+        // legitimate left for this function to do with it until it arrives —
+        // ai_categories.js hands it to hold_position on arrival, and THIS
+        // function's hold_position branch (below) picks back up from there.
+        if (unit._formationLocked) return;
+
+        // BUGFIX ("ladder units retreat south with no animation"): this
+        // function used to run unconditionally for units mid-climb
+        // (unit.isClimbing) or in the post-climb settle drift
+        // (unit.settling — see ai_categories.js's _handleMovement SETTLE
+        // PHASE). Neither flag sets disableAICombat, so the 100px emergency
+        // survival override a few lines below could fire on a unit that is
+        // physics-locked to a ladder rail or mid-settle and hijack
+        // unit.target to the nearest defender — usually a wall archer,
+        // since ladders sit right against the wall. ai_categories.js's own
+        // climb/settle blocks hard-return before checking unit.target, so
+        // the hijack didn't break the climb itself, but it left a stale
+        // target reference sitting on the unit that could survive into the
+        // very first "seek_engage" tick after settling completes, and it
+        // wasted a tactical-orders pass on a unit this file has no business
+        // touching yet. onWall units are also skipped here now — once a
+        // unit has actually landed on the wall it either still holds a real
+        // siege_assault order (handled later in this function, which is
+        // already onWall-aware) or has just been handed seek_engage by the
+        // settle-completion code, in which case the seek_engage branch below
+        // is the only thing that should pick its target. Units performing
+        // their real orders are otherwise completely unaffected by this
+        // guard: siege_assault, hold_position, follow, retreat, etc. never
+        // set isClimbing/settling and are not onWall until they've genuinely
+        // reached the wall top.
+        if (unit.isClimbing || unit.settling) return;
+
         // Decrement formation timer
         if (unit.formationTimer > 0) unit.formationTimer--;
 
@@ -1289,31 +1431,96 @@ const tacticalRole = getTacticalRole(unit);
         // SURGERY: Ensure Horse Archers/Mounted Gunners are recognized as ranged units
         // even though they are grouped as CAVALRY tactically.
         const isRanged = (tacticalRole === "RANGED" || tacticalRole === "GUNPOWDER" || isRangedType(unit) || unit.stats?.isRanged);
-        let emergencyThreshold = 100;
-		const isStrictCommand = unit.hasOrders && ["retreat", "follow", "move_to_point"].includes(unit.orderType);
-
-        // SURGERY: same exemption shape as stillEnRouteToSiegeEquipment further
-        // down this function — a unit actively committed to reaching a live
-        // ram/ladder/trebuchet must not get hijacked into fighting whichever
-        // defender happens to be within 100px. This IS the "very difficult to
-        // climb" bug: defenders stand on/near the wall right where the ladders
-        // are, so this check fired on nearly every approach, swapped the
-        // dummy target for a real enemy reference, and processAction's
-        // siege-movement call site requires target.isDummy — a real enemy
-        // target fails that check, so the unit falls into ordinary combat
-        // instead of ever reaching the ladder tile. Deliberately NOT using
-        // disableAICombat here (that's the ladder_fanatic pattern) — that
-        // flag makes this whole function bail on the unit before it ever
-        // reaches the switch-case below that actually sets their destination.
-        const committedToSiegeCharge =
-            (unit.siegeRole === "ram_pusher" || unit.siegeRole === "ladder_carrier" ||
-             unit.siegeRole === "trebuchet_crew") &&
-            unit.siegeTarget && unit.siegeTarget.hp > 0 && !unit.onWall;
-
+        // FIX ("ranged units still shoot even when I try to move them with
+        // blue arrows — they should listen and move, unless within a
+        // reasonable fraction of their own max range" — direct request):
+        // this used to be one flat 100px radius for every unit regardless
+        // of type. That's already wrong in both directions for a ranged
+        // unit specifically — a short-range skirmisher (e.g. range 200)
+        // got a self-defense zone nearly HALF its own weapon range, so it
+        // would "emergency" stop-and-shoot a full move order for a threat
+        // it could easily have marched past; a long-range crossbowman
+        // (range 800+) got a radius under 15% of its range, arguably too
+        // tight the other way. Now it's derived per-unit from the unit's
+        // own stats.range: 20% of that range, with a 50px floor so a
+        // short-ranged/melee unit (whose .range is really just melee
+        // reach, e.g. Militia's 15) still gets a sane minimum — 50px
+        // matches the existing floor conventions elsewhere in this file
+        // (hold_position's own melee aggroLimit a few lines below is 70px,
+        // so 50 sits comfortably under that as a strictly emergency-only,
+        // even-smaller trigger for a unit that's supposed to be marching
+        // through, not holding). Ranged units in particular now get a
+        // radius that actually scales with their weapon — an 800-range
+        // crossbowman's true "someone is right on top of me" zone is 160px,
+        // not a flat 100 that was already inside comfortable firing
+        // distance for that same unit, which is exactly how a move order
+        // was getting silently swallowed into a stand-and-shoot: the old
+        // flat threshold could sit well within a long-ranged unit's real
+        // rangeThreshold (ai_categories.js), so nearestDist < 100 fired,
+        // unit.target got set, and the subsequent dist-vs-rangeThreshold
+        // check downstream saw a target already comfortably in range and
+        // fired instead of honoring the still-active move_to_point order.
+        const emergencyThreshold = Math.max(50, (unit.stats?.range || 0) * 0.2);
+		const isStrictCommand = unit.hasOrders && ["retreat", "follow", "move_to_point", "hold_position"].includes(unit.orderType);
+        // FIX: ladder_carrier (and ram_pusher/trebuchet_crew, same exposure)
+        // never get disableAICombat=true the way ladder_fanatic does — so the
+        // instant a defender came within 100px (guaranteed near a wall lined
+        // with archers), this override hijacked unit.target to that defender
+        // and the unit stopped advancing to fight instead of climbing. That's
+        // most of your ladder force, since ladder_fanatic is only ~10% of
+        // climbers (see the fanaticCount roll in autoAttack.js's _runSiege).
+        // Committed siege-equipment crew now finish the job they were
+        // assigned instead of getting dragged into a fight mid-approach.
+        const isCommittedSiegeCrew = ["ladder_carrier", "ram_pusher", "trebuchet_crew"].includes(unit.siegeRole);
+        // FIX ("HOLD-tagged units still charge"): hold_position now added to
+        // isStrictCommand above. Previously this 100px survival override ran
+        // BEFORE the "2. EXECUTE ORDERS" -> hold_position branch below and had
+        // no exemption for it, so any enemy that wandered within 100px of a
+        // holding unit got hard-assigned as unit.target and the function
+        // returned immediately — completely bypassing hold_position's own
+        // pickSmartCombatTarget() logic and the aggro-range/formation-lock
+        // behavior that's supposed to define what "holding" looks like.
+        // Downstream movement/attack execution then had no way to tell that
+        // target apart from a real seek_engage/charge target, so a holding
+        // unit could visibly close distance and fight just like a charging
+        // one. hold_position's own handler (a few lines down) already does
+        // smart nearby-target selection using the correct aggroLimit for the
+        // unit type, so it's safe — and correct — to let it run instead of
+        // being preempted here.
+        // FIX ("even hold obeys self-preservation, but ranged units should
+        // keep executing a movement order rather than stopping to shoot
+        // anything past 100px" — direct request): a bare unit (no brain-
+        // emoji tactic tag — includes every unit after 🛑 GLOBAL STOP,
+        // which now clears tactic tags too, see autoAttack.js) executing a
+        // plain movement order (move_to_point/retreat/follow) previously
+        // got ZERO self-defense here at all, since those three order types
+        // were unconditionally exempted via isStrictCommand above — an
+        // AI-disabled unit mid-march could get freely pelted with no
+        // reaction. Tactic-tagged units are deliberately still excluded:
+        // each tactic already has its own bespoke self-defense-while-
+        // marching logic (see ai_categories.js's per-tactic blocks), and
+        // this generic override firing on top would fight those.
+        // hold_position remains excluded here regardless of tag too — it's
+        // always handled by its own dedicated aggro logic a few lines
+        // below (70px melee / full weapon range ranged), the correct
+        // behavior for a fully-stopped unit. Setting unit.target here
+        // (same pattern hold_position's own handler uses below) only
+        // ENABLES attacking if the target is already in real weapon range
+        // on a later pass — it does not redirect this unit's own
+        // movement, which stays driven by orderTargetPoint — so a ranged
+        // unit ordered to move keeps walking through anything beyond its
+        // own emergencyThreshold (now the per-unit range-fraction radius
+        // defined above, not a flat 100) instead of stopping to shoot it,
+        // exactly as specified. (A melee unit inside its own trigger but
+        // still outside its own ~30px reach just doesn't act on it — same
+        // "detects but can't yet reach" gap hold_position's own 70px
+        // melee aggro zone already has today; not new.)
+        const isTacticControlled = !!(unit.aiTacticGroup && unit.aiTacticGroup !== 'auto');
+        const bareMovementOrder = isStrictCommand && unit.orderType !== "hold_position" && !isTacticControlled;
         // ====================================================================
-        // SURVIVAL OVERRIDE: 100px Emergency Self-Defense
+        // SURVIVAL OVERRIDE: Emergency Self-Defense (20% of own range, 50px floor)
         // ====================================================================
-        if (nearestDist < emergencyThreshold && nearestEnemy && !isStrictCommand && !unit.disableAICombat && !committedToSiegeCharge) {
+        if ((!isStrictCommand || bareMovementOrder) && nearestDist < emergencyThreshold && nearestEnemy && !unit.disableAICombat && !isCommittedSiegeCrew) {
             if (unit.originalRange) {
                 unit.stats.range = unit.originalRange;
                 unit.originalRange = null;
@@ -1346,11 +1553,32 @@ const tacticalRole = getTacticalRole(unit);
                 // Ranged units use max range, melee units use an emergency 70px self-defense radius
                 let aggroLimit = isRanged ? unit.stats.range : 70;
 
+                // PERF (direct request — "make sure somewhat optimized so
+                // doesn't slow down too much on PC"): pickSmartCombatTarget
+                // does an O(n) scan with a nested O(n) isolation/focus-fire
+                // check per candidate — a real cost with large armies — and
+                // this ran fully unthrottled every single frame for every
+                // hold_position unit (which includes every SHIELD-locked
+                // unit once it's within its own weapon range, per that
+                // tactic's own comment). A held unit's surroundings don't
+                // meaningfully change frame-to-frame, so re-running the
+                // full scan only every 4th frame (~65ms at 60fps —
+                // imperceptible reaction lag for a stationary unit) cuts
+                // this cost 75% for anything holding still. Falls straight
+                // through to a fresh scan immediately if the cached target
+                // died or wandered outside aggroLimit, so losing/
+                // re-acquiring a target is never stale.
+                unit._holdScanTick = ((unit._holdScanTick || 0) + 1) % 4;
+                const cachedTarget = unit.target;
+                const cachedStillValid = cachedTarget && cachedTarget.hp > 0 &&
+                    Math.hypot(unit.x - cachedTarget.x, unit.y - cachedTarget.y) <= aggroLimit;
                 // SMART TARGET SELECTION among everyone within aggro range — was
                 // "lock onto whoever is physically nearest". A holding archer
                 // with three targets in range should still prefer the wounded
                 // or isolated one, not just the closest. See pickSmartCombatTarget().
-                const holdTarget = pickSmartCombatTarget(unit, battleEnvironment.units, aggroLimit);
+                const holdTarget = (unit._holdScanTick !== 0 && cachedStillValid)
+                    ? cachedTarget
+                    : pickSmartCombatTarget(unit, battleEnvironment.units, aggroLimit);
                 if (holdTarget) {
                     unit.target = holdTarget;
                     return; // Locks on and executes combat
@@ -1380,10 +1608,60 @@ const tacticalRole = getTacticalRole(unit);
             // SEEK & ENGAGE (The only order where they are allowed to be distracted)
             // ==========================
             if (unit.orderType === "seek_engage") {
-                // SMART TARGET SELECTION — was a flat `unit.target = nearestEnemy`
-                // (pure distance). See pickSmartCombatTarget() above.
-                const smartTarget = pickSmartCombatTarget(unit, battleEnvironment.units);
-                const chosenTarget = smartTarget || nearestEnemy; // naval, or nothing scored — fall back to nearest
+                // ── AI TACTIC: SKIRMISH ISOLATION TARGETING (melee only) ──
+                // Per direct request: "mele units will only try to pic
+                // isolated units of enemies, within 200 pixels distance
+                // count how many units of each group, and only prioritize
+                // picking the isolated units. while charge is a stupid
+                // banzai charge lol at the closest unit." A skirmish-tagged
+                // melee unit now picks strictly by lowest same-side-ally
+                // count within 200px of the CANDIDATE enemy (not the
+                // scanning unit) — the enemy standing furthest from support
+                // wins, ties broken by distance to the scanning unit so it's
+                // not picking an equally-isolated target on the far side of
+                // the map. This is a hard override, not a scoring nudge —
+                // unlike pickSmartCombatTarget's existing isolation bonus
+                // (a soft -100 among many other factors, fixed 120px radius,
+                // and disabled outright in naval battles), this is the
+                // ENTIRE selection criterion, at the 200px radius specified,
+                // for melee/skirmish only. CHARGE is completely untouched —
+                // it never enters this branch (isMeleeSkirmish requires
+                // aiTacticGroup === 'skirmish') and keeps the existing
+                // pickSmartCombatTarget-or-nearest picker below, i.e. the
+                // "dumb charge at the closest unit" the request explicitly
+                // wants preserved. Ranged skirmish units are also untouched
+                // here — their tactic is expressed entirely through the
+                // kiting distance-keeping in ai_categories.js, not target
+                // choice, so this only branches for non-ranged units.
+                const isMeleeSkirmish = unit.aiTacticGroup === 'skirmish' && !unit.stats.isRanged;
+                let chosenTarget = null;
+                if (isMeleeSkirmish) {
+                    let bestIsolation = Infinity;
+                    let bestDist = Infinity;
+                    for (let ti = 0; ti < battleEnvironment.units.length; ti++) {
+                        const cand = battleEnvironment.units[ti];
+                        if (cand.side === unit.side || cand.hp <= 0 || cand.isDummy) continue;
+                        let allyCount = 0;
+                        for (let tj = 0; tj < battleEnvironment.units.length; tj++) {
+                            const ally = battleEnvironment.units[tj];
+                            if (ally === cand || ally.hp <= 0 || ally.side !== cand.side) continue;
+                            if (Math.hypot(ally.x - cand.x, ally.y - cand.y) <= 200) allyCount++;
+                        }
+                        const candDist = Math.hypot(unit.x - cand.x, unit.y - cand.y);
+                        if (allyCount < bestIsolation ||
+                            (allyCount === bestIsolation && candDist < bestDist)) {
+                            bestIsolation = allyCount;
+                            bestDist = candDist;
+                            chosenTarget = cand;
+                        }
+                    }
+                }
+                if (!chosenTarget) {
+                    // SMART TARGET SELECTION — was a flat `unit.target = nearestEnemy`
+                    // (pure distance). See pickSmartCombatTarget() above.
+                    const smartTarget = pickSmartCombatTarget(unit, battleEnvironment.units);
+                    chosenTarget = smartTarget || nearestEnemy; // naval, or nothing scored — fall back to nearest
+                }
                 if (chosenTarget) {
                     // SURGERY: post-breach city attackers (siegeRole stays
                     // "assault_complete" from the gate handoff above) need
@@ -1413,8 +1691,11 @@ const tacticalRole = getTacticalRole(unit);
                     ? battleEnvironment.cityGates.find(g => g.side === "south")
                     : (typeof overheadCityGates !== 'undefined' ? overheadCityGates.find(g => g.side === "south") : null);
 
-                // Ensure we catch the global breach flag too
-                let gateBreached = window.__SIEGE_GATE_BREACHED__ || (southGate && (southGate.gateHP <= 0 || southGate.isOpen));
+                // Now sourced from the single canonical isSiegeGateBreached()
+                // helper (ai_categories.js) — it already implements this exact
+                // same live-gate-first / overheadCityGates-fallback logic, plus
+                // the global-flag check, so every part of the codebase agrees.
+                let gateBreached = isSiegeGateBreached();
 				
 				// ---> SURGERY: MANDATORY PLAZA RUSH OVERRIDE (2-STAGE FUNNEL) <---
                 if (gateBreached && unit.siegeRole !== "ladder_fanatic") {
@@ -1425,6 +1706,30 @@ const tacticalRole = getTacticalRole(unit);
 
                     // Check if unit has crossed the gate threshold into the city
                     let isInsideCity = unit.y < gateY + 20;
+
+                    // SURGERY: STUCK-AT-THE-DOOR FAILSAFE. Stage 1 below aims
+                    // every not-yet-crossed unit at nearly the same ~60px-wide
+                    // point every single frame AND sets disableAICombat=true
+                    // (sprint, ignore combat entirely). If the doorway is
+                    // jammed — several units all converging on the same tight
+                    // target simultaneously, unit-collision blocking forward
+                    // movement — a unit can sit here making no real progress,
+                    // forever undefended, which is exactly the persistent
+                    // cluster of frozen units piling up right at the gate
+                    // mouth. Track real forward progress (unit.y decreasing —
+                    // camp is south/larger-y, city is north/smaller-y); if a
+                    // unit hasn't meaningfully advanced in 4 seconds, stop
+                    // trusting the strict Y-threshold and hand it to Stage 2
+                    // anyway, exactly as if it had made it through.
+                    if (!isInsideCity) {
+                        if (unit._gateFunnelLastY === undefined || (unit._gateFunnelLastY - unit.y) > 5) {
+                            unit._gateFunnelLastY = unit.y;
+                            unit._gateFunnelStuckSince = Date.now();
+                        }
+                        if (Date.now() - unit._gateFunnelStuckSince > 4000) {
+                            isInsideCity = true; // jammed too long — force the handoff
+                        }
+                    }
 
                     if (!isInsideCity) {
                         // STAGE 1: FUNNEL TO THE EXACT GATE
@@ -1461,6 +1766,13 @@ const tacticalRole = getTacticalRole(unit);
                         unit.orderType = "seek_engage";
                         unit.hasOrders = true;
                         unit.target = nearestEnemy || null;
+                        // Done funneling — drop the stuck-tracking fields so a
+                        // later re-entry into Stage 1 (unlikely, but possible
+                        // if combat ever pushes the unit back south) starts
+                        // its own-progress clock fresh instead of inheriting a
+                        // timestamp from this pass through the gate.
+                        delete unit._gateFunnelLastY;
+                        delete unit._gateFunnelStuckSince;
                         return;
                     }
                 }
@@ -1546,9 +1858,6 @@ const tacticalRole = getTacticalRole(unit);
 
                     if (nearestEnemy) {
                         unit.target = nearestEnemy;
-                        if (unit.siegeRole === "cavalry_reserve" && unit.y > wallBoundaryY && southGate) {
-                            unit.target = { x: southGate.x * BATTLE_TILE_SIZE, y: southGate.y * BATTLE_TILE_SIZE - 50, isDummy: true };
-                        }
                     }
                     return; 
                 }
@@ -1563,22 +1872,65 @@ const tacticalRole = getTacticalRole(unit);
                             let queueOffset = unit.queuePos > 6 ? (unit.queuePos * 4) : 0; 
                             destY = unit.siegeTarget.y + 15 + queueOffset;
                         } else {
-                            unit.siegeRole = "infantry_reserve"; 
+                            // Ram died/gone — RESERVES REMOVED, so this unit becomes
+                            // ladder crew instead of parking in a reserve role that no
+                            // longer exists. It will be picked up and given a real
+                            // ladder assignment (with a proper queue position) the next
+                            // time executeSiegeAssaultAI runs, since a unit with
+                            // siegeRole "ram_pusher" but a dead/missing siegeTarget
+                            // matches autoAttack.js's needsAssignment filter. Until
+                            // then, hold it in place rather than snapping to (0,0)-ish
+                            // stale coordinates.
+                            unit.siegeRole = null;
+                            unit.siegeTarget = null;
+                            destX = unit.x;
+                            destY = unit.y;
                         }
                         break;
 
                    case "ladder_carrier":
                         if (unit.siegeTarget && unit.siegeTarget.hp > 0) {
+                            // LADDER QUEUE (replaces old "total swarm, no queues" logic):
+                            // queuePos is assigned round-robin in executeSiegeAssaultAI.
+                            // Positions within the crew cap walk straight to the ladder;
+                            // positions beyond it hold at a waiting spot a short distance
+                            // behind the ladder, staggered so units queue in a visible
+                            // line instead of stacking on the exact same point or
+                            // swarming randomly around the base.
+                            const LADDER_CREW_CAP = 2;
+                            let isActiveCrew = (unit.queuePos == null) || (unit.queuePos < LADDER_CREW_CAP);
+
                             if (!unit.siegeTarget.isDeployed) {
-                                // SURGERY: Total swarm logic. No queues, no orderly lines.
-                                destX = unit.siegeTarget.x + (Math.random() - 0.5) * 60;
-                                destY = unit.siegeTarget.y + (Math.random() - 0.5) * 50;
-                            } else {
+                                // Ladder not yet deployed/carried into place — everyone
+                                // assigned to it (active crew or queued) converges to help
+                                // carry it, same as before. A small, tight jitter (not a
+                                // wide swarm) keeps them from perfectly overlapping.
+                                destX = unit.siegeTarget.x + (Math.random() - 0.5) * 30;
+                                destY = unit.siegeTarget.y + (Math.random() - 0.5) * 25;
+                            } else if (isActiveCrew) {
+                                // Deployed and this unit has an open crew slot — go climb.
                                 destX = unit.siegeTarget.x;
                                 destY = unit.siegeTarget.y - 10;
+                            } else {
+                                // Deployed but this unit is queued behind the crew cap —
+                                // hold at a staggered waiting spot a short distance south
+                                // of the ladder base instead of walking up to (and
+                                // crowding) the climb point. Recomputed only when the
+                                // queue position changes so it doesn't jitter every tick.
+                                let queueRank = unit.queuePos - LADDER_CREW_CAP;
+                                let waitDestX = unit.siegeTarget.x + ((queueRank % 3) - 1) * 24;
+                                let waitDestY = unit.siegeTarget.y + 40 + Math.floor(queueRank / 3) * 22;
+                                destX = waitDestX;
+                                destY = waitDestY;
                             }
                         } else {
-                            unit.siegeRole = "infantry_reserve";
+                            // Ladder died/gone — same fix as ram_pusher above: fall
+                            // through to a fresh ladder assignment next AI pass rather
+                            // than a reserve role that no longer exists.
+                            unit.siegeRole = null;
+                            unit.siegeTarget = null;
+                            destX = unit.x;
+                            destY = unit.y;
                         }
                         break;
 						
@@ -1617,64 +1969,35 @@ const tacticalRole = getTacticalRole(unit);
                         }
                         break;
 
-						case "infantry_reserve":
-                        // If siegebattle.js pushed them forward to funnel, respect it!
-                        if (unit.target && unit.target.isDummy && unit.target.y < wallBoundaryY + 200) {
-                            destX = unit.target.x;
-                            destY = unit.target.y;
-                        } else {
-                            // SURGERY: this used to beeline for a fixed point near the
-                            // wall every single frame, which reads as a slow, steady
-                            // forward creep even though these units have no real order
-                            // yet. Give them a small randomized idle wander instead,
-                            // refreshed every ~2-4s around a stable anchor (their first
-                            // resting spot), so they hold position and look alive
-                            // without marching toward the wall until reassigned.
-                            const nowT = Date.now();
-                            if (!unit._reserveWanderUntil || nowT > unit._reserveWanderUntil) {
-                                if (typeof unit._reserveWanderAnchorX !== 'number') {
-                                    unit._reserveWanderAnchorX = unit.x;
-                                    unit._reserveWanderAnchorY = unit.y;
-                                }
-                                unit._reserveWanderX = unit._reserveWanderAnchorX + (Math.random() - 0.5) * 100;
-                                unit._reserveWanderY = unit._reserveWanderAnchorY + (Math.random() - 0.5) * 100;
-                                unit._reserveWanderUntil = nowT + 2000 + Math.random() * 2000;
-                            }
-                            destX = unit._reserveWanderX;
-                            destY = unit._reserveWanderY;
+                    default:
+                        // No siegeRole assigned yet (e.g. no rams/ladders exist at
+                        // all yet, very start of the battle before equipment has
+                        // spawned — see executeSiegeAssaultAI's fallback, and
+                        // autoAttack.js's needsAssignment filter for the fix that
+                        // makes sure this is only ever a brief, one-tick state.
+                        //
+                        // BUGFIX ("units flicker left-right within a few pixels,
+                        // hesitant to do anything"): this used to compute
+                        // `destX = unit.x + (Math.random()-0.5)*40` FRESH every
+                        // single tick with no caching — every tick this unit
+                        // spent here (which, before the needsAssignment fix,
+                        // could be the entire rest of the battle) it got handed
+                        // a brand new random +/-20px target immediately, which
+                        // is a literal random walk with no persistence — exactly
+                        // the reported flicker. Cache the waypoint once, the
+                        // same pattern the "follow" case below already uses for
+                        // its own commander-relative waypoint, so a unit sitting
+                        // in this fallback for even one extra tick holds still
+                        // and walks toward the wall in a straight line instead
+                        // of vibrating in place.
+                        if (unit._noRoleWaypointX === undefined) {
+                            unit._noRoleWaypointX = unit.x + (Math.random() - 0.5) * 40;
+                            unit._noRoleWaypointY = wallBoundaryY + 200;
                         }
+                        destX = unit._noRoleWaypointX;
+                        destY = unit._noRoleWaypointY;
                         break;
 
-					case "cavalry_reserve":
-                        // BUGFIX: this case never actually checked gateBreached, so
-                        // cavalry staged behind camp had no live path toward the gate
-                        // once it opened — the only "head to gate" code lived in the
-                        // pre-breach intercept above, gated on unit.y > wallBoundaryY,
-                        // which cavalry resting 500px behind camp never satisfies.
-                        // Fixed here: once the gate is open, cavalry advance through it.
-                        if (gateBreached && southGate) {
-                            let gateDestX = (typeof SiegeTopography !== 'undefined')
-                                ? SiegeTopography.gatePixelX : southGate.x * BATTLE_TILE_SIZE;
-                            let gateDestY = (typeof SiegeTopography !== 'undefined')
-                                ? SiegeTopography.gatePixelY : southGate.y * BATTLE_TILE_SIZE;
-                            destX = gateDestX + (Math.random() - 0.5) * 80;
-                            destY = gateDestY + 40; // just south of the gate, ready to pour through
-                            break;
-                        }
-
-                        let destX2 = unit.x;
-                        // FIX: Ensure they are staging behind the camp, not just the wall boundary
-                        let safeCampY = typeof SiegeTopography !== 'undefined' ? SiegeTopography.campPixelY : wallBoundaryY + 300;
-                        let destY2 = safeCampY + 500;
-
-                        // Check if already at destination
-                        if (Math.hypot(unit.x - destX2, unit.y - destY2) < 5) {
-                            unit.hasOrders = false;       
-                            unit.orderType = null;        
-                            unit.target = null;           
-                            unit.state = "idle";          
-                        }
-                        break;
 				}
                 unit.target = { 
                     x: destX, 
@@ -1860,25 +2183,15 @@ if (unit.orderType === "follow" && commander) {
 // SIEGE ASSAULT COMMAND ENGINE (REVISED & FIXED)
 // ============================================================================
 
-function isSiegeGateBreached() {
-
-    // If not a siege, always allow
-    if (typeof inSiegeBattle === "undefined" || !inSiegeBattle) {
-        return true;
-    }
-
-    // FIX: prefer the live battle gate (see note on the identical pattern in
-    // processTacticalOrders above) — overheadCityGates alone is a stale,
-    // disconnected copy in Custom Siege Battle.
-    let southGate = (typeof battleEnvironment !== 'undefined' && battleEnvironment.cityGates && battleEnvironment.cityGates.length > 0)
-        ? battleEnvironment.cityGates.find(g => g.side === "south")
-        : (typeof overheadCityGates !== "undefined" ? overheadCityGates.find(g => g.side === "south") : null);
-
-    return (
-        window.__SIEGE_GATE_BREACHED__ === true ||
-        (southGate && (southGate.isOpen || southGate.gateHP <= 0))
-    );
-}
+// NOTE: isSiegeGateBreached() used to be (re)defined here too — a second,
+// orphaned copy with zero callers anywhere in the codebase and DIFFERENT
+// semantics (it returned true for any non-siege battle, rather than false).
+// Two same-named top-level functions across separately-loaded <script> files
+// share one global scope, so whichever loaded second would silently win —
+// exactly the kind of invisible collision that made a simple gate check
+// unreliable before. The one real implementation now lives in
+// ai_categories.js, attached to window.isSiegeGateBreached; every call site
+// in this file uses that one.
 
 function isMountedOrBeast(unit) {
     if (!unit || !unit.stats) return false;
@@ -1905,110 +2218,117 @@ function canSelectUnitNow(unit) {
 
 function executeSiegeAssaultAI(units) {
     if (!siegeEquipment) return;
-    const gateBreached = window.__SIEGE_GATE_BREACHED__;
+    // Was: `window.__SIEGE_GATE_BREACHED__` only — missed the gate object's
+    // own isOpen/gateHP state entirely, so this could disagree with every
+    // other system if the flag hadn't been (re)set yet. Now uses the same
+    // canonical helper as everywhere else.
+    const gateBreached = isSiegeGateBreached();
 
-    // --- FIX 1: Initialize ALL required arrays and variables ---
-    let meleeInfantry = [];
-    let gunpowder = [];
-    let archers = [];
-    let cavalry = [];
-    let artilleryCrews = []; 
-    
+    // BUGFIX ("ladder units retreat south with no animation"), DEFENSE IN
+    // DEPTH: autoAttack.js's needsAssignment filter is the primary fix and
+    // already excludes onWall/isClimbing/settling units before they ever
+    // reach this function, but this function can also be called directly
+    // (see its other call site) without going through that filter. A unit
+    // that already climbed a ladder and landed onWall has finished its
+    // siege-equipment job; re-categorizing it here can hand it a fresh
+    // ram_pusher/ladder_carrier assignment pointing back at a ram or a
+    // ladder base — silently relocating a unit that should be fighting
+    // inside the city. Strip those units out up front so this function can
+    // never draft them, regardless of what the caller passed in.
+    //
+    // ladder_fanatic/counter_battery/ladder_crew units are also excluded
+    // here for the same reason — they're managed by a separate, self-
+    // contained one-time role roll (autoAttack.js) plus siegeEngineLogic.js's
+    // ladder-dragging logic, which already reverts them to a normal
+    // assignment once their ladder is deployed. Re-categorizing a
+    // ladder_fanatic here mid-drag was overwriting its role before the
+    // ladder it was hauling ever reached the wall.
+    //
+    // SAME BUG, GATE VERSION: a unit tagged "assault_complete" already made
+    // it through the breached gate and was handed off to seek_engage —
+    // that's a real target, fighting inside the city. Without this
+    // exclusion, the very next periodic sweep (see autoAttack.js) saw its
+    // orderType was no longer "siege_assault", decided it "needsAssignment",
+    // and handed it right back a ram/ladder to walk to — silently undoing
+    // the gate handoff and pulling successful attackers back to the doorway
+    // in a loop. That's the persistent cluster of units piling up at the
+    // gate mouth: every unit that makes it through gets yanked back within
+    // moments, so nothing ever accumulates on the city side.
+    units = units.filter(u => !u.onWall && !u.isClimbing && !u.settling &&
+        u.siegeRole !== 'ladder_fanatic' && u.siegeRole !== 'counter_battery' &&
+        u.siegeRole !== 'assault_complete' &&
+        u.orderType !== 'ladder_crew');
+    if (!units.length) return;
+
+    // ========================================================================
+    // RESERVES REMOVED ENTIRELY (explicit request).
+    // ------------------------------------------------------------------------
+    // Previously there were THREE separate, overlapping "hold units back"
+    // mechanisms in this codebase, all fighting each other and all
+    // contributing to units visibly walking toward a ladder, getting yanked
+    // far away, and walking back later:
+    //   1. TOTAL_FORCE_RESERVE_PCT here — randomly drafted ~2% of the whole
+    //      army every time this function ran (which is often — see
+    //      autoAttack.js's interval) into "cavalry_reserve", teleport-
+    //      assigning them a waypoint at the siege camp, deep south of the
+    //      wall. A unit mid-approach to a ladder could be swept into this
+    //      draft the next time it re-entered needsAssignment (e.g. its
+    //      ladder was momentarily reassigned) and get yanked to camp.
+    //   2. A 100%-of-cavalry hard freeze (ai_categories.js, keyed on
+    //      siegeRole === "cavalry_reserve") that parked every mounted unit
+    //      immobile until the gate broke.
+    //   3. A SECOND, fully independent siege-attacker AI driver that used to
+    //      live in siegeEngineLogic.js (the old "3. ATTACKER AI (PLAYER)"
+    //      block, gated on `siegeAITick % 4 === 0`) — a completely separate
+    //      system re-classifying units by its own rules (including an
+    //      arbitrary `unit.id % 5 === 0` "equipment crew" check with no
+    //      relation to actual siegeRole) and maintaining its OWN separate
+    //      "reserve line" standing spot at wallY + 450. That block has been
+    //      deleted outright — see the BUGFIX comment left in its place in
+    //      siegeEngineLogic.js. Two systems independently overwriting the
+    //      same unit.target every few ticks is what produced the
+    //      approach → get pulled away → return loop.
+    // None of that exists anymore. Every unit this function receives gets a
+    // real, permanent-until-it-dies-or-completes assignment: ranged shooter,
+    // ram pusher, or ladder crew (active or queued). Nothing here ever sends
+    // a unit back toward the camp or holds it out of the fight.
+    // ========================================================================
+
+    let ladderBound = [];    // everyone: melee infantry, specialists, cavalry, AND ranged shooters
+    let artilleryCrews = [];
+
     let trebCount = (siegeEquipment.trebuchets) ? siegeEquipment.trebuchets.length : 0;
 
-    // 1. Categorize Troops (REVISED)
+    // 1. Categorize: artillery crew first (unchanged); everyone else — ranged
+    // included, see BUGFIX below — goes into ladderBound. Cavalry gets no
+    // special case either: a mounted unit is just as much "everyone else" as
+    // a spearman or an archer, and joins the ladder queue like anyone else.
     units.forEach(u => {
-        let role = getTacticalRole(u);
         let textCheck = String((u.stats?.name || "") + " " + (u.unitType || "") + " " + (u.stats?.role || "")).toLowerCase();
-        
-        // PRIORITY 1: Identify Artillery Crews first so they aren't drafted as infantry
+
         if (u.siegeRole === "treb_crew" || u.siegeRole === "trebuchet_crew" || textCheck.includes("crew")) {
             artilleryCrews.push(u);
             return;
         }
 
-        // PRIORITY 2: Is it a beast/horse? Sort them to Cavalry immediately.
-        if (role === "CAVALRY" || u.stats?.isLarge || textCheck.match(/(cav|horse|mount|camel|lancer|eleph|keshig)/)) {
-            cavalry.push(u);
-            
-            // If gate isn't broken, make them stay put unless ordered
-            if (!gateBreached && !u.hasOrders) {
-                u.state = "idle";
-                u.target = null;
-            }
-            return; 
-        } 
-// PRIORITY 3: Sort remaining humans
-        let isSpecialist = textCheck.match(/(firelance|bomb|javelin|repeater)/);
-
-        if (role === "GUNPOWDER" && !isSpecialist) {
-            gunpowder.push(u);
-        } else if (role === "RANGED" && !isSpecialist) {
-            archers.push(u);
-        } else {
-            meleeInfantry.push(u); // Specialists go to the meatgrinder!
-        }
+        // BUGFIX (ranged units vibrating/spinning near the gate): ranged
+        // shooters used to be pulled out here and given a static
+        // "ranged_support" firing-line role (hold position at
+        // wallBoundaryY + 90, near the gate). That role sat inside the
+        // same "near the gate" radius as the EXTREME RANDOMNESS panic-
+        // shuffle in ai_categories.js's _handleMovement — any ranged unit
+        // that held still long enough to trip that stuck-detector got hit
+        // with a repeating chaotic velocity kick every tick, which reads
+        // as exactly the "hesitant left-right, ends up spinning" behavior
+        // being reported. Per request, ranged units are no longer split
+        // into a separate holding role at all — they fold into
+        // ladderBound below and get a real ladder assignment (crew or
+        // queued) like every other unit, so they walk to a ladder instead
+        // of parking near the gate.
+        ladderBound.push(u);
     });
 
-    // 2. MEATGRINDER DRAFT: Only pull from ranged if melee is critical (< 20)
-    //
-    // REVISED: archers (non-gunpowder ranged) now keep a protected floor —
-    // a small percentage always stays on the walls shooting instead of being
-    // fully drafted into the ladder/ram meatgrinder. Gunpowder units are
-    // drafted first when troops are needed, since the "stay ranged" ask was
-    // specifically about non-gunpowder ranged (archers/crossbow).
-    const ARCHER_RANGED_RESERVE_PCT = 0.20; // ~20% of archers always stay ranged_support
-    if (meleeInfantry.length < 20) {
-        let neededTroops = 60 - meleeInfantry.length;
-
-        // Draft gunpowder first — they're not the group we're protecting.
-        let draftedGunners = gunpowder.splice(0, neededTroops);
-        let stillNeeded = Math.max(0, neededTroops - draftedGunners.length);
-
-        // Only draft archers down to their protected reserve floor, even if
-        // more troops are "needed" — the reserve takes priority over hitting
-        // the 60-troop meatgrinder target exactly.
-        let archerReserveFloor = Math.ceil(archers.length * ARCHER_RANGED_RESERVE_PCT);
-        let archerDraftable = Math.max(0, archers.length - archerReserveFloor);
-        let draftedArchers = archers.splice(0, Math.min(stillNeeded, archerDraftable));
-
-        meleeInfantry.push(...draftedGunners, ...draftedArchers);
-    }
-
-    // 3. Assign Orders
-    let ramIndex = 0;
-    let ladderIndex = 0;
-
-    // RAM CREW CAP: 5 per ram — this is the top limit for the whole player
-    // siege attacker AI (mirrors the physical crew cap in siegeEngineLogic.js).
-    // Used to be a flat 25 regardless of ram count, which massively over-
-    // assigned ram_pusher: only 5 can ever count as crew, so the other ~20
-    // just stood around the ram with nothing to do. The freed-up slots now
-    // go to ladders instead, which is exactly where that manpower is useful.
-    const RAM_CREW_CAP = 5;
-    const maxRamPushers = siegeEquipment.rams.length * RAM_CREW_CAP;
-
-    // Distribute Melee Infantry to Rams & Ladders
-    meleeInfantry.forEach((u, index) => {
-        u.hasOrders = true;
-        u.orderType = "siege_assault";
-        u.siegeRole = "infantry_reserve";
-        
-        if (siegeEquipment.rams.length > 0 && index < maxRamPushers) { 
-            u.siegeRole = "ram_pusher";
-            u.siegeTarget = siegeEquipment.rams[ramIndex % siegeEquipment.rams.length];
-            u.queuePos = index; 
-            ramIndex++;
-        } 
-        else if (siegeEquipment.ladders.length > 0) {
-            u.siegeRole = "ladder_carrier";
-            u.siegeTarget = siegeEquipment.ladders[ladderIndex % siegeEquipment.ladders.length];
-            u.queuePos = index - maxRamPushers;
-            ladderIndex++;
-        }
-    });
-
-    // --- FIX 2: Assign Artillery Crews (Safely uses trebCount) ---
+    // --- FIX: Assign Artillery Crews (unchanged) ---
     if (trebCount > 0) {
         artilleryCrews.forEach((u, index) => {
             u.hasOrders = true;
@@ -2016,29 +2336,93 @@ function executeSiegeAssaultAI(units) {
             u.siegeRole = "trebuchet_crew";
             u.siegeTarget = siegeEquipment.trebuchets[index % trebCount];
         });
+    } else {
+        // No trebuchets deployed — artillery crew units still need
+        // something to do rather than sitting idle; fold them into the
+        // ladder queue like anyone else.
+        ladderBound.push(...artilleryCrews);
     }
 
-    // Distribute remaining Ranged as Support
-    [...gunpowder, ...archers].forEach(u => {
-        u.hasOrders = true;
-        u.orderType = "siege_assault";
-        u.siegeRole = "ranged_support";
-    });
+    // 2. Ranged shooters no longer get a separate holding role — see the
+    // BUGFIX comment above. They're already inside ladderBound and get
+    // assigned exactly like everyone else in the pass below.
 
-// Distribute Cavalry (Rear Guard)
-    // FIX: same live-gate preference as processTacticalOrders/isSiegeGateBreached above.
-    let southGate = (typeof battleEnvironment !== 'undefined' && battleEnvironment.cityGates && battleEnvironment.cityGates.length > 0)
-        ? battleEnvironment.cityGates.find(g => g.side === "south")
-        : (typeof overheadCityGates !== 'undefined' ? overheadCityGates.find(g => g.side === "south") : null);
-    let campY = typeof SiegeTopography !== 'undefined' ? SiegeTopography.campPixelY : (BATTLE_WORLD_HEIGHT - 500); // <-- ADD THIS
-    cavalry.forEach(u => {
+    // 3. Everyone: ram pushers first (capped), then ladder crew,
+    // evenly distributed across all available ladders with a real queue
+    // position — see the "LADDER CREW QUEUE" section in siegeEngineLogic.js
+    // (crewAssigned array, crew cap) for how queuePos is consumed to hold
+    // a unit waiting in line rather than swarming the ladder base.
+    //
+    // RAM CREW CAP: 5 per ram — mirrors the physical crew cap in
+    // siegeEngineLogic.js. Only 5 can ever count as crew per ram, so the
+    // rest go to ladders where the manpower is actually useful.
+    const RAM_CREW_CAP = 5;
+    const maxRamPushers = siegeEquipment.rams.length * RAM_CREW_CAP;
+
+    // LADDER CREW CAP: how many units can be actively assigned to a single
+    // ladder (carrying/climbing) before additional units queue instead of
+    // piling onto the same ladder. Matches the cap already used in
+    // siegeEngineLogic.js's crewAssigned tracking.
+    const LADDER_CREW_CAP = 2;
+    const ladderCount = siegeEquipment.ladders.length;
+
+    let ramIndex = 0;
+    let ladderAssignCounts = new Array(ladderCount).fill(0);
+
+    ladderBound.forEach((u, index) => {
         u.hasOrders = true;
         u.orderType = "siege_assault";
-        u.siegeRole = "cavalry_reserve";
-        if (southGate) {
-            // FIX: Point them 500px behind the camp, not the wall
-            u.orderTargetPoint = { x: southGate.x * BATTLE_TILE_SIZE, y: campY + 500 }; 
+        // Real assignment incoming — clear the cached "no role yet" waypoint
+        // from the default-case fallback above, so it doesn't linger as
+        // stale state on a unit that's now been given a proper ram/ladder
+        // target.
+        u._noRoleWaypointX = undefined;
+        u._noRoleWaypointY = undefined;
+
+        if (siegeEquipment.rams.length > 0 && index < maxRamPushers) {
+            u.siegeRole = "ram_pusher";
+            u.siegeTarget = siegeEquipment.rams[ramIndex % siegeEquipment.rams.length];
+            u.queuePos = index;
+            ramIndex++;
+            return;
         }
+
+        if (ladderCount > 0) {
+            // Round-robin assign to whichever ladder currently has the
+            // fewest units already assigned to it, so crews spread evenly
+            // across all available ladders instead of stacking one ladder
+            // deep while others sit empty.
+            let targetLadderIdx = 0;
+            let fewest = Infinity;
+            for (let i = 0; i < ladderCount; i++) {
+                if (ladderAssignCounts[i] < fewest) {
+                    fewest = ladderAssignCounts[i];
+                    targetLadderIdx = i;
+                }
+            }
+            u.siegeRole = "ladder_carrier";
+            u.siegeTarget = siegeEquipment.ladders[targetLadderIdx];
+            // queuePos beyond LADDER_CREW_CAP tells processTacticalOrders'
+            // ladder_carrier case (battlefield_commands.js) to hold this
+            // unit at a waiting spot near the ladder instead of walking
+            // straight to the (already occupied) climb point — see the
+            // queue-position handling there.
+            u.queuePos = ladderAssignCounts[targetLadderIdx];
+            ladderAssignCounts[targetLadderIdx]++;
+            return;
+        }
+
+        // No rams and no ladders exist at all yet (e.g. very start of the
+        // battle before equipment has spawned). Nothing to assign to —
+        // leave hasOrders/orderType set so the unit isn't picked up as
+        // "uncommanded" and frozen, but give it no siegeRole/siegeTarget.
+        // processTacticalOrders' siege_assault handler already has a plain
+        // "walk toward the wall" fallback for a unit with no valid
+        // siegeTarget (see the ram_pusher/ladder_carrier "target died,
+        // fall back" cases) which will pick this unit up the moment
+        // equipment becomes available and this function reassigns it.
+        u.siegeRole = null;
+        u.siegeTarget = null;
     });
 
     if (typeof AudioManager !== 'undefined') AudioManager.playSound('charge');
@@ -2050,6 +2434,15 @@ function executeSiegeAssaultAI(units) {
 let isBoxSelecting = false;
 let selectionBoxStart = { x: 0, y: 0 };
 let selectionBoxScreenStart = { x: 0, y: 0 };
+// Live rotation offset (radians) applied to the drag line while blue arrows
+// are on screen — adjusted via the J/K keys (see the keydown handler below)
+// and reset every time a new drag starts. Only ever non-zero mid-drag; the
+// mouseup handler bakes it into the final endpoint it hands to
+// executeBoxFormationMove, so nothing downstream needs to know it exists.
+let _dragRotationOffset = 0;
+// Last screen-space mouse position seen during the current drag, so J/K can
+// redraw the preview immediately without waiting for the mouse to move.
+let _lastDragScreenPos = { x: 0, y: 0 };
 let lastClickTime = 0;
 
 // --- BULLETPROOF COORDINATE MAPPER ---
@@ -2073,7 +2466,7 @@ function isCommanderAlive() {
     return battleEnvironment.units.some(u => u.isCommander && u.hp > 0);
 }
 
-// --- DESKTOP VISUAL BOX OVERLAY ---
+// --- DESKTOP VISUAL OVERLAYS: rectangle (box-select) + line+arrow (formation drag) ---
 function getDesktopBoxEl() {
     let el = document.getElementById('desktop-selbox');
     if (!el) {
@@ -2088,6 +2481,289 @@ function getDesktopBoxEl() {
     return el;
 }
 
+// SURGERY: Total War-style per-unit arrow grid, replacing both the old
+// rectangle AND the single line+arrowhead. One small blue arrow per
+// selected unit, arranged in the same row/col grid calculateFormationOffsets'
+// "dragGrid" case will actually commit to on mouseup — the preview never
+// lies about where units will end up. Rendered as a fixed SVG overlay in
+// SCREEN space (decoupled from camera/zoom) so it stays simple; only the
+// real commit converts through getBattleMousePos into world space.
+function getDesktopFormationLineEl() {
+    let el = document.getElementById('desktop-formline');
+    if (!el) {
+        el = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+        el.id = 'desktop-formline';
+        el.style.position = 'fixed';
+        el.style.left = '0';
+        el.style.top = '0';
+        el.style.width = '100vw';
+        el.style.height = '100vh';
+        el.style.pointerEvents = 'none';
+        el.style.zIndex = 9591;
+        el.style.display = 'none';
+        document.body.appendChild(el);
+    }
+    return el;
+}
+
+// Pure geometry, no unit objects needed — mirrors the row/col/spacing math
+// calculateFormationOffsets' "dragGrid" case uses on assignBlock, so the
+// preview always matches the real commit exactly. count = how many arrows
+// to draw (one per selected unit); (sx,sy)->(ex,ey) is the drag in
+// whichever space the caller wants (desktop passes screen px).
+function computeDragGridSlots(count, startX, startY, endX, endY, depth) {
+    const dx = endX - startX, dy = endY - startY;
+    const dragLen = Math.hypot(dx, dy);
+    let angle = 0;
+    if (dragLen > 5) angle = Math.atan2(dx, -dy);
+    const anchor = { x: (startX + endX) / 2, y: (startY + endY) / 2 };
+
+    const N = Math.max(1, count);
+    const rows = Math.max(1, Math.min(Math.round(depth) || 2, N));
+    const cols = Math.ceil(N / rows);
+    const spacingX = cols > 1 ? Math.max(20, dragLen / (cols - 1)) : 0;
+    const spacingY = Math.max(28, spacingX || 32);
+
+    const applyRotation = (x, y) => {
+        if (angle === 0) return { x: x, y: y };
+        return {
+            x: x * Math.cos(angle) - y * Math.sin(angle),
+            y: x * Math.sin(angle) + y * Math.cos(angle)
+        };
+    };
+
+    const slots = [];
+    for (let i = 0; i < N; i++) {
+        const r = Math.floor(i / cols);
+        const c = i % cols;
+        const unitsInThisRow = Math.min(N - (r * cols), cols);
+        const rawX = (c - (unitsInThisRow - 1) / 2) * spacingX;
+        const rawY = r * spacingY;
+        const rot = applyRotation(rawX, rawY);
+        slots.push({ x: anchor.x + rot.x, y: anchor.y + rot.y });
+    }
+    return { slots: slots, angle: angle, anchor: anchor };
+}
+
+// Reads which formation shape (if any) the current selection has "memory"
+// of — the exact same rule executeBoxFormationMove uses to decide whether
+// to redraw a preserved shape or fall back to the plain drag grid. Shared
+// by the preview code below AND executeBoxFormationMove itself (see its
+// call further down) so the two can never drift out of sync the way the
+// old battle-loading-screen.js box-clamp patch drifted from this file's
+// own coordinate convention.
+function _getSharedDragFormationStyle(units) {
+    let sharedStyle = units[0] ? units[0].assignedFormationStyle : null;
+    for (let i = 1; i < units.length; i++) {
+        if (units[i].assignedFormationStyle !== sharedStyle) { sharedStyle = null; break; }
+    }
+    const preservableStyles = ["square", "circle", "tight", "standard", "loose", "line"];
+    return (sharedStyle && preservableStyles.indexOf(sharedStyle) !== -1) ? sharedStyle : "dragGrid";
+}
+
+// Rotates (px,py) around (ox,oy) by angle radians. Used to bake the live
+// J/K rotation offset into a drag's endpoint before computing/committing a
+// formation, so nothing downstream needs its own rotation concept.
+function _rotatePointAround(px, py, ox, oy, angle) {
+    if (!angle) return { x: px, y: py };
+    const dx = px - ox, dy = py - oy;
+    return {
+        x: ox + dx * Math.cos(angle) - dy * Math.sin(angle),
+        y: oy + dx * Math.sin(angle) + dy * Math.cos(angle)
+    };
+}
+
+// Concentric-ring circle preview — same basic idea as
+// calculateFormationOffsets' real "circle" case (units spaced evenly
+// around a ring, arrows pointing straight outward), generalized to
+// `depth` rings instead of that case's hardcoded inner/outer split, since
+// this is preview-only and doesn't need to replicate its role-based
+// inner/outer-ring logic. Returns LOCAL offsets (ring center = 0,0) with
+// an outward-facing unit normal per slot — the caller adds the drag's own
+// anchor point. Deliberately ignores drag angle/rotation entirely, same as
+// the real case ("since it's a circle, we don't apply mapAngle rotation
+// here... North of the ring is always North of the map") — so J/K
+// rotation is correctly a no-op here, matching what actually happens on
+// commit.
+function computeCircleRingSlots(count, depth) {
+    const N = Math.max(1, count);
+    const rings = Math.max(1, Math.min(Math.round(depth) || 1, N));
+    const base = Math.floor(N / rings);
+    let remainder = N - base * rings;
+    const ringCounts = [];
+    for (let r = 0; r < rings; r++) { ringCounts.push(base + (r < remainder ? 1 : 0)); }
+
+    const RING_GAP = 26;
+    const baseRadius = Math.max(40, (ringCounts[0] || 1) * 9);
+    const slots = [];
+    for (let r = 0; r < rings; r++) {
+        const radius = baseRadius + r * RING_GAP;
+        const rc = ringCounts[r];
+        if (rc <= 0) continue;
+        for (let i = 0; i < rc; i++) {
+            const ang = (i / rc) * Math.PI * 2;
+            const nx = Math.cos(ang), ny = Math.sin(ang);
+            slots.push({ x: nx * radius, y: ny * radius, fx: nx, fy: ny });
+        }
+    }
+    return slots;
+}
+
+// Hollow-square-perimeter preview — same "depth = concentric rings" idea
+// as the circle above, walking a square's edge instead. Each arrow's
+// facing is perpendicular to whichever side it's standing on, pointing
+// away from the square's center. Also deliberately rotation-invariant,
+// matching the real "square" case (its own SIMPLIFIED BLOB math never
+// applies mapAngle either — see calculateFormationOffsets).
+function computeSquareRingSlots(count, depth) {
+    const N = Math.max(1, count);
+    const rings = Math.max(1, Math.min(Math.round(depth) || 1, N));
+    const base = Math.floor(N / rings);
+    let remainder = N - base * rings;
+    const ringCounts = [];
+    for (let r = 0; r < rings; r++) { ringCounts.push(base + (r < remainder ? 1 : 0)); }
+
+    const RING_GAP = 26;
+    const baseHalf = Math.max(35, (ringCounts[0] || 1) * 7);
+    const slots = [];
+    for (let r = 0; r < rings; r++) {
+        const half = baseHalf + r * RING_GAP;
+        const rc = ringCounts[r];
+        if (rc <= 0) continue;
+        const perimeter = half * 8; // 4 sides of length 2*half
+        for (let i = 0; i < rc; i++) {
+            const d = (i / rc) * perimeter;
+            slots.push(_squarePerimeterPoint(d, half));
+        }
+    }
+    return slots;
+}
+
+// Walks clockwise from the top-left corner: top edge (L→R), right edge
+// (T→B), bottom edge (R→L), left edge (B→T). Returns the point AND the
+// outward-facing unit normal for whichever edge it landed on.
+function _squarePerimeterPoint(d, half) {
+    const side = half * 2;
+    if (d < side) return { x: -half + d, y: -half, fx: 0, fy: -1 };
+    d -= side;
+    if (d < side) return { x: half, y: -half + d, fx: 1, fy: 0 };
+    d -= side;
+    if (d < side) return { x: half - d, y: half, fx: 0, fy: 1 };
+    d -= side;
+    return { x: -half, y: half - d, fx: -1, fy: 0 };
+}
+
+// TIGHT/STANDARD/LOOSE preview — fixed real-formation-scale spacing that
+// deliberately IGNORES the depth toggle and drag length entirely,
+// mirroring the real tight/standard/line cases in calculateFormationOffsets
+// (all three use a constant spacingX/Y and a fixed maxCols regardless of
+// how far the player dragged OR what the depth toggle is set to — Depth
+// has no effect on any of the three real cases, which is why the button is
+// hidden whenever one of these three is the active formation; see
+// RTSControls.js's depth-visibility check). `maxCols` mirrors each real
+// case's own column cap (tight/standard approximate their 5 role-banded
+// sub-blocks as one uniform block — close enough to preview "this will be
+// noticeably denser/looser" without duplicating the whole role-sorting
+// engine; line/loose is a flat unsorted list in both the real case and
+// here, so this is an EXACT match for that one, not an approximation).
+function _computeFixedSpacingPreviewSlots(count, sx, sy, ex, ey, spacingX, spacingY, maxCols) {
+    const dx = ex - sx, dy = ey - sy;
+    let angle = 0;
+    if (Math.hypot(dx, dy) > 5) angle = Math.atan2(dx, -dy);
+    const anchor = { x: (sx + ex) / 2, y: (sy + ey) / 2 };
+    const N = Math.max(1, count);
+    const cols = Math.max(1, Math.min(maxCols, N));
+    const fx = Math.sin(angle), fy = -Math.cos(angle);
+    const slots = [];
+    for (let i = 0; i < N; i++) {
+        const r = Math.floor(i / cols);
+        const c = i % cols;
+        const unitsInThisRow = Math.min(N - (r * cols), cols);
+        const rawX = (c - (unitsInThisRow - 1) / 2) * spacingX;
+        const rawY = r * spacingY;
+        let rx = rawX, ry = rawY;
+        if (angle !== 0) {
+            rx = rawX * Math.cos(angle) - rawY * Math.sin(angle);
+            ry = rawX * Math.sin(angle) + rawY * Math.cos(angle);
+        }
+        slots.push({ x: anchor.x + rx, y: anchor.y + ry, fx: fx, fy: fy });
+    }
+    return { slots: slots, angle: angle, anchor: anchor };
+}
+
+// SHARED preview geometry — the single source of truth for what the blue
+// arrows look like, branched by the selection's remembered formation style
+// (see _getSharedDragFormationStyle above). Both the desktop preview
+// (renderFormationArrowPreview, right below) and the mobile touch preview
+// (RTSControls.js's _move handler) call this exact function so the two
+// platforms can never show different shapes for the same drag — same
+// principle as computeDragGridSlots already followed for the plain
+// default case, just extended to the other rememberable shapes.
+// Coordinates are in whatever space the caller passes (screen px for both
+// current callers). `depth` (window._mc3FormationDepth) is ONLY meaningful
+// for the final default/"dragGrid" fallback below — none of the five named
+// styles (tight/standard/line/circle/square) read it in the real
+// calculateFormationOffsets, so none of them read it here either; circle/
+// square instead derive a sensible ring count from unit count alone
+// (the real case's exact cavalry-ratio nuance needs actual unit role data
+// this preview doesn't have — close enough for a preview), and
+// tight/standard/line use a fixed column cap instead (see
+// _computeFixedSpacingPreviewSlots above).
+function computeFormationPreviewSlots(count, sx, sy, ex, ey, depth, style) {
+    if (style === "circle" || style === "square") {
+        const anchor = { x: (sx + ex) / 2, y: (sy + ey) / 2 };
+        const rings = count > 12 ? 2 : 1;
+        const local = (style === "circle")
+            ? computeCircleRingSlots(count, rings)
+            : computeSquareRingSlots(count, rings);
+        return {
+            slots: local.map(p => ({ x: anchor.x + p.x, y: anchor.y + p.y, fx: p.fx, fy: p.fy })),
+            angle: 0,
+            anchor: anchor
+        };
+    }
+    if (style === "tight" || style === "standard" || style === "line") {
+        const SPACING = {
+            tight:    { x: 16, y: 18, maxCols: 30 },
+            standard: { x: 36, y: 30, maxCols: 20 },
+            line:     { x: 60, y: 48, maxCols: 40 } // "Loose" in the UI
+        }[style];
+        return _computeFixedSpacingPreviewSlots(count, sx, sy, ex, ey,
+            SPACING.x, SPACING.y, SPACING.maxCols);
+    }
+    // default / "dragGrid" (no shared style) — the ONLY case that actually
+    // reads the depth toggle, unchanged original math via the existing
+    // helper, so the plain default case's shape/spacing never changed.
+    const grid = computeDragGridSlots(count, sx, sy, ex, ey, depth);
+    const fx = Math.sin(grid.angle), fy = -Math.cos(grid.angle);
+    return {
+        slots: grid.slots.map(s => ({ x: s.x, y: s.y, fx: fx, fy: fy })),
+        angle: grid.angle,
+        anchor: grid.anchor
+    };
+}
+
+// Rebuilds the per-unit arrow grid preview. Blue, always — never reuses
+// the gold/yellow box-select color. `style` (optional) selects among the
+// five preview shapes via computeFormationPreviewSlots — omitted/unknown
+// falls through to the original plain drag grid.
+function renderFormationArrowPreview(unitCount, sx, sy, ex, ey, depth, style) {
+    const el = getDesktopFormationLineEl();
+    const grid = computeFormationPreviewSlots(unitCount, sx, sy, ex, ey, depth, style);
+    const ARROW_HALF_LEN = 9; // screen px
+    let html = '<defs><marker id="mc3-arrowhead" markerWidth="8" markerHeight="8" refX="5" refY="4" orient="auto">' +
+        '<path d="M0,0 L8,4 L0,8 L2.5,4 Z" fill="rgba(66,135,245,0.95)"/></marker></defs>';
+    grid.slots.forEach(s => {
+        const x1 = s.x - s.fx * ARROW_HALF_LEN, y1 = s.y - s.fy * ARROW_HALF_LEN;
+        const x2 = s.x + s.fx * ARROW_HALF_LEN, y2 = s.y + s.fy * ARROW_HALF_LEN;
+        html += '<line x1="' + x1 + '" y1="' + y1 + '" x2="' + x2 + '" y2="' + y2 + '" ' +
+            'stroke="rgba(66,135,245,0.9)" stroke-width="2.5" stroke-linecap="round" ' +
+            'marker-end="url(#mc3-arrowhead)" />';
+    });
+    el.innerHTML = html;
+    el.style.display = 'block';
+}
+
 // --- MOUSE DOWN (Start Box) ---
 document.addEventListener('mousedown', (e) => {
     if (!inBattleMode || !battleEnvironment) return;
@@ -2098,34 +2774,52 @@ document.addEventListener('mousedown', (e) => {
         isBoxSelecting = true;
         selectionBoxStart = getBattleMousePos(e);
         selectionBoxScreenStart = { x: e.clientX, y: e.clientY };
+        _dragRotationOffset = 0;
+        _lastDragScreenPos = { x: e.clientX, y: e.clientY };
     }
 });
 
-// --- MOUSE MOVE (Draw Box) ---
+// --- MOUSE MOVE (Draw Arrow Grid or Box) ---
+// NOTE: the unit-hover stats tooltip that used to live here (mc3-unit-hover-
+// tip) has been removed — it duplicated menu/unit-hover-tooltip.js, which is
+// now the ONE hover panel for the whole game (spacebar or the RTS hover-
+// toggle button activates it; see that file for the full explanation).
 document.addEventListener('mousemove', (e) => {
     if (!inBattleMode || !isBoxSelecting) return;
     
+    _lastDragScreenPos = { x: e.clientX, y: e.clientY };
     const dragDist = Math.hypot(e.clientX - selectionBoxScreenStart.x, e.clientY - selectionBoxScreenStart.y);
     if (dragDist > 10) {
-        const boxEl = getDesktopBoxEl();
-        const hasSelection = battleEnvironment.units.some(u => u.side === "player" && !u.isCommander && u.hp > 0 && u.selected);
-        
-        // Contextual Box Colors
-        if (hasSelection) {
-            boxEl.style.border = '2px dashed rgba(66, 135, 245, 0.82)'; // Blue = Move
-            boxEl.style.background = 'rgba(66, 135, 245, 0.15)';
-            boxEl.style.boxShadow = 'inset 0 0 10px rgba(66, 135, 245, 0.2)';
+        const selectedUnitsForPreview = battleEnvironment.units.filter(u => u.side === "player" && !u.isCommander && u.hp > 0 && u.selected);
+        const selectedCount = selectedUnitsForPreview.length;
+
+        if (selectedCount > 0) {
+            // FORMATION DRAG: one small blue arrow per selected unit,
+            // arranged in the exact grid/shape executeBoxFormationMove will
+            // commit to on mouseup — count units, not just draw one line.
+            // Style comes from the selection's own formation memory (see
+            // _getSharedDragFormationStyle) so a remembered circle/square/
+            // tight/standard shape previews correctly instead of always
+            // showing the plain default grid. The endpoint is rotated by
+            // any live J/K offset before anything downstream sees it.
+            getDesktopBoxEl().style.display = 'none';
+            const depth = (typeof window._mc3FormationDepth === 'number') ? window._mc3FormationDepth : 2;
+            const style = _getSharedDragFormationStyle(selectedUnitsForPreview);
+            const rotEnd = _rotatePointAround(e.clientX, e.clientY, selectionBoxScreenStart.x, selectionBoxScreenStart.y, _dragRotationOffset);
+            renderFormationArrowPreview(selectedCount, selectionBoxScreenStart.x, selectionBoxScreenStart.y, rotEnd.x, rotEnd.y, depth, style);
         } else {
+            // BOX-SELECT: unchanged rectangle for selecting units on the map.
+            getDesktopFormationLineEl().style.display = 'none';
+            const boxEl = getDesktopBoxEl();
             boxEl.style.border = '2px dashed rgba(245,215,110,0.82)'; // Gold = Select
             boxEl.style.background = 'rgba(245,215,110,0.06)';
             boxEl.style.boxShadow = 'inset 0 0 10px rgba(245,215,110,0.08)';
+            boxEl.style.display = 'block';
+            boxEl.style.left = Math.min(e.clientX, selectionBoxScreenStart.x) + 'px';
+            boxEl.style.top = Math.min(e.clientY, selectionBoxScreenStart.y) + 'px';
+            boxEl.style.width = Math.abs(e.clientX - selectionBoxScreenStart.x) + 'px';
+            boxEl.style.height = Math.abs(e.clientY - selectionBoxScreenStart.y) + 'px';
         }
-
-        boxEl.style.display = 'block';
-        boxEl.style.left = Math.min(e.clientX, selectionBoxScreenStart.x) + 'px';
-        boxEl.style.top = Math.min(e.clientY, selectionBoxScreenStart.y) + 'px';
-        boxEl.style.width = Math.abs(e.clientX - selectionBoxScreenStart.x) + 'px';
-        boxEl.style.height = Math.abs(e.clientY - selectionBoxScreenStart.y) + 'px';
     }
 });
 
@@ -2133,6 +2827,7 @@ document.addEventListener('mousemove', (e) => {
 document.addEventListener('mouseup', (e) => {
     const boxEl = getDesktopBoxEl();
     boxEl.style.display = 'none';
+    getDesktopFormationLineEl().style.display = 'none';
 
     if (!inBattleMode || !battleEnvironment || !isBoxSelecting) {
         isBoxSelecting = false;
@@ -2159,8 +2854,15 @@ document.addEventListener('mouseup', (e) => {
         const selectedUnits = playerUnits.filter(u => u.selected);
 
         if (selectedUnits.length > 0) {
-            // ACTION: FORMATION MOVE TO RECTANGLE
-            (window.executeBoxFormationMove || executeBoxFormationMove)(selectedUnits, minX, maxX, minY, maxY);
+            // ACTION: FORMATION LINE — drag defines facing angle + width;
+            // depth (rows) is derived from unit count, not drag height.
+            // Bake in any live J/K rotation offset before committing, so
+            // executeBoxFormationMove sees exactly the (rotated) line the
+            // preview was already showing.
+            const rotatedEnd = _rotatePointAround(pos.x, pos.y, selectionBoxStart.x, selectionBoxStart.y, _dragRotationOffset);
+            (window.executeBoxFormationMove || executeBoxFormationMove)(
+                selectedUnits, selectionBoxStart.x, selectionBoxStart.y, rotatedEnd.x, rotatedEnd.y
+            );
         } else {
             // ACTION: SELECT UNITS IN RECTANGLE
             playerUnits.forEach(u => {
@@ -2205,61 +2907,143 @@ document.addEventListener('mouseup', (e) => {
     }
 });
 
-// --- RECTANGLE FORMATION MATHEMATICS ---
-window.executeBoxFormationMove = function executeBoxFormationMove(units, minX, maxX, minY, maxY) {
+// --- DRAG-LINE FORMATION MATHEMATICS (Total War style) ---
+// Replaces the old fixed rectangle: the player drags a LINE, not a box.
+// The line's angle sets which way the formation faces; its length sets how
+// wide the front row spreads. Depth (rows) is derived from unit count inside
+// calculateFormationOffsets' assignVariedLine, not from a second dragged
+// dimension — there is no "box height" anymore, only how far you dragged.
+
+// PRE-DEPLOY DESTINATION CLIP — direction-preserving.
+// First attempt at the pre-deploy out-of-zone bug independently clamped
+// destX/destY (Math.max/min per axis). That stops the unit ending up
+// outside the zone, but it does NOT preserve the direction of travel:
+// clamping each axis separately effectively drags the destination toward
+// whichever zone CORNER is nearest, which can point a unit in a visibly
+// different direction than the arrow actually drawn (reported: "before
+// commence they might end up running different direction than the blue
+// arrow"). What the player actually wants is the unit walking the exact
+// line they drew and simply stopping if that line would leave the zone.
+// So instead: walk the ray from the unit's OWN current position toward
+// the raw (unclamped) destination, and stop exactly at the point where
+// that ray exits the deploy-zone rectangle (or at the destination itself,
+// if it's already inside). Standard parametric box-exit test — since the
+// unit's current x/y is always inside the zone during pre-deploy (the
+// per-frame PRE-DEPLOY POSITION CLAMP in battlefield_logic.js guarantees
+// that), we only need the smallest exit fraction t in [0,1], not a full
+// segment/box intersection.
+function _clipDestToZoneAlongRay(ux, uy, tx, ty, z) {
+    const dx = tx - ux, dy = ty - uy;
+    let t = 1;
+    if (dx > 0)      t = Math.min(t, (z.maxX - ux) / dx);
+    else if (dx < 0) t = Math.min(t, (z.minX - ux) / dx);
+    if (dy > 0)      t = Math.min(t, (z.maxY - uy) / dy);
+    else if (dy < 0) t = Math.min(t, (z.minY - uy) / dy);
+    t = Math.max(0, t);
+    return { x: ux + dx * t, y: uy + dy * t };
+}
+
+window.executeBoxFormationMove = function executeBoxFormationMove(units, startX, startY, endX, endY) {
     if (!units || units.length === 0) return;
-    
+
     lazyTakeManualControl(units);
 
-    const boxWidth = Math.max(30, maxX - minX);
-    const boxHeight = Math.max(30, maxY - minY);
-    const centerX = minX + boxWidth / 2;
-    const centerY = minY + boxHeight / 2;
+    // Disable any previously-assigned AI tactic (brain-emoji hold/skirm/
+    // charge/shield/adapt) AND any stale combat target for these units. The
+    // player is issuing a direct manual order right now — that must fully
+    // supersede a stale tactic/target, not just out-rank it temporarily
+    // while _formationLocked is active below (that lock already stops
+    // ai_categories.js's own processAction from acting on either one, but
+    // it doesn't erase them — see the matching _formationLocked guard added
+    // to processTacticalOrders()/processTargeting() so nothing else acts on
+    // them either). Bridges into RTSControls.js's Cmd exactly like the
+    // existing _mc3RevertRobotOnCommand() bridge does elsewhere in this
+    // file; no-ops harmlessly if that file hasn't booted yet.
+    if (window.MobileControls && window.MobileControls.Cmd &&
+        typeof window.MobileControls.Cmd._clearAiTacticSilent === 'function') {
+        window.MobileControls.Cmd._clearAiTacticSilent(units);
+    }
+    units.forEach(u => { u.target = null; });
 
-    // Tactical sort so melee stands up front
-    let shields = [], infantry = [], ranged = [], gunpowder = [], cavalry = [];
+    const dx = endX - startX;
+    const dy = endY - startY;
+    const dragLength = Math.max(30, Math.hypot(dx, dy));
+    // Anchor the formation at the midpoint of the drawn line, not just the
+    // drop point — this keeps the shape centered under where the player
+    // actually dragged, the same way Total War's line anchors on the drag.
+    const anchor = { x: (startX + endX) / 2, y: (startY + endY) / 2 };
+
+    // Facing angle: same convention as calculateFormationOffsets'
+    // enemy-facing math (0 = facing "up"/negative-Y). A drag of near-zero
+    // length has no meaningful direction — treat it as "no override" so
+    // calculateFormationOffsets falls back to its own enemy-facing logic.
+    let dragAngle = null;
+    if (Math.hypot(dx, dy) > 5) {
+        dragAngle = Math.atan2(dx, -dy);
+    }
+
+    // FORMATION MEMORY: if every selected unit already shares the same
+    // assigned GEOMETRIC shape (square/circle/tight/standard/loose), redraw
+    // that same shape relative to the new drag instead of resetting to a
+    // plain grid. Units with no assigned style yet, or a selection with
+    // mixed styles, fall through to the new ignore-type/ignore-size grid —
+    // "now ignore unit type and size, every arrow merely represents one
+    // unit" — see calculateFormationOffsets' "dragGrid" case.
+    const styleToUse = _getSharedDragFormationStyle(units);
+
+    calculateFormationOffsets(units, styleToUse, anchor, dragAngle, dragLength);
+
     units.forEach(u => {
-        let r = getTacticalRole(u);
-        if (r === "SHIELD") shields.push(u);
-        else if (r === "INFANTRY") infantry.push(u);
-        else if (r === "RANGED") ranged.push(u);
-        else if (r === "GUNPOWDER") gunpowder.push(u);
-        else cavalry.push(u);
-    });
-    const sortedUnits = [...shields, ...infantry, ...ranged, ...gunpowder, ...cavalry];
-    const N = sortedUnits.length;
-
-    // Determine how many fit per row based on box width
-    const minSpacing = 35; 
-    let cols = Math.max(1, Math.floor(boxWidth / minSpacing));
-    cols = Math.min(cols, N); // Can't have more columns than units
-    let rows = Math.ceil(N / cols);
-
-    // Distribute perfectly into the drawn space
-    const actualSpacingX = Math.min(60, boxWidth / cols);
-    const actualSpacingY = Math.min(60, boxHeight / rows);
-
-    const startXOffset = -((cols - 1) * actualSpacingX) / 2;
-    const startYOffset = -((rows - 1) * actualSpacingY) / 2;
-
-    sortedUnits.forEach((u, i) => {
-        let r = Math.floor(i / cols);
-        let c = i % cols;
-        
-        // Auto-center the final incomplete row
-        let unitsInThisRow = Math.min(N - (r * cols), cols);
-        let rowStartX = -((unitsInThisRow - 1) * actualSpacingX) / 2;
-
-        let offX = rowStartX + (c * actualSpacingX);
-        let offY = startYOffset + (r * actualSpacingY);
-
         u.hasOrders = true;
         u.orderType = "move_to_point";
         u.reactionDelay = Math.floor(Math.random() * 15) + 2;
         u.formationTimer = 200;
+        u.assignedFormationStyle = styleToUse;
+        // FORMATION-LOCK: ignore this unit's own AI (including "stop to
+        // shoot" for ranged units) until it physically reaches this
+        // waypoint — see the top of ai_categories.js's processAction.
+        // Clears itself on arrival; Cmd.stop()/cancelAiTactic()/any AI
+        // tactic assignment in RTSControls.js also clears it explicitly
+        // if the player interrupts the march early.
+        u._formationLocked = true;
 
-        let rawDestX = centerX + offX;
-        let rawDestY = centerY + offY;
+        let rawDestX = anchor.x + (u.formationOffsetX || 0);
+        let rawDestY = anchor.y + (u.formationOffsetY || 0);
+
+        // PRE-DEPLOY CLAMP: same underlying bug the Shield formation tactic
+        // was already fixed for (RTSControls.js's Cmd._clampToDeployZone —
+        // "chance some units can exit out of the deployment zone"). This
+        // plain Total-War-style drag-line command (the blue arrow) never
+        // got the same treatment, so a drag toward/past the zone edge
+        // during pre-deployment set orderTargetPoint OUTSIDE
+        // window.__playerDeployZone. The unit is still _formationLocked
+        // (see ai_categories.js processAction), so it walks straight at
+        // that far point every frame — but battlefield_logic.js's own
+        // PRE-DEPLOY POSITION CLAMP forces the unit's x/y back inside the
+        // zone every single frame. The two fight forever: during
+        // deployment the unit pins itself against the zone edge nearest
+        // the arrow and never arrives. Then the instant COMMENCE clears
+        // window.__preDeploymentActive, the position clamp stops fighting
+        // it and the unit resumes walking the entire remaining distance to
+        // that original (uncapped, often enemy-ward) point in one
+        // uninterrupted march — which is what read as units "charging
+        // straight up" the moment battle commences.
+        //
+        // Uses _clipDestToZoneAlongRay (defined above) rather than a plain
+        // per-axis Math.max/min clamp: clamping X and Y independently
+        // effectively yanks the destination toward whichever zone CORNER
+        // is nearest, which can point the unit in a visibly different
+        // direction than the arrow actually drawn. Clipping along the ray
+        // from the unit's own current position keeps it walking the exact
+        // line the player drew, just stopping it at the zone edge instead
+        // of the full distance. Naval decks are skipped, matching
+        // Cmd._clampToDeployZone.
+        if (typeof window !== 'undefined' && window.__preDeploymentActive &&
+            window.__playerDeployZone && window.__playerDeployZone.type !== 'naval') {
+            const _clipped = _clipDestToZoneAlongRay(u.x, u.y, rawDestX, rawDestY, window.__playerDeployZone);
+            rawDestX = _clipped.x;
+            rawDestY = _clipped.y;
+        }
 
 // Use the safety wrapper if it exists, otherwise raw coords
         if (typeof getSafeMapCoordinates === 'function') {
@@ -2293,26 +3077,86 @@ function getSafeMapCoordinates(targetX, targetY, margin = 50) {
 }
 
 // --- FORMATION MATH (CENTROID & ROTATION ENGINE) ---
-function calculateFormationOffsets(units, style, centerPoint) {
+function calculateFormationOffsets(units, style, centerPoint, angleOverride, lineWidth) {
     if (!units || units.length === 0) return;
 
     // 1. Establish Map Dimensions & Center Data
     const mapWidth = typeof BATTLE_WORLD_WIDTH !== 'undefined' ? BATTLE_WORLD_WIDTH : 2400;
     const cp = centerPoint || { x: mapWidth / 2, y: (typeof BATTLE_WORLD_HEIGHT !== 'undefined' ? BATTLE_WORLD_HEIGHT : 1600) / 2 };
 
-    // 2. Progressive Angular Offset Logic (Lines become diagonal near map edges)
- 
-    let distFromCenterX = cp.x - (mapWidth / 2);
-    let normalizedDist = distFromCenterX / (mapWidth / 2); // Ranges from -1 (Left) to 1 (Right)
+    // 2. FACE-THE-ENEMY ANGLE (replaces the old map-position heuristic)
+    // ------------------------------------------------------------------
+    // FIX: this used to derive the line's diagonal tilt purely from the
+    // selection's X position on the map (distance from map-center), on the
+    // old assumption that the player always starts south and the enemy is
+    // always due north — so "rotate toward map center" was a stand-in for
+    // "rotate to face the enemy." Spawn sides are randomized now, so that
+    // assumption no longer holds: a line formation needs to actually face
+    // wherever the enemy currently is, not wherever "north" used to mean.
+    //
+    // Row depth in assignBlock (its startY/rawY axis) was built around the
+    // convention "more negative Y = further toward the enemy" (shields get
+    // the most-negative startY, cavalry the most-positive, i.e. furthest
+    // back). mapAngle=0 always meant "facing due north" in that convention.
+    // So: find the live enemy centroid, compute the real-world angle from
+    // the selection's centroid (cp) to it, and rotate so that direction
+    // maps to "local negative Y" — the same slot the old due-north
+    // assumption used to fill. If no enemy can be found (e.g. none left,
+    // or called before battleEnvironment exists), fall back to the old
+    // map-position heuristic rather than defaulting to a fixed direction.
+    let mapAngle = 0;
+    let facingResolved = false;
+    // EXPLICIT ANGLE OVERRIDE: when the player has drawn a direction by hand
+    // (the Total War-style drag-line), that drawn direction always wins over
+    // both enemy-auto-facing and the old map-position fallback below — the
+    // player pointed the arrow somewhere on purpose, honor it exactly.
+    if (typeof angleOverride === 'number' && !isNaN(angleOverride)) {
+        mapAngle = angleOverride;
+        facingResolved = true;
+    }
+    if (!facingResolved && typeof battleEnvironment !== 'undefined' && battleEnvironment && Array.isArray(battleEnvironment.units)) {
+        const enemyUnits = battleEnvironment.units.filter(u => u && u.side === "enemy" && u.hp > 0);
+        if (enemyUnits.length > 0) {
+            const ec = lazyCentroid(enemyUnits);
+            const dx = ec.x - cp.x, dy = ec.y - cp.y;
+            if (Math.hypot(dx, dy) > 1) {
+                // atan2 measured from "straight up" (negative Y = 0 rad),
+                // matching the old mapAngle=0-means-due-north convention.
+                mapAngle = Math.atan2(dx, -dy);
+                facingResolved = true;
+            }
+        }
+    }
+    if (!facingResolved) {
+        // FALLBACK: no live enemy centroid available — keep the old
+        // map-position-derived tilt so formations still get SOME sensible
+        // diagonal near map edges instead of always defaulting to flat.
+        let distFromCenterX = cp.x - (mapWidth / 2);
+        let normalizedDist = distFromCenterX / (mapWidth / 2); // Ranges from -1 (Left) to 1 (Right)
+        mapAngle = -(Math.pow(normalizedDist, 3)) * 1.13;
+    }
 
-    // 1. FLIP THE ANGLE (Negative sign ensures Left = \ and Right = /)
-    // 2. FLAT CENTER (Cubing the distance keeps the center 80% perfectly flat, only curving at extreme edges)
-    let mapAngle = -(Math.pow(normalizedDist, 3)) * 1.13; 
-
-    // Disable diagonal rotation entirely for geometric shapes
-    if (style === "square" || style === "circle") {
+    // Disable diagonal rotation for circle (rotationally symmetric — angle is
+    // meaningless) and for square UNLESS the caller passed an explicit
+    // angleOverride (the drag line can rotate a square to face the drawn
+    // direction; keyboard/button square stays flat exactly as before).
+    const hasExplicitAngle = (typeof angleOverride === 'number' && !isNaN(angleOverride));
+    if (style === "circle" && !hasExplicitAngle) {
         mapAngle = 0;
     }
+    if (style === "square" && !hasExplicitAngle) {
+        mapAngle = 0;
+    }
+
+    // Stamp the fully-resolved facing angle onto every unit passed in —
+    // consumed by ai_categories.js's _formationLocked arrival handler to
+    // snap a Total War-style drag-waypoint unit's final rendered facing to
+    // match this formation's actual orientation once it arrives, instead
+    // of whatever direction its last approach step happened to leave it
+    // facing. Uses the exact same 0-rad-is-"up" convention as
+    // renderFormationArrowPreview's fx/fy math, so the arrival pose matches
+    // the blue preview arrow shown during the drag itself.
+    units.forEach(u => { u._formationFacingAngle = mapAngle; });
 
     // Helper: Rotates coordinates around a 0,0 center based on the map angle
     const applyRotation = (x, y) => {
@@ -2372,30 +3216,116 @@ function calculateFormationOffsets(units, style, centerPoint) {
             // This ensures the "North" of the circle is always the "North" of the map.
         });
     };
+
+    // VARIED LINE: the drag-to-form default. Cavalry anchors both flanks,
+    // shields/infantry hold the front-center, ranged/gunpowder stack in rows
+    // behind them. The dragged line's length sets how WIDE the front row
+    // spreads; depth (how many rows deep) falls out of unit count divided by
+    // that width — so a short drag with many units packs deep, a long drag
+    // with few units stays a thin, wide line, matching how far the player
+    // physically dragged their finger/mouse.
+    const assignVariedLine = (lineWidth) => {
+        const frontLine = [...shields, ...infantry];
+        const backLine  = [...ranged, ...gunpowder];
+        const spacingX = 32, spacingY = 34;
+
+        // Columns implied by the drawn line's length, clamped so a tiny drag
+        // doesn't force everyone into one degenerate column and a huge drag
+        // doesn't spread a 4-unit selection across an absurd empty gap.
+        let targetRowWidth = Math.max(1, Math.round((lineWidth || 0) / spacingX));
+        const minCols = Math.max(2, Math.round(Math.sqrt(Math.max(1, frontLine.length))));
+        const maxCols = Math.max(minCols, frontLine.length || 1);
+        targetRowWidth = Math.min(maxCols, Math.max(minCols, targetRowWidth));
+
+        assignBlock(frontLine, 0, spacingX, spacingY, targetRowWidth);
+        // Back row(s) sit further from the enemy (positive local Y, per the
+        // "more negative Y = toward the enemy" convention used everywhere
+        // else in this function) and are narrower — skirmishers bunch in
+        // rather than matching the melee line's full width.
+        const backRowWidth = Math.max(2, Math.round(targetRowWidth * 0.85));
+        const frontDepthRows = Math.ceil(frontLine.length / targetRowWidth) || 1;
+        assignBlock(backLine, frontDepthRows * spacingY, spacingX, spacingY, backRowWidth);
+
+        // Flanks: cavalry splits evenly left/right and sits just past the
+        // front line's own width so it visibly wraps the melee line's ends
+        // rather than forming its own separate row.
+        const halfWidth = ((Math.min(targetRowWidth, frontLine.length || 1) - 1) / 2) * spacingX;
+        const flankX = halfWidth + spacingX * 1.5;
+        const half = Math.ceil(cavalry.length / 2);
+        cavalry.forEach((u, i) => {
+            const onLeft = i < half;
+            const sideIndex = onLeft ? i : i - half;
+            const rawX = (onLeft ? -1 : 1) * (flankX + sideIndex * spacingX);
+            const rawY = -spacingY * 0.4 + Math.floor(sideIndex / 4) * spacingY;
+            let rotated = applyRotation(rawX, rawY);
+            u.formationOffsetX = rotated.x;
+            u.formationOffsetY = rotated.y;
+        });
+    };
+
 // --- GEOMETRY STYLES ---
     // SURGERY: Ratio-based override for large mounted groups
     const cavalryRatio = largeUnits.length / units.length;
     const forceUnifiedShape = (cavalryRatio > 0.40);
 
+    // FIX ("rank depth is NOT working... depths should correspond to the
+    // blue arrow depth... trying to match the closest equivalent" — direct
+    // request): TIGHT/STANDARD/LOOSE used to hardcode maxCols per role-group
+    // (e.g. tight's shields always capped at 30-wide), completely ignoring
+    // window._mc3FormationDepth — the DEPTH button visibly did nothing for
+    // these three shapes, only for a plain unnamed drag. assignBlock's own
+    // row math (rows = Math.ceil(group.length / maxCols)) is invertible:
+    // given a group size and a WANTED row count, solve back for the maxCols
+    // that produces it. Math.ceil (not round/floor) on both the forward and
+    // inverse formula is what makes this hit the closest achievable depth
+    // rather than either always-undershooting or always-overshooting — e.g.
+    // 5 units at a requested depth of 4 can't split into exactly 4 full
+    // rows, but ceil-based solving lands on 3 (2/2/1), the nearest shape
+    // actually reachable, instead of silently falling back to some other
+    // count. depthCols(n, oldMaxCols) caps at the style's own original
+    // maxCols as an upper bound, so an extreme depth request (e.g. DEPTH 1
+    // on a 40-unit group) can't blow past how wide that formation's spacing
+    // was tuned to look — it'll go as shallow as 1 row allows within that
+    // width limit, not spread into a single absurd 40-wide line.
+    const _reqDepth = (typeof window._mc3FormationDepth === 'number' && window._mc3FormationDepth >= 1)
+        ? window._mc3FormationDepth : 2;
+    const depthCols = (n, oldMaxCols) => {
+        if (n <= 0) return oldMaxCols;
+        return Math.min(oldMaxCols, Math.max(1, Math.ceil(n / _reqDepth)));
+    };
+
     switch (style) {
         case "tight": 
-            assignBlock(shields, -40, 16, 16, 30); 
-            assignBlock(infantry, -20, 16, 16, 30);
-            assignBlock(ranged, 0, 16, 16, 30);
-            assignBlock(gunpowder, 20, 18, 16, 15); 
-            assignBlock(cavalry, 60, 20, 20, 40);                  
+            assignBlock(shields, -40, 16, 16, depthCols(shields.length, 30)); 
+            assignBlock(infantry, -20, 16, 16, depthCols(infantry.length, 30));
+            assignBlock(ranged, 0, 16, 16, depthCols(ranged.length, 30));
+            assignBlock(gunpowder, 20, 18, 16, depthCols(gunpowder.length, 15)); 
+            assignBlock(cavalry, 60, 20, 20, depthCols(cavalry.length, 40));                  
             break;
 
         case "standard":
-            assignBlock([...shields, ...infantry], -30, 40, 30, 20);
-            assignBlock(ranged, -60, 40, 30, 20);
-            assignBlock(gunpowder, 0, 40, 30, 15);
-            assignBlock(cavalry, 40, 50, 40, 10); 
+            assignBlock([...shields, ...infantry], -30, 40, 30, depthCols(shields.length + infantry.length, 20));
+            assignBlock(ranged, -60, 40, 30, depthCols(ranged.length, 20));
+            assignBlock(gunpowder, 0, 40, 30, depthCols(gunpowder.length, 15));
+            assignBlock(cavalry, 40, 50, 40, depthCols(cavalry.length, 10)); 
+            break;
+
+        case "variedLine":
+            assignVariedLine(lineWidth);
             break;
 
         case "line":
+            // LOOSE (UI-facing name — see RTSControls.js's formation tray).
+            // Internal style key stays "line" so drag-formation memory
+            // (assignedFormationStyle) round-trips unchanged; only the
+            // button's label/emoji changed. Widened from the old fixed
+            // 35/30 spacing to 60/48 specifically so Loose reads as
+            // CLEARLY more spread out than Standard's ~40/30 — the old
+            // numbers were actually tighter than Standard, which would
+            // have broken the required Tight < Standard < Loose ordering
+            // if left alone under the new name.
             let lineGroup = [...shields, ...infantry, ...ranged, ...gunpowder, ...cavalry];
-            assignBlock(lineGroup, 0, 35, 30, 40); 
+            assignBlock(lineGroup, 0, 60, 48, depthCols(lineGroup.length, 40)); 
             break;
             
         case "circle":
@@ -2433,6 +3363,45 @@ case "square":
                 u.formationOffsetX = (col - sideSize / 2) * spacing + (Math.random() - 0.5) * 20;
                 u.formationOffsetY = (row - sideSize / 2) * spacing + (Math.random() - 0.5) * 20;
             });
+            break;
+
+        case "loose":
+            // LOOSE — used by AI TACTIC: HOLD when the enemy is
+            // ranged-heavy (see RTSControls.js's _pickHoldFormationStyle).
+            // Deliberately no role structure and no tight packing: units
+            // scatter uniformly across a disc around the centroid so one
+            // volley/AoE can't collapse the whole group the way a tight
+            // circle/square/line would. Still holds in place once formed —
+            // this only changes the SHAPE, not the never-advance discipline.
+            const looseRadius = Math.max(70, units.length * 12);
+            units.forEach(u => {
+                const ang = Math.random() * Math.PI * 2;
+                const r = Math.sqrt(Math.random()) * looseRadius; // uniform-in-disc, not radius-biased
+                u.formationOffsetX = Math.cos(ang) * r;
+                u.formationOffsetY = Math.sin(ang) * r;
+            });
+            break;
+
+        case "dragGrid":
+            // TOTAL WAR STYLE DRAG DEFAULT — "ignore unit type and size,
+            // every arrow merely represents one unit." No role sorting at
+            // all: assignBlock runs directly on the full, unsorted units
+            // array. Depth (rows) is the RTSControls formation-depth toggle
+            // (window._mc3FormationDepth, cycled 1/2/3/4, default 2 —
+            // "generally aim for 2-3 lines unless barely any units are
+            // selected," which the row-count clamp below covers since rows
+            // can never exceed unit count). Width comes directly from how
+            // far the player dragged (lineWidth, world px) — "based on how
+            // wide u drag."
+            {
+                const depthToggle = (typeof window !== 'undefined' && typeof window._mc3FormationDepth === 'number')
+                    ? window._mc3FormationDepth : 2;
+                const dgRows = Math.max(1, Math.min(Math.round(depthToggle) || 2, units.length));
+                const dgCols = Math.ceil(units.length / dgRows);
+                const dgSpacingX = dgCols > 1 ? Math.max(20, (lineWidth || 0) / (dgCols - 1)) : 0;
+                const dgSpacingY = Math.max(28, dgSpacingX || 32);
+                assignBlock(units, 0, dgSpacingX, dgSpacingY, dgCols);
+            }
             break;
     }
 }
@@ -2525,11 +3494,36 @@ return ["archer", "horse_archer", "crossbow", "gunner", "mounted_gunner", "Rocke
 // ============================================================================
 // --- SURGERY 4: SIEGE EQUIPMENT HELPER ---
 // ============================================================================
-function canUseSiegeEngines(unit) {
-    const role = getTacticalRole(unit);
-    // Cavalry and Large Beasts cannot push rams or climb ladders
-    return !(role === "CAVALRY" || (unit.stats && unit.stats.isLarge));
-}
+// BUGFIX ("ladder climbers get stuck / can't climb"): this file used to
+// declare its OWN canUseSiegeEngines(unit) here — a plain top-level
+// `function` declaration, exactly like the one in ai_categories.js. Two
+// files each declaring a global function with the identical name is a
+// silent collision: whichever <script> tag loads second simply overwrites
+// the other in the global scope, so every call site in BOTH files ends up
+// running whatever definition happened to load last, regardless of which
+// file it's textually written in. That's non-deterministic from the
+// codebase's point of view (it depends purely on page load order) and the
+// two versions disagree in real ways:
+//   - ai_categories.js's version additionally allows ranged/specialist units
+//     to use siege equipment when they've been explicitly given a siege
+//     role (ram_pusher/ladder_carrier/ladder_fanatic/trebuchet_crew), and
+//     always allows firelance/bomb/javelin specialists.
+//   - This file's old version was a blunt stub: cavalry/large is blocked,
+//     everyone else allowed — no siegeRole awareness at all.
+// ai_categories.js's climb-entry gate (isOnLadderTile detection in
+// _handleMovement) calls canUseSiegeEngines(unit) before it will ever flip
+// isClimbing on. If this file's stub happened to be the one that won the
+// load-order race, any unit whose role that stub misjudges (or that relied
+// on the siegeRole-based exceptions the stub didn't know about) would fail
+// that check, silently skip the entire climb-entry branch, and just stand
+// at the ladder base forever — no error, no animation, just stuck.
+// FIX: the duplicate declaration is deleted outright. ai_categories.js's
+// canUseSiegeEngines is a plain top-level function, so it is already
+// globally callable from this file (and everywhere else) with no import
+// needed — there is now exactly one implementation in the whole codebase,
+// so there is nothing left for load order to race.
+// REQUIRES: ai_categories.js must be loaded on the page (it already is,
+// for all the other AI logic this file depends on).
 
 function isCavalryUnit(unit) {
     if (!unit || !unit.stats) return false;

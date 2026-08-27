@@ -1304,9 +1304,26 @@ units.forEach((u, i) => {
                 if (typeof u.morale === 'number' && u.stats) {
                     u.stats.morale = u.morale;
                 }
-                if (typeof u.ammo === 'number' && u.stats) {
-                    u.stats.ammo = u.ammo;
-                }
+                // CLAUDE REMOVE THIS LATER — REMOVED, this was the infinite-ammo bug.
+                // u.ammo is a one-time spawn-time snapshot (set once above in the
+                // one-time init block and never updated again anywhere). The AI
+                // engine (ai_categories.js _handleCombatExecution) actually
+                // decrements u.stats.ammo directly, NOT u.ammo — this comment
+                // block's original assumption ("the AI engine modifies u.ammo
+                // directly") is stale/incorrect for the current codebase. This
+                // line ran every frame BEFORE the real combat loop (see the
+                // wrapper order below: this forEach runs, then
+                // _original_updateBattleUnits() runs after), so it was
+                // overwriting the correctly-decremented u.stats.ammo with the
+                // stale, never-changing u.ammo snapshot every single tick —
+                // stamping ammo back to its spawn value right after combat
+                // execution had just spent it. That produced exactly the
+                // observed bug: ammo decrements, then immediately resets to
+                // full within the same frame, unit fires forever.
+                // if (typeof u.ammo === 'number' && u.stats) {
+                //     u.stats.ammo = u.ammo;
+                // }
+                // END CLAUDE REMOVE THIS LATER
             });
         }
         

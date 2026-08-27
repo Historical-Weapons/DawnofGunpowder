@@ -1,12 +1,26 @@
 // =============================================================================
+// SESSION CHANGELOG (for fusion with the other diverging Story 3 session)
+// =============================================================================
+//   - Wall now spans the full map width (nxStart/nxEnd changed from 0.02/0.98
+//     to 0.0/1.0 — it used to stop short of both edges).
+//   - Removed the two always-open "patrol gap" breaks in the wall (_S3_PATROL_
+//     GAPS emptied) — the only opening left is the one real, closable gate.
+//   - Both are pure map-geometry fixes, not narrative — safe to keep
+//     regardless of which Story 3 chapter-10+ continuation wins.
+// =============================================================================
+
+// =============================================================================
 // STORY 3 — LIFE ON THE WALL  (story3_map_and_update.js)  [MING FRONTIER]
 // =============================================================================
 //
-// DATONG FRONTIER, c. 1450 CE — Ming northern wall garrison map.
+// LIAODONG FRONTIER, 1578 CE — Ming northeastern wall garrison map, in the
+// approach toward Shanhai Pass. Enemy: fragmented Jianzhou/Haixi Jurchen
+// raiding bands (this is a generation before Nurhaci unifies the Jurchens).
 //
 // CHANGES vs prior build
 // ──────────────────────
-//  • Setting: northern Ming wall (Datong / Xuanfu sector), post-Tumu Crisis.
+//  • Setting: northeastern Ming wall (Kaiyuan / Liaoyang sector), the Ming
+//    Liaodong frontier under Li Chengliang's regional command.
 //  • Wall is a SIMPLIFIED bird's-eye band (NOT isometric / NOT pagoda 3D).
 //    Drawing style mimics the flat top-down brick wall from fortification_system.js
 //    (zone-1 outer stone + zone-2/3 inner walkway + crenellations on the
@@ -15,8 +29,9 @@
 //    at the edges, no gap to the map border.
 //  • Wall has a SLIGHT MEANDERING CURVE along its length (sinusoidal Y
 //    offset), mimicking the Great Wall's organic line in aerial photos.
-//  • NO GATES. The wall is unbroken brickwork punctuated only by towers and
-//    three narrow ~32 px patrol gaps used by the story's scout triggers.
+//  • ONE real, closable GATE (see _S3_GATE) directly north of Black Sand
+//    Fort, plus two narrow ~24 px always-open patrol gaps further along the
+//    wall, used by the story's scout triggers.
 //  • Towers are bird's-eye squares with crenellated edges and a small
 //    central pavilion (no roof extrusion, no isometric eaves) — same flat
 //    visual language as the wall itself.
@@ -47,10 +62,10 @@ const PADDING_Y_story3 = WORLD_HEIGHT * 0.02;
 const _S3_WALL_THICKNESS_PX = 64;
 const _S3_WALL_BASE_NY      = 0.40;     // base centre line of the wall
 
-// Wall MUST span the entire x-axis — start near the left edge, end near the
-// right edge. No gap to the map border.
-const _S3_WALL_NX_START     = 0.02;
-const _S3_WALL_NX_END       = 0.98;
+// Wall MUST span the entire x-axis — flush with the left and right map
+// borders. No gap to the map edge on either side.
+const _S3_WALL_NX_START     = 0.0;
+const _S3_WALL_NX_END       = 1.0;
 
 // Meander amplitude / frequency for the Great Wall–style curve.
 // Amplitude is in PIXELS; frequency in cycles across the full width.
@@ -76,14 +91,12 @@ function _s3WallBottomYAt(px) { return _s3WallCenterYAt(px) + _S3_WALL_THICKNESS
 // =============================================================================
 // PATROL GAPS  (NOT GATES — narrow walkable strips between wall segments)
 // =============================================================================
-// Three narrow gaps where the wall has a break. Used by the scout / first-raid
-// story triggers so the player and enemy NPCs can cross the wall line.
-// All gaps are open from boot — there is NO closed gate.
-const _S3_PATROL_GAPS = [
-    { x: 1680, halfW: 16 },    // central — directly north of Black Sand Fort
-    { x:  920, halfW: 12 },    // western
-    { x: 2520, halfW: 12 }     // eastern
-];
+// REMOVED — the wall must be one continuous band with only the single real,
+// closable Gate (see _S3_GATE below) as an opening. Kept as an empty array
+// (rather than deleting every reference) so _s3InPatrolGap / _s3InOpening /
+// the tower generator's gap-avoidance check all keep working with zero gaps
+// instead of needing to be re-plumbed.
+const _S3_PATROL_GAPS = [];
 
 function _s3InPatrolGap(px) {
     for (let i = 0; i < _S3_PATROL_GAPS.length; i++) {
@@ -93,13 +106,58 @@ function _s3InPatrolGap(px) {
 }
 
 // =============================================================================
+// THE GATE — the wall's one real, closable crossing, directly north of
+// Black Sand Fort (same spot the old central patrol gap used to sit).
+// ─────────────────────────────────────────────────────────────────────────────
+// CLOSED by default. It only opens when a scenario trigger grants passage
+// (out OR back in — guards work the same winch either direction) via
+// window.s3SetGateOpen(true), and it swings shut again on its own the moment
+// the player is clear of the wall band on whichever side they ended up on.
+// See window.s3SetGateOpen / window.s3RequestPassage near the bottom of this
+// file, and _s3DrawGate() for the per-frame door art.
+// =============================================================================
+const _S3_GATE = {
+    x:     1680,   // world px — directly north of Black Sand Fort
+    halfW:   32,   // passage half-width — doubled from the old 16px footprint
+    open:  false   // closed at boot; a future "grant passage" trigger flips this
+};
+
+// True if px falls inside the gate's footprint. Used everywhere the wall
+// texture / tower placement needs to leave this stretch alone, regardless of
+// whether the gate itself is currently open or shut.
+function _s3InGateZone(px) {
+    return Math.abs(px - _S3_GATE.x) <= _S3_GATE.halfW;
+}
+
+// Combined "is this an opening in the wall" test — patrol gaps OR the gate.
+function _s3InOpening(px) {
+    return _s3InPatrolGap(px) || _s3InGateZone(px);
+}
+
+// Pixel-test: is (px,py) inside the gate's own footprint band (used at map
+// generation to tag those tiles isGate so runtime open/close can find them).
+function _s3OnGateBand(px, py) {
+    if (!_s3InGateZone(px)) return false;
+    const cy = _s3WallCenterYAt(px);
+    return Math.abs(py - cy) <= _S3_WALL_THICKNESS_PX * 0.5;
+}
+
+// =============================================================================
 // TOWER PLACEMENT (along the wall, bird's-eye squares)
 // =============================================================================
 const _S3_TOWER_SPACING_PX = 360;       // ~one tower every ~360 px → ~10 across map
 const _S3_TOWER_JITTER_PX  = 50;
 const _S3_TOWER_HALF       = 22;        // half-side of the tower square (~44 px wide)
 
-const _S3_TOWERS = (function () {
+// Watchtowers are DISABLED for now — their square, red-bordered silhouette
+// read as "another gate" at a glance, which was exactly the confusion we're
+// fixing. The generator is kept below as _s3GenerateWallTowers() (just never
+// called) so a visually distinct tower design can be dropped back in later
+// without re-plumbing the wall/collision code around it. _s3OnTower /
+// _s3DrawTowers are unchanged and simply no-op on the empty array.
+const _S3_TOWERS = [];
+
+function _s3GenerateWallTowers() {
     const towers = [];
     // Deterministic pseudo-random for jitter / variant
     let seed = 1337;
@@ -118,6 +176,10 @@ const _S3_TOWERS = (function () {
         // Skip towers that would sit inside a patrol gap
         if (_s3InPatrolGap(cx)) continue;
 
+        // Keep clear of the gate itself — a proper gatehouse needs room and
+        // shouldn't be crowded by a watchtower right on top of it
+        if (Math.abs(cx - _S3_GATE.x) < _S3_TOWER_HALF + _S3_GATE.halfW + 30) continue;
+
         // Skip towers that would overlap an existing tower (after jitter)
         let collide = false;
         for (let k = 0; k < towers.length; k++) {
@@ -131,7 +193,7 @@ const _S3_TOWERS = (function () {
         towers.push({ cx, cy, variant, seed: Math.floor(rnd() * 1e6) });
     }
     return towers;
-})();
+}
 
 // Pixel-test: is (px,py) inside any tower's bounding square?
 function _s3OnTower(px, py) {
@@ -148,7 +210,7 @@ function _s3OnTower(px, py) {
 function _s3OnWallBand(px, py) {
     if (px < _S3_WALL_NX_START * WORLD_WIDTH) return false;
     if (px > _S3_WALL_NX_END   * WORLD_WIDTH) return false;
-    if (_s3InPatrolGap(px))                    return false;
+    if (_s3InOpening(px))                      return false;
     const cy = _s3WallCenterYAt(px);
     return Math.abs(py - cy) <= _S3_WALL_THICKNESS_PX * 0.5;
 }
@@ -156,8 +218,9 @@ function _s3OnWallBand(px, py) {
 // =============================================================================
 // SETTLEMENT LIST
 // ─────────────────────────────────────────────────────────────────────────────
-// Ming northern frontier. Black Sand Fort is the player's home base.
-// Datong and Xuanfu are the major garrisons further south.
+// Ming Liaodong frontier. Black Sand Fort is the player's home base.
+// Kaiyuan and Liaoyang are the major garrisons further south — Liaoyang is
+// the seat of the Liaodong Regional Military Commission.
 // Civilian villages are sparse and well clear of the wall.
 // All settlements have radius:0 (NO green circle) and military posts get
 // NO farm-field chequer.
@@ -173,12 +236,12 @@ const FIXED_SETTLEMENTS_story3 = [
     { name: "Smithy & Wagonyard",   x: 2500, y: 1510, pop:   85, isVillage: false, isMilitary: true, faction: "Ming Dynasty" },
     { name: "Signal Tower Post",    x: 3140, y: 1480, pop:   55, isVillage: false, isMilitary: true, faction: "Ming Dynasty" },
     { name: "Barracks East",        x: 3540, y: 1530, pop:  130, isVillage: false, isMilitary: true, faction: "Ming Dynasty" },
-    { name: "Juyong Pass Tower",    x: 1920, y: 1600, pop:   90, isVillage: false, isMilitary: true, faction: "Ming Dynasty" },
+    { name: "Fushun Pass Tower",    x: 1920, y: 1600, pop:   90, isVillage: false, isMilitary: true, faction: "Ming Dynasty" },
     { name: "Grain Tax Post",       x: 1520, y: 1760, pop:   70, isVillage: false, isMilitary: true, faction: "Ming Dynasty" },
 
     // ── MAIN MING GARRISONS (further south, command centres) ────────────────
-    { name: "Datong Garrison",      x: 1080, y: 1880, pop:14000, isVillage: false, faction: "Ming Dynasty" },
-    { name: "Xuanfu Garrison",      x: 2600, y: 2020, pop:12500, isVillage: false, faction: "Ming Dynasty" },
+    { name: "Kaiyuan Garrison",     x: 1080, y: 1880, pop:14000, isVillage: false, faction: "Ming Dynasty" },
+    { name: "Liaoyang",             x: 2600, y: 2020, pop:12500, isVillage: false, faction: "Ming Dynasty" },
 
     // ── CIVILIAN VILLAGES (sparse, well clear of the wall) ──────────────────
     { name: "Wei Village",          x:  600, y: 2740, pop:  580, isVillage: true,  faction: "Ming Dynasty" },
@@ -194,24 +257,24 @@ const _S3_ROADS = [
     ["Barracks West",       "Arrow & Bolt Store",  2001],
     ["Arrow & Bolt Store",  "Powder Magazine",     2002],
     ["Powder Magazine",     "Black Sand Fort",     2003],
-    ["Black Sand Fort",     "Juyong Pass Tower",   2004],
-    ["Juyong Pass Tower",   "Smithy & Wagonyard",  2005],
+    ["Black Sand Fort",     "Fushun Pass Tower",   2004],
+    ["Fushun Pass Tower",   "Smithy & Wagonyard",  2005],
     ["Smithy & Wagonyard",  "Signal Tower Post",   2006],
     ["Signal Tower Post",   "Barracks East",       2007],
 
     // North-south supply roads down to the main garrisons
     ["Black Sand Fort",     "Grain Tax Post",      2010],
-    ["Grain Tax Post",      "Datong Garrison",     2011],
-    ["Grain Tax Post",      "Xuanfu Garrison",     2012],
-    ["Powder Magazine",     "Datong Garrison",     2013],
-    ["Smithy & Wagonyard",  "Xuanfu Garrison",     2014],
+    ["Grain Tax Post",      "Kaiyuan Garrison",    2011],
+    ["Grain Tax Post",      "Liaoyang",            2012],
+    ["Powder Magazine",     "Kaiyuan Garrison",    2013],
+    ["Smithy & Wagonyard",  "Liaoyang",            2014],
 
     // Connector between the two main garrisons
-    ["Datong Garrison",     "Xuanfu Garrison",     2020],
+    ["Kaiyuan Garrison",    "Liaoyang",            2020],
 
     // Down to civilian villages
-    ["Datong Garrison",     "Wei Village",         2030],
-    ["Xuanfu Garrison",     "Ding Hamlet",         2031]
+    ["Kaiyuan Garrison",    "Wei Village",         2030],
+    ["Liaoyang",            "Ding Hamlet",         2031]
 ];
 
 // =============================================================================
@@ -263,9 +326,11 @@ function _s3WallDistPx(px, py) {
 // =============================================================================
 // TERRAIN BIOMES
 // ─────────────────────────────────────────────────────────────────────────────
-// North of the wall:  dry steppe — pale ochre, dust, scrub, rocky outcrops.
+// North of the wall:  Jianzhou highland forest — forested hills, rocky spurs,
+//                     the Jurchen homeland. NOT steppe — Liaodong's frontier
+//                     is wooded and hilly, unlike the arid Mongol plateau.
 // South of the wall:  Ming inner plains — open farmland, scattered trees,
-//                     gradually greener moving south (towards Datong / Beijing).
+//                     gradually greener moving south (towards Liaoyang / Beijing).
 // =============================================================================
 function _s3GroundTile(px, py) {
     const nx = px / WORLD_WIDTH;
@@ -284,19 +349,23 @@ function _s3GroundTile(px, py) {
     let name, color, speed, m, e;
 
     if (northOfWall) {
-        // ── NORTHERN STEPPE (Mongol approach zone) ───────────────────────────
+        // ── JIANZHOU HIGHLAND FOREST (Jurchen approach zone) ─────────────────
+        // Wetter and higher-elevation than the old steppe biome — forest and
+        // rocky spurs dominate, with clearings rather than dust plains.
         const distNorm = (wallCy - py) / Math.max(1, wallCy);
-        m = Math.max(0.03, 0.22 - distNorm * 0.14 + (mBase - 0.5) * 0.06);
-        e = 0.30 + (eBase - 0.5) * 0.10;
+        m = Math.min(0.90, 0.48 + distNorm * 0.12 + (mBase - 0.5) * 0.14);
+        e = 0.42 + distNorm * 0.08 + (eBase - 0.5) * 0.14;
 
-        if (fine > 0.84 && eBase > 0.55) {
-            name = "Rocky Outcrop"; color = "#6a624a"; speed = 0.60;
-        } else if (mBase > 0.70) {
-            name = "Steppe Grass";  color = "#9a9270"; speed = 0.84;
-        } else if (mBase < 0.28) {
-            name = "Dust Plain";    color = "#bdb188"; speed = 0.88;
+        if (fine > 0.82 && eBase > 0.55) {
+            name = "Rocky Highland"; color = "#5a5644"; speed = 0.55;
+        } else if (mBase > 0.68 && eBase > 0.45) {
+            name = "Highland Forest"; color = "#33422a"; speed = 0.45;
+        } else if (mBase > 0.50) {
+            name = "Forest Scrub";    color = "#4a5636"; speed = 0.70;
+        } else if (mBase < 0.30) {
+            name = "Highland Clearing"; color = "#7a7a52"; speed = 0.88;
         } else {
-            name = "Steppe Grass";  color = "#a4986e"; speed = 0.85;
+            name = "Forest Scrub";    color = "#546038"; speed = 0.72;
         }
 
     } else if (southOfWall) {
@@ -332,7 +401,7 @@ function _s3GroundTile(px, py) {
 // MAP GENERATION
 // =============================================================================
 async function generateMap_story3() {
-    console.log("[Story3] Generating Ming northern frontier — c. 1450 CE…");
+    console.log("[Story3] Generating Ming Liaodong frontier — 1578 CE…");
 
     bgCtx.fillStyle = "#a0976a";
     bgCtx.fillRect(0, 0, WORLD_WIDTH, WORLD_HEIGHT);
@@ -359,6 +428,13 @@ async function generateMap_story3() {
                     name: "Wall Tower", color: "#3e342a", speed: 0.40,
                     impassable: true, e: 0.80, m: 0.20, isWall: true, isTower: true
                 };
+            } else if (_s3OnGateBand(px, py)) {
+                // Starts CLOSED (impassable) — _s3SetGateTiles() flips this
+                // live whenever window.s3SetGateOpen() is called.
+                tile = {
+                    name: "Frontier Gate", color: "#6b5638", speed: 0.55,
+                    impassable: !_S3_GATE.open, e: 0.55, m: 0.30, isGate: true
+                };
             } else if (_s3OnWallBand(px, py)) {
                 tile = {
                     name: "Wall", color: "#7a5840", speed: 0.50,
@@ -381,8 +457,9 @@ async function generateMap_story3() {
             const py = j * TILE_SIZE;
             const tile = worldMap_story3[i][j];
 
-            if (tile.isWall || tile.isTower) {
-                // Walls/towers get drawn properly in their own decorator pass.
+            if (tile.isWall || tile.isTower || tile.isGate) {
+                // Walls/towers/gate get drawn properly in their own decorator
+                // pass (the gate's is dynamic, per-frame — see _s3DrawGate).
                 // Just fill a base brown here so the underlying world is solid.
                 bgCtx.fillStyle = tile.color;
                 bgCtx.fillRect(px, py, TILE_SIZE, TILE_SIZE);
@@ -438,7 +515,7 @@ function _s3DrawRocksAndDebris(ctx) {
     ctx.save();
     const rng = _s3LCG(8888);
 
-    // North of the wall — scrub rocks scattered across the steppe
+    // North of the wall — scrub rocks scattered across the highland forest
     for (let k = 0; k < 480; k++) {
         const x  = rng() * WORLD_WIDTH;
         const y  = rng() * (_S3_WALL_BASE_NY * WORLD_HEIGHT - 60);
@@ -589,7 +666,7 @@ function _s3DrawRoads(ctx) {
 // ─────────────────────────────────────────────────────────────────────────────
 // Visual language mirrors the flat top-down look of fortification_system.js:
 //
-//   • Outer stone band along the NORTH (steppe) face  — dark stone, slight shadow
+//   • Outer stone band along the NORTH (outer, forest-facing) face  — dark stone, slight shadow
 //   • Main brick body filling the wall thickness      — warm brick with brick courses
 //   • Inner walkway band along the SOUTH face         — slightly lighter "wood" strip
 //   • Crenellations stick OUT from the north face     — small dark merlons
@@ -619,7 +696,7 @@ function _s3DrawWall(ctx) {
     // ── Pass 1: OUTER STONE BAND (north face) ────────────────────────────────
     ctx.fillStyle = "#5e4632";
     for (let x = xStart; x < xEnd; x++) {
-        if (_s3InPatrolGap(x)) continue;
+        if (_s3InOpening(x)) continue;
         const cy = _s3WallCenterYAt(x);
         const yTop = cy - halfT;
         ctx.fillRect(x, yTop, 1, 10);
@@ -628,7 +705,7 @@ function _s3DrawWall(ctx) {
     // ── Pass 2: MAIN BRICK BODY ──────────────────────────────────────────────
     ctx.fillStyle = "#8a6648";
     for (let x = xStart; x < xEnd; x++) {
-        if (_s3InPatrolGap(x)) continue;
+        if (_s3InOpening(x)) continue;
         const cy = _s3WallCenterYAt(x);
         const yTop = cy - halfT;
         ctx.fillRect(x, yTop + 10, 1, 40);
@@ -637,7 +714,7 @@ function _s3DrawWall(ctx) {
     // ── Pass 3: INNER WALKWAY BAND (south side, slightly lighter) ────────────
     ctx.fillStyle = "#a08266";
     for (let x = xStart; x < xEnd; x++) {
-        if (_s3InPatrolGap(x)) continue;
+        if (_s3InOpening(x)) continue;
         const cy = _s3WallCenterYAt(x);
         const yTop = cy - halfT;
         ctx.fillRect(x, yTop + 50, 1, 12);
@@ -645,7 +722,7 @@ function _s3DrawWall(ctx) {
     // South-edge shadow under the walkway
     ctx.fillStyle = "rgba(0,0,0,0.45)";
     for (let x = xStart; x < xEnd; x++) {
-        if (_s3InPatrolGap(x)) continue;
+        if (_s3InOpening(x)) continue;
         const cy = _s3WallCenterYAt(x);
         ctx.fillRect(x, cy + halfT - 2, 1, 3);
     }
@@ -655,7 +732,7 @@ function _s3DrawWall(ctx) {
     ctx.fillStyle = "rgba(28,16,8,0.40)";
     for (let dy = 14; dy < 48; dy += 8) {
         for (let x = xStart; x < xEnd; x++) {
-            if (_s3InPatrolGap(x)) continue;
+            if (_s3InOpening(x)) continue;
             const cy = _s3WallCenterYAt(x);
             const yTop = cy - halfT;
             ctx.fillRect(x, yTop + dy, 1, 1);
@@ -667,7 +744,7 @@ function _s3DrawWall(ctx) {
         const courseRow = (dy - 12) / 8;
         const offset = (courseRow % 2 === 0) ? 0 : 9;
         for (let x = xStart + offset; x < xEnd; x += 18) {
-            if (_s3InPatrolGap(x)) continue;
+            if (_s3InOpening(x)) continue;
             const cy = _s3WallCenterYAt(x);
             const yTop = cy - halfT;
             ctx.fillRect(x, yTop + dy, 1, 7);
@@ -684,7 +761,7 @@ function _s3DrawWall(ctx) {
         // Skip if any part of the merlon overlaps a patrol gap
         let inGap = false;
         for (let dx = 0; dx < merlonW; dx++) {
-            if (_s3InPatrolGap(x + dx)) { inGap = true; break; }
+            if (_s3InOpening(x + dx)) { inGap = true; break; }
         }
         if (inGap) continue;
 
@@ -704,7 +781,7 @@ function _s3DrawWall(ctx) {
 
     // ── Pass 6: WEATHERED DARK STAINS scattered along the wall ───────────────
     for (let x = xStart + 60; x < xEnd; x += 140 + rng() * 40) {
-        if (_s3InPatrolGap(x)) continue;
+        if (_s3InOpening(x)) continue;
         const stainW = 14 + rng() * 24;
         const cy = _s3WallCenterYAt(x);
         const yTop = cy - halfT;
@@ -728,6 +805,169 @@ function _s3DrawWall(ctx) {
 
     ctx.restore();
 }
+
+// =============================================================================
+// THE GATE — dynamic per-frame render (NOT baked into the background), same
+// technique fortification_system.js's renderDynamicGates() uses: the
+// background canvas leaves this stretch of wall blank, and this function
+// paints the current open/closed state fresh every frame so the doors can
+// flip state instantly with no map regeneration. Two short leaves are
+// drawn — one flush with the wall's north (outer, forest-facing) edge, one
+// flush with its south (inner, Ming-facing) edge — each a shortened take on
+// fortification_system's pillar/plank/iron-band door, sized for this wall's
+// thin 64px cross-section instead of a full city gate. Call every frame as:
+//   if (typeof s3DrawGate === 'function') s3DrawGate(ctx);
+// =============================================================================
+function _s3DrawGate(ctx) {
+    _s3UpdateGateAutoClose();
+
+    const x      = _S3_GATE.x;
+    const halfW  = _S3_GATE.halfW;
+    const w      = halfW * 2;
+    const cy     = _s3WallCenterYAt(x);
+    const halfT  = _S3_WALL_THICKNESS_PX * 0.5;
+    const leafH  = 10;
+
+    const northLeafTop = cy - halfT - 2;
+    const northLeafBot = northLeafTop + leafH;
+    const southLeafBot = cy + halfT + 2;
+    const southLeafTop = southLeafBot - leafH;
+
+    ctx.save();
+
+    if (_S3_GATE.open) {
+        // ── OPEN — packed-dirt passage straight through, same treatment as
+        // the always-open patrol gaps (Pass 7 of _s3DrawWall).
+        ctx.fillStyle = "#8a7050";
+        ctx.fillRect(x - halfW, northLeafTop, w, southLeafBot - northLeafTop);
+        ctx.fillStyle = "rgba(40,28,16,0.30)";
+        ctx.fillRect(x - halfW + 2, cy - halfT,     w - 4, 1);
+        ctx.fillRect(x - halfW + 2, cy + halfT - 5, w - 4, 1);
+    } else {
+        // ── CLOSED — shadowed tunnel interior between the two leaves,
+        // hinting at the wall's thickness.
+        ctx.fillStyle = "#241a12";
+        ctx.fillRect(x - halfW, northLeafBot, w, southLeafTop - northLeafBot);
+    }
+
+    // Flanking stone pillars — the gate's own stonework, present open or shut
+    const pillarW = 5;
+    ctx.fillStyle = "#4a3d30";
+    ctx.fillRect(x - halfW - pillarW, northLeafTop, pillarW, southLeafBot - northLeafTop);
+    ctx.fillRect(x + halfW,           northLeafTop, pillarW, southLeafBot - northLeafTop);
+    ctx.fillStyle = "#6b5a44";
+    ctx.fillRect(x - halfW - pillarW, northLeafTop, pillarW, 2);
+    ctx.fillRect(x + halfW,           northLeafTop, pillarW, 2);
+
+    if (!_S3_GATE.open) {
+        _s3DrawGateLeaf(ctx, x, northLeafTop, w, leafH, "north"); // outer face
+        _s3DrawGateLeaf(ctx, x, southLeafTop, w, leafH, "south"); // inner face
+    }
+
+    ctx.restore();
+}
+
+// One shortened door leaf — pillars, vertical planking, iron bands, and a
+// colored lintel cap, all lifted straight from fortification_system.js's
+// drawn-gate language (renderDynamicGates) but scaled down to this wall's
+// far thinner cross-section. `side` picks which edge the lintel sits on and
+// its color, so the outer and inner faces read distinctly at a glance:
+// weathered dark iron facing the forest frontier, Ming lacquer red facing home.
+function _s3DrawGateLeaf(ctx, cx, topY, w, h, side) {
+    const x0 = cx - w / 2;
+
+    // Base plank wood
+    ctx.fillStyle = "#5a4030";
+    ctx.fillRect(x0, topY, w, h);
+
+    // Vertical plank-gap strokes
+    ctx.fillStyle = "#3e2723";
+    for (let i = 2; i < w; i += 3) {
+        ctx.fillRect(x0 + i, topY, 1, h);
+    }
+
+    // Iron bands
+    ctx.fillStyle = "#1f1f1f";
+    ctx.fillRect(x0, topY + 1,     w, 1.5);
+    ctx.fillRect(x0, topY + h - 2.5, w, 1.5);
+
+    // End posts
+    ctx.fillStyle = "#37474f";
+    ctx.fillRect(x0, topY, 3, h);
+    ctx.fillRect(x0 + w - 3, topY, 3, h);
+
+    // Roof / lintel cap
+    ctx.fillStyle = (side === "north") ? "#3a3f42" : "#8b2a18";
+    const capY = (side === "north") ? topY - 3 : topY + h;
+    ctx.fillRect(x0, capY, w, 3);
+}
+
+// How far past the wall band (on whichever side the player ends up on) they
+// need to be before the gate is considered "cleared" and swings itself shut.
+// Applies symmetrically — leaving to the forest frontier or coming back home both
+// trigger the same auto-close once you're through and clear.
+const _S3_GATE_AUTO_CLOSE_MARGIN = 40;
+
+function _s3UpdateGateAutoClose() {
+    if (!_S3_GATE.open) return;
+    if (typeof player === 'undefined' || !player) return;
+    // Ignore players who aren't anywhere near the gate — nobody should be
+    // able to slam it shut on someone else from clear across the map.
+    if (Math.abs(player.x - _S3_GATE.x) > _S3_GATE.halfW + 60) return;
+
+    const cy    = _s3WallCenterYAt(player.x);
+    const halfT = _S3_WALL_THICKNESS_PX * 0.5;
+    if (Math.abs(player.y - cy) > halfT + _S3_GATE_AUTO_CLOSE_MARGIN) {
+        window.s3SetGateOpen(false);
+    }
+}
+
+// Live-toggles collision on exactly the tiles tagged isGate at map
+// generation time — leaves neighboring wall/tower tiles untouched.
+function _s3SetGateTiles(open) {
+    if (!worldMap_story3 || !worldMap_story3.length) return;
+    const gx0 = Math.floor((_S3_GATE.x - _S3_GATE.halfW) / TILE_SIZE);
+    const gx1 = Math.floor((_S3_GATE.x + _S3_GATE.halfW) / TILE_SIZE);
+    for (let gx = gx0; gx <= gx1; gx++) {
+        const col = worldMap_story3[gx];
+        if (!col) continue;
+        for (let gy = 0; gy < col.length; gy++) {
+            const t = col[gy];
+            if (t && t.isGate) t.impassable = !open;
+        }
+    }
+}
+
+// Expose for the shared draw loop (sandboxmode_update.js), matching the
+// existing typeof-guarded hook pattern used for drawSiegeVisuals etc.
+window.s3DrawGate = _s3DrawGate;
+
+// =============================================================================
+// GATE DENIAL MESSAGE — the player has no in-game "ticket" object; whether
+// they can pass IS _S3_GATE.open (permission granted by a future trigger).
+// Called from the shared movement-collision check in sandboxmode_update.js
+// whenever a move is blocked by a tile tagged isGate, so walking into a shut
+// gate explains itself instead of just silently stopping the player.
+// Throttled so leaning on the wall doesn't spam the subtitle every frame.
+// =============================================================================
+let _s3LastGateDenyMsgAt = -Infinity;
+const _S3_GATE_DENY_MSG_COOLDOWN_MS = 4000;
+
+function _s3NotifyGateBlocked() {
+    const now = Date.now();
+    if (now - _s3LastGateDenyMsgAt < _S3_GATE_DENY_MSG_COOLDOWN_MS) return;
+    _s3LastGateDenyMsgAt = now;
+
+    const text = "The gate is barred. The guards won't open it without orders granting you leave to pass.";
+    if (typeof window.StoryPresentation === 'object' &&
+        window.StoryPresentation &&
+        typeof window.StoryPresentation.showSubtitle === 'function') {
+        window.StoryPresentation.showSubtitle(text, 3500, "#f5d76e");
+    } else {
+        console.log("[Story3] " + text);
+    }
+}
+window.s3NotifyGateBlocked = _s3NotifyGateBlocked;
 
 // =============================================================================
 // TOWERS — BIRD'S-EYE SQUARE WATCHTOWERS
@@ -846,9 +1086,43 @@ function _s3SnapToPassable(px, py) {
 function populateCities_story3() {
     console.log("[Story3] Founding garrisons, military posts, and southern villages…");
     cities_story3 = [];
+    if (typeof window.clearCustomLocations === 'function') window.clearCustomLocations();
+
+    // The small wall-line posts below aren't real settlements — they're
+    // single-purpose buildings (see custom_locations_system.js). Routing them
+    // through the city panel ("Visit Settlement" → full walled-city grid)
+    // never made sense for a powder magazine. Mapping is name-based since
+    // FIXED_SETTLEMENTS_story3 doesn't carry a location kind of its own.
+    // Black Sand Fort (home), the two Garrisons, and the civilian villages
+    // are real settlements and keep the standard city panel.
+    const CUSTOM_LOC_KIND_BY_NAME = {
+        "Powder Magazine":    "storage",
+        "Arrow & Bolt Store": "storage",
+        "Grain Tax Post":     "storage",
+        "Barracks West":      "barracks",
+        "Barracks East":      "barracks",
+        "Smithy & Wagonyard": "maintenance",
+        "Signal Tower Post":  "watchtower",
+        "Fushun Pass Tower":  "watchtower"
+    };
+
     FIXED_SETTLEMENTS_story3.forEach(function (site) {
         let snapped = _s3SnapToPassable(site.x, site.y);
         if (!snapped) snapped = { x: site.x, y: site.y };
+
+        const clKind = CUSTOM_LOC_KIND_BY_NAME[site.name];
+        if (clKind && typeof window.registerCustomLocation === 'function') {
+            window.registerCustomLocation({
+                id:      "s3_" + site.name.replace(/\s+/g, "_").toLowerCase(),
+                x:       snapped.x,
+                y:       snapped.y,
+                kind:    clKind,
+                name:    site.name,
+                faction: site.faction
+            });
+            return; // not added to cities_story3 — it's a custom location, not a city
+        }
+
         cities_story3.push({
             name:         site.name,
             x:            snapped.x,
@@ -864,27 +1138,29 @@ function populateCities_story3() {
 }
 
 // =============================================================================
-// MONGOL PATROL SPAWNER  (5 cavalry groups on the northern steppe)
+// JIANZHOU PATROL SPAWNER  (5 raiding bands in the highland forest)
 // =============================================================================
-function _s3SpawnMongolPatrols() {
+function _s3SpawnJurchenPatrols() {
     if (!Array.isArray(window.globalNPCs)) {
-        console.warn("[Story3] globalNPCs not available — Mongol patrols skipped.");
+        console.warn("[Story3] globalNPCs not available — Jurchen patrols skipped.");
         return;
     }
-    if (window.__s3MongolPatrolsSpawned) return;
-    window.__s3MongolPatrolsSpawned = true;
+    if (window.__s3JurchenPatrolsSpawned) return;
+    window.__s3JurchenPatrolsSpawned = true;
 
     const patrols = [
-        { nx: 0.14, ny: 0.17, troops: 28, name: "Mongol Outrider Patrol I"   },
-        { nx: 0.30, ny: 0.11, troops: 34, name: "Mongol Outrider Patrol II"  },
-        { nx: 0.49, ny: 0.22, troops: 38, name: "Mongol Outrider Patrol III" },
-        { nx: 0.66, ny: 0.10, troops: 30, name: "Mongol Outrider Patrol IV"  },
-        { nx: 0.82, ny: 0.20, troops: 26, name: "Mongol Outrider Patrol V"   }
+        { nx: 0.14, ny: 0.17, troops: 28, name: "Jianzhou Raiding Band I"   },
+        { nx: 0.30, ny: 0.11, troops: 34, name: "Jianzhou Raiding Band II"  },
+        { nx: 0.49, ny: 0.22, troops: 38, name: "Jianzhou Raiding Band III" },
+        { nx: 0.66, ny: 0.10, troops: 30, name: "Jianzhou Raiding Band IV"  },
+        { nx: 0.82, ny: 0.20, troops: 26, name: "Jianzhou Raiding Band V"   }
     ];
 
-    const rosterTypes = ["Lancer", "Horse Archer", "Horse Archer", "Lancer"];
-    const factionColor = (window.FACTIONS && window.FACTIONS["Northern Yuan"])
-        ? window.FACTIONS["Northern Yuan"].color : "#1e3a5f";
+    // Jurchen forces weren't pure steppe cavalry the way the Mongols were —
+    // wooded, hilly terrain favored a cavalry/foot-archer mix.
+    const rosterTypes = ["Lancer", "Horse Archer", "Archer", "Horse Archer"];
+    const factionColor = (window.FACTIONS && window.FACTIONS["Jianzhou Jurchens"])
+        ? window.FACTIONS["Jianzhou Jurchens"].color : "#455a64";
 
     patrols.forEach(function (p, idx) {
         const x = p.nx * WORLD_WIDTH;
@@ -894,19 +1170,19 @@ function _s3SpawnMongolPatrols() {
             roster.push({ type: rosterTypes[i % rosterTypes.length], exp: 1 });
         }
         window.globalNPCs.push({
-            id: "mongol_patrol_" + idx, storyId: "mongol_patrol_" + idx,
+            id: "jurchen_patrol_" + idx, storyId: "jurchen_patrol_" + idx,
             isImportant: true, name: p.name, role: "Military",
             count: p.troops, roster: roster,
-            faction: "Northern Yuan", color: factionColor,
+            faction: "Jianzhou Jurchens", color: factionColor,
             originCity: null, targetCity: null,
             x: x, y: y, targetX: x, targetY: y,
             hp: 140, maxHealth: 140, attack: 18, defense: 12, armor: 8,
             speed: 1.2, aiPreset: "patrol",
-            __s3MongolPatrol: true
+            __s3JurchenPatrol: true
         });
     });
 
-    console.log("[Story3] ✅ " + patrols.length + " Mongol cavalry patrols spawned on the steppe.");
+    console.log("[Story3] ✅ " + patrols.length + " Jianzhou raiding bands spawned in the highland forest.");
 }
 
 // =============================================================================
@@ -917,7 +1193,7 @@ window.initGame_story3 = async function () {
     if (window.__gameStarted) return;
     window.__gameStarted = true;
 
-    console.log("[Story3] 🏯 Launching Ming northern frontier — c. 1450 CE…");
+    console.log("[Story3] 🏯 Launching Ming Liaodong frontier — 1578 CE…");
 
     // 1. Factions
     if (window.SongJinScenario && typeof window.SongJinScenario.applyFactions === 'function') {
@@ -963,9 +1239,9 @@ window.initGame_story3 = async function () {
         await initAllCities(FACTIONS);
     }
 
-    // 8. Mongol patrols
-    await setLoading(95, "Sighting steppe riders on the northern horizon…");
-    _s3SpawnMongolPatrols();
+    // 8. Jianzhou patrols
+    await setLoading(95, "Sighting Jurchen riders on the northern horizon…");
+    _s3SpawnJurchenPatrols();
 
     // 9. Player start — Black Sand Fort
     const startCity =
@@ -981,7 +1257,7 @@ window.initGame_story3 = async function () {
         player.y = WORLD_HEIGHT * 0.50;
     }
     player.faction  = "Ming Dynasty";
-    player.enemies  = ["Northern Yuan", "Bandits"];
+    player.enemies  = ["Jianzhou Jurchens", "Bandits"];
 
     // 10. Scenario shell
     if (!window.__activeScenario) window.__activeScenario = {};
@@ -1001,12 +1277,27 @@ window.initGame_story3 = async function () {
         console.error("[Story3] SongJinScenario.install not found.");
     }
 
-    // 12. (No gate to manage — the wall has no gates, only narrow patrol gaps
-    //     which are walkable from boot. We still expose a no-op shim so any
-    //     leftover story code calling s3SetGateOpen doesn't crash.)
-    window.s3SetGateOpen = function (_open) {
-        // No gates in this build — patrol gaps are always open.
-        console.log("[Story3] s3SetGateOpen(): no gates in this build (Ming frontier).");
+    // 12. THE GATE — closed at boot. Real open/close: flips _S3_GATE.open,
+    //     live-toggles collision on the gate's tiles, and lets the per-frame
+    //     _s3DrawGate() draw the correct door state on the very next frame.
+    //     Nothing in this build calls this yet — it's here for a future
+    //     "grant passage" trigger (out OR back in; guards work the gate the
+    //     same way either direction) to hook into. The gate also closes
+    //     itself automatically once the player is clear of the wall on
+    //     whichever side they end up on — see _s3UpdateGateAutoClose().
+    window.s3SetGateOpen = function (open) {
+        open = !!open;
+        if (_S3_GATE.open === open) return;
+        _S3_GATE.open = open;
+        _s3SetGateTiles(open);
+        console.log("[Story3] Frontier gate " + (open ? "OPENED — passage granted." : "CLOSED."));
+    };
+
+    // Narratively-named alias for a future "request passage back" trigger —
+    // guards open the gate the same way whether you're asking to leave or
+    // asking to be let back in.
+    window.s3RequestPassage = function () {
+        window.s3SetGateOpen(true);
     };
 
     // 13. Show UI
@@ -1027,5 +1318,5 @@ window.initGame_story3 = async function () {
         console.error("[Story3] draw() not found — ensure sandboxmode_overworld.js is loaded.");
     }
 
-    console.log("[Story3] ✅ Ming northern frontier initialised successfully.");
+    console.log("[Story3] ✅ Ming Liaodong frontier initialised successfully.");
 };

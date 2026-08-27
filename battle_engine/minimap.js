@@ -210,7 +210,7 @@
 
   function getWorldBounds() {
     const w = (typeof BATTLE_WORLD_WIDTH  !== 'undefined' && BATTLE_WORLD_WIDTH)  || 2400;
-    const h = (typeof BATTLE_WORLD_HEIGHT !== 'undefined' && BATTLE_WORLD_HEIGHT) || 1800;
+    const h = (typeof BATTLE_WORLD_HEIGHT !== 'undefined' && BATTLE_WORLD_HEIGHT) || 2400;
     return { w, h };
   }
 
@@ -444,7 +444,7 @@
     ctx.fillRect(0, 0, cssW, cssH);
 
     // World → minimap scale. Independent X/Y factors so the same compact box
-    // works whether the world is a 2400×1800 field or a 50000×32000 ocean.
+    // works whether the world is a 2400×2400 field or a 50000×32000 ocean.
     const bounds = getWorldBounds();
     const sx = cssW / bounds.w;
     const sy = cssH / bounds.h;

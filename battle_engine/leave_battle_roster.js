@@ -233,16 +233,36 @@ if (typeof inSiegeBattle !== 'undefined' && inSiegeBattle && side === "player") 
             finalX = spawnXCenter + Math.cos(angle) * dist + (Math.random() - 0.5) * 15;
             finalY = spawnY + Math.sin(angle) * dist + (Math.random() - 0.5) * 15;
         } else {
+            // SURGERY: direction-aware placement — see computeSpawnGeometry /
+            // pickBattleSpawnAssignment in battlefield_launch.js. acrossOffset
+            // replaces the old pure world-X spread; forwardOffset replaces the
+            // old pure world-Y depth (rankDir + tacticalOffset.y). tacticalOffset.y
+            // is normalized through oldForwardSign since getTacticalPosition was
+            // built assuming player forward=-Y, enemy forward=+Y.
             let tacticalOffset = getTacticalPosition(baseTemplate.role, side, safeType);
+            let acrossOffset;
             if (isFlank) {
                 let groupWidth = Math.min(deployedCounts[safeType], unitsPerRow) * spacingX;
-                let internalX = (col * spacingX) - (groupWidth / 2);
-                finalX = spawnXCenter + tacticalOffset.x + internalX;
+                acrossOffset = tacticalOffset.x + (col * spacingX) - (groupWidth / 2);
             } else {
-                finalX = spawnXCenter + currentLineXOffset + (col * spacingX);
+                acrossOffset = currentLineXOffset + (col * spacingX);
             }
-            let gridY = row * spacingY * rankDir;
-            finalY = spawnY + tacticalOffset.y + gridY;
+
+            // SURGERY: river battles now also consume battleSpawnAssignment
+            // (were explicitly excluded here before).
+            const geo = window.battleSpawnAssignment
+                ? window.battleSpawnAssignment[side] : null;
+
+            if (geo) {
+                const oldForwardSign = (side === "player") ? -1 : 1;
+                const forwardOffset = (tacticalOffset.y * oldForwardSign) - (row * spacingY);
+                finalX = geo.ax + geo.across.x * acrossOffset + geo.forward.x * forwardOffset;
+                finalY = geo.ay + geo.across.y * acrossOffset + geo.forward.y * forwardOffset;
+            } else {
+                let gridY = row * spacingY * rankDir;
+                finalX = spawnXCenter + acrossOffset;
+                finalY = spawnY + tacticalOffset.y + gridY;
+            }
             finalX += (Math.random() - 0.5) * 3;
             finalY += (Math.random() - 0.5) * 2;
         }
@@ -283,8 +303,15 @@ if (typeof inSiegeBattle !== 'undefined' && inSiegeBattle && side === "player") 
         }
 
         player.stats.health = player.hp > 0 ? player.hp : 100; 
-        let battleSpawnX = BATTLE_WORLD_WIDTH / 2;
-        let battleSpawnY = BATTLE_WORLD_HEIGHT - 200;
+        // SURGERY: spawn at the player's assigned anchor (was hardcoded to
+        // bottom-center) — pulled slightly forward (toward the fight) so the
+        // avatar lands among the troops rather than right on the map edge.
+        // SURGERY: river battles now also consume battleSpawnAssignment
+        // (were explicitly excluded here before).
+        const _pGeo = window.battleSpawnAssignment
+            ? window.battleSpawnAssignment.player : null;
+        let battleSpawnX = _pGeo ? (_pGeo.ax + _pGeo.forward.x * 200) : (BATTLE_WORLD_WIDTH / 2);
+        let battleSpawnY = _pGeo ? (_pGeo.ay + _pGeo.forward.y * 200) : (BATTLE_WORLD_HEIGHT - 200);
 
         let avatarObj = {
             id: "MAIN_PLAYER_AVATAR",
@@ -442,6 +469,19 @@ const originalLeaveBattlefield = leaveBattlefield;
 
 leaveBattlefield = function(playerObj) {
 
+    // --- SURVIVAL MODE GUARD ---
+    // This wrapper does campaign-only bookkeeping (roster rebuild, loot,
+    // permadeath odds) that must never run for a Survival wave. Survival
+    // Mode drives its own exit flow via window.leaveBattlefield, but a bare
+    // `leaveBattlefield(...)` call (this identifier) can bypass that
+    // override, so guard here too and hand off to Survival's own handler.
+    if (window.__IS_SURVIVAL_BATTLE__) {
+        if (typeof window.__survivalForcedExit === 'function') {
+            window.__survivalForcedExit();
+        }
+        return;
+    }
+
     // Always tear down the Lazy General AI heartbeat when leaving the battlefield.
     // (Idempotent — safe even if the custom-battle branch below also runs the
     // original leaveBattlefield, which stops it again via battlefield_logic.js.)
@@ -469,10 +509,12 @@ leaveBattlefield = function(playerObj) {
             // 1% Chance -> Miraculously saved by villager
             console.log("Miraculously saved by villagers!");
             
-            // Absolutely wipe the army
-            playerObj.roster = [];
+            // Absolutely wipe the army — but never below the floor of 1.
+            // (Was: roster = [], troops = 0, which is exactly the state
+            // this safeguard exists to make impossible.)
+            playerObj.roster = [{ type: "Militia", exp: 1 }];
             playerObj.reserveRoster = [];
-            playerObj.troops = 0;
+            playerObj.troops = 1;
             
             // Wipe the visual field troops so the post-battle UI registers a 100% loss
             if (typeof battleEnvironment !== 'undefined' && battleEnvironment.units) {
@@ -719,9 +761,13 @@ if (enemyRef) {
     // If the 1% Miracle wiped the army, or starvation/combat left them at 0,
     // force a fallback unit so the UI and Overworld do not crash.
     // ========================================================================
-    if (playerObj.troops <= 0) {
-        playerObj.troops = 1; 
-       
+    if (playerObj.troops < 1 || !playerObj.roster || playerObj.roster.length === 0) {
+        // FIX: previously only troops was set to 1 here, leaving roster at
+        // length 0 — a desync where anything reading roster.length directly
+        // (deployment code, getRosterTotal, cargo capacity math) would still
+        // see a wiped army even though troops reported 1.
+        playerObj.roster = (playerObj.roster && playerObj.roster.length > 0) ? playerObj.roster : [{ type: "Militia", exp: 1 }];
+        playerObj.troops = Math.max(1, playerObj.roster.length);
     }
 
     // --- SURGERY: STRICT < 2 PERMADEATH RULE ---

@@ -39,6 +39,13 @@
             navalEnvironment.waves = [];
             navalEnvironment.fishes = [];
             navalEnvironment.seagulls = [];
+            // FIX: mapSeed was never cleared, so generateNavalMap()'s
+            // `battleEnvironment.mapSeed ?? navalEnvironment.mapSeed ?? Date.now()`
+            // fallback chain kept reusing the FIRST battle's seed forever —
+            // every naval battle after the first got an identical coastline
+            // (coastSide, rock/reef/kelp placement, water shimmer pattern).
+            // Clearing it here forces a fresh Date.now()-derived seed next launch.
+            navalEnvironment.mapSeed = null;
         }
 
         unitIdCounter = 0;
@@ -83,7 +90,9 @@
 
         // === NAVAL BATTLEFIELD 10x LARGER ===
         // 50000×32000 = 1.6 billion sq units (≈10x the old 16000×10000 map)
-        // Ships start at 18% / 82% so there's a vast ocean to sail across.
+        // Ships now start at a randomized corner (see FIX 6 below /
+        // computeNavalSpawnGeometry in naval_battles.js) — still a vast
+        // ocean to sail across either way.
         BATTLE_WORLD_WIDTH = 50000;
         BATTLE_WORLD_HEIGHT = 32000;
         BATTLE_COLS = Math.floor(BATTLE_WORLD_WIDTH / (typeof BATTLE_TILE_SIZE !== 'undefined' ? BATTLE_TILE_SIZE : 8));
@@ -148,19 +157,28 @@
 
             // =====================================================================
             // FIX 6: DYNAMIC SHIP SPACING
-            // Recalculates X/Y coordinates after the GUI resize override to prevent
-            // the massive bounding boxes from overlapping in the center.
+            //
+            // FIX: this block used to recompute s0.x/s0.y/s1.x/s1.y from
+            // window.navalSpawnAssignment.ax/ay, with a centerX/south/north
+            // fallback if the assignment was missing. Two problems:
+            //
+            //  1) It was pure redundancy — generateShips() (called via
+            //     initNavalBattle at STEP 1, above) already set pShip.x/y and
+            //     eShip.x/y from that exact same assignment. Re-deriving here
+            //     added a second read of the same data for no benefit.
+            //  2) The fallback path computed centerX from BATTLE_WORLD_WIDTH
+            //     AFTER initNavalBattle had already run — and initNavalBattle
+            //     can be wrapped (see PB3 in optimization-battles.js) to
+            //     override BATTLE_WORLD_WIDTH/HEIGHT to a smaller platform-
+            //     fixed size before generateShips runs. So if the assignment
+            //     was ever missing, the fallback silently used a DIFFERENT,
+            //     un-shrunk world size than the one ships actually spawned
+            //     into, which could push the fallback position off-map or
+            //     into a corner that only ever resolved one way in practice.
+            //
+            // s0.x/s0.y/s1.x/s1.y already hold the correct randomized-corner
+            // position from generateShips — nothing left to do here.
             // =====================================================================
-            let centerX = BATTLE_WORLD_WIDTH / 2;
-            
-            // === EXTREME OPPOSITE ENDS ===
-            // Player at south 85%, enemy at north 15% of map height
-            // Margin from edge = 10% of ship height for safety
-            s0.x = centerX;
-            s0.y = BATTLE_WORLD_HEIGHT * 0.82;  // player near south edge
-            
-            s1.x = centerX;
-            s1.y = BATTLE_WORLD_HEIGHT * 0.18;  // enemy near north edge
         }
 
         // STEP 3: Clear lanes based on new (correct) ship geometry
@@ -348,7 +366,14 @@ player.maxHealth = pCmdr.maxHp;
             let visType  = "peasant";
             let roleStr  = String(template.role).toLowerCase();
             if (roleStr.includes("cavalry") || roleStr.includes("mounted")) {
-                visType = unitKey === "War Elephant" ? "elephant" : (unitKey.includes("Camel") ? "camel" : "cavalry");
+                // See custom_battle_gui.js's identical fix — now role-driven
+                // instead of keying off unitKey === "Camel Cannon", which
+                // broke once the roster key itself was renamed to "Cannon"
+                // (not just the .name display field). "mounted_gunner" is
+                // unique to the Cannon unit, so this is rename-proof.
+                visType = unitKey === "War Elephant" ? "elephant"
+                    : roleStr.includes("mounted_gunner") ? "camel_cannon"
+                    : (unitKey.includes("Camel") ? "camel" : "cavalry");
             } else if (roleStr.includes("horse archer")) visType = "horse_archer";
             else if (roleStr.includes("pike")  || unitKey.includes("Glaive")) visType = "spearman";
             else if (roleStr.includes("shield"))    visType = "sword_shield";

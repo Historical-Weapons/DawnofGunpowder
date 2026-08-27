@@ -890,3 +890,364 @@ _whenReady(() => {
 });
 
 })();
+
+
+
+// ============================================================================
+// SCENARIO EDITOR PATCH — Custom Locations
+// scenario_editor_patch_p2_customlocations.js
+//
+// Drop-in extension for the Scenario Editor that adds non-city military
+// locations (barracks, storage depots, stables, watchtowers, garrison posts,
+// maintenance yards) as their own placeable/movable/deletable entity type —
+// distinct from cities and from important NPCs.
+//
+// Persistence: `state.scenario.customLocations[]`, each entry:
+//   { id, xPct, yPct, kind, name, faction }
+// `kind` is one of window.CUSTOM_LOCATION_KINDS (see custom_locations_system.js)
+// when that script is loaded in-editor; otherwise falls back to a fixed list
+// so the editor still works standalone.
+//
+// At scenario boot, the runtime scenario loader should forEach() this array
+// and call window.registerCustomLocation({x,y,kind,name,faction}) — mirroring
+// how importantNpcs / playerSetup are consumed. See story3_map_and_update.js's
+// populateCities_story3() for a hand-authored example of the same call.
+//
+// LOAD ORDER in index.html (after scenario_editor.js AND scenario_tools_panel.js):
+//   <script src="story/scenario_editor.js"></script>
+//   <script src="story/scenario_tools_panel.js"></script>
+//   <script src="story/scenario_editor_patch_p2_customlocations.js"></script>   <!-- NEW -->
+//
+// ============================================================================
+
+(function () {
+"use strict";
+
+if (window.ScenarioEditorCustomLocations) {
+    console.log("[ScenarioEditorCustomLocations] already initialized — skipping.");
+    return;
+}
+window.ScenarioEditorCustomLocations = { VERSION: "1.0.0" };
+
+// Fallback kind list if custom_locations_system.js hasn't been loaded into
+// the editor page — keeps the editor usable on its own.
+const FALLBACK_KINDS = {
+    barracks:    { label: "Barracks" },
+    storage:     { label: "Storage Depot" },
+    stables:     { label: "Stables" },
+    watchtower:  { label: "Watchtower" },
+    garrison:    { label: "Garrison Post" },
+    maintenance: { label: "Maintenance Yard" },
+};
+function _kinds() { return window.CUSTOM_LOCATION_KINDS || FALLBACK_KINDS; }
+
+function _whenReady(cb) {
+    if (window.ScenarioEditor && window.ScenarioEditor._state) { cb(); return; }
+    let tries = 0;
+    const id = setInterval(() => {
+        if ((window.ScenarioEditor && window.ScenarioEditor._state) || ++tries > 200) {
+            clearInterval(id);
+            if (window.ScenarioEditor && window.ScenarioEditor._state) cb();
+            else console.warn("[ScenarioEditorCustomLocations] ScenarioEditor never appeared — aborting init.");
+        }
+    }, 100);
+}
+
+_whenReady(() => {
+    const state = window.ScenarioEditor._state;
+
+    function _ensureFields(s) {
+        if (!s) return;
+        if (!Array.isArray(s.customLocations)) s.customLocations = [];
+    }
+    function _esc(s) {
+        return String(s == null ? "" : s)
+            .replace(/&/g, "&amp;").replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+    }
+    function _findLocNear(xPct, yPct, threshold) {
+        const s = state.scenario; if (!s || !s.customLocations) return null;
+        threshold = threshold || 0.025;
+        let best = null, bestD = threshold * threshold;
+        s.customLocations.forEach(l => {
+            const dx = l.xPct - xPct, dy = l.yPct - yPct;
+            const d = dx * dx + dy * dy;
+            if (d < bestD) { bestD = d; best = l; }
+        });
+        return best;
+    }
+    function _genLocId(kind) {
+        return "cl_" + kind + "_" + Math.random().toString(36).slice(2, 8);
+    }
+
+    // ── 1) Inject toolbar buttons into the same Tools window used by
+    //       scenario_tools_panel.js ────────────────────────────────────────
+    function _injectToolButtons() {
+        const win = document.getElementById("se-win-tools");
+        if (!win) return false;
+        if (win.__customLocationsExtended) return true;
+        const body = win.querySelector(".se-window-body") || win;
+
+        const NEW_TOOLS = [
+            { key: "place_custom_location",  label: "🏚 Place Location",  hint: "LMB to place a non-city military location" },
+            { key: "move_custom_location",   label: "✥ Move Location",   hint: "LMB-drag to relocate" },
+            { key: "delete_custom_location", label: "✖ Delete Location", hint: "LMB on a location to remove" },
+        ];
+        const sep = document.createElement("div");
+        sep.style.cssText = "margin-top:8px;border-top:1px solid #4a8fa8;padding-top:6px;color:#f5d76e;font-size:11px;font-weight:bold;";
+        sep.textContent = "─ Custom Locations ─";
+        body.appendChild(sep);
+
+        NEW_TOOLS.forEach(t => {
+            const b = document.createElement("button");
+            b.dataset.tool = t.key;
+            b.title = t.hint;
+            b.textContent = t.label;
+            b.style.cssText = `
+                display:block;width:100%;text-align:left;
+                padding:5px 8px;margin:2px 0;
+                background:#1a3a5c;color:#cfd8dc;
+                border:1px solid #4a8fa8;cursor:pointer;font-size:12px;
+            `;
+            b.onclick = () => {
+                state.tool = t.key;
+                document.querySelectorAll("button[data-tool]").forEach(bb => {
+                    const sel = bb.dataset.tool === state.tool;
+                    bb.style.background = sel ? "#2a5a8c" : "#1a3a5c";
+                    bb.style.color      = sel ? "#ffffff" : "#cfd8dc";
+                });
+                const st = document.getElementById("se-st-tool");
+                if (st) st.textContent = t.key.toUpperCase();
+            };
+            body.appendChild(b);
+        });
+
+        win.__customLocationsExtended = true;
+        return true;
+    }
+    let injectTries = 0;
+    const injectInterval = setInterval(() => {
+        if (_injectToolButtons() || ++injectTries > 100) clearInterval(injectInterval);
+    }, 200);
+
+    // ── 2) Chain the canvas handlers. scenario_tools_panel.js may have
+    //       already wrapped state._onMouseDown/_onMouseMove/_onMouseUp — we
+    //       capture whatever is currently installed and call it for tools we
+    //       don't own, exactly like scenario_tools_panel.js itself does with
+    //       the original scenario_editor.js handlers. ─────────────────────
+    function _patchCanvasHandlers() {
+        const c = state.canvas;
+        if (!c) return false;
+        if (c.__customLocationsPatched) return true;
+
+        const _screenToTile = (sx, sy) => {
+            const wx = (sx / state.cam.zoom) + state.cam.x;
+            const wy = (sy / state.cam.zoom) + state.cam.y;
+            const TILE_PX = 4; // matches scenario_editor.js TILE_PX
+            return { i: Math.floor(wx / TILE_PX), j: Math.floor(wy / TILE_PX) };
+        };
+
+        const origDown = state._onMouseDown;
+        state._onMouseDown = function (e) {
+            e.preventDefault();
+            // Mirror the core editor's own bookkeeping (it does this
+            // unconditionally before dispatching on state.tool) so our tools
+            // interoperate correctly with anything else reading mouse state.
+            state.mouse.down = true;
+            state.mouse.button = e.button;
+
+            const rect = c.getBoundingClientRect();
+            const sx = e.clientX - rect.left, sy = e.clientY - rect.top;
+            const t = _screenToTile(sx, sy);
+            const X = state.scenario.dimensions.tilesX;
+            const Y = state.scenario.dimensions.tilesY;
+            if (t.i < 0 || t.j < 0 || t.i >= X || t.j >= Y) {
+                if (origDown) return origDown(e);
+                return;
+            }
+            const xPct = t.i / X, yPct = t.j / Y;
+            _ensureFields(state.scenario);
+
+            if (state.tool === "place_custom_location") {
+                if (e.button !== 0) return;
+                _openPlaceLocationModal(xPct, yPct);
+                return;
+            }
+            if (state.tool === "move_custom_location") {
+                if (e.button !== 0) return;
+                const loc = _findLocNear(xPct, yPct);
+                if (loc) { state._dragCustomLocation = loc; return; }
+                if (origDown) return origDown(e);
+                return;
+            }
+            if (state.tool === "delete_custom_location") {
+                if (e.button !== 0) return;
+                const loc = _findLocNear(xPct, yPct);
+                if (loc) {
+                    const kindLabel = (_kinds()[loc.kind] && _kinds()[loc.kind].label) || loc.kind;
+                    if (confirm(`Delete "${loc.name}" (${kindLabel})?`)) {
+                        const idx = state.scenario.customLocations.indexOf(loc);
+                        if (idx >= 0) state.scenario.customLocations.splice(idx, 1);
+                    }
+                    return;
+                }
+                if (origDown) return origDown(e);
+                return;
+            }
+
+            if (origDown) origDown(e);
+        };
+        c.removeEventListener("mousedown", origDown);
+        c.addEventListener("mousedown", state._onMouseDown);
+
+        const origMove = state._onMouseMove;
+        state._onMouseMove = function (e) {
+            const rect = c.getBoundingClientRect();
+            const sx = e.clientX - rect.left, sy = e.clientY - rect.top;
+            const t = _screenToTile(sx, sy);
+            const X = state.scenario.dimensions.tilesX;
+            const Y = state.scenario.dimensions.tilesY;
+
+            if (state.mouse.down && state.tool === "move_custom_location" && state._dragCustomLocation) {
+                state._dragCustomLocation.xPct = Math.max(0.01, Math.min(0.99, t.i / X));
+                state._dragCustomLocation.yPct = Math.max(0.01, Math.min(0.99, t.j / Y));
+                return;
+            }
+            if (origMove) origMove(e);
+        };
+        c.removeEventListener("mousemove", origMove);
+        c.addEventListener("mousemove", state._onMouseMove);
+
+        const origUp = state._onMouseUp;
+        state._onMouseUp = function (e) {
+            state._dragCustomLocation = null;
+            if (origUp) origUp(e);
+        };
+        c.removeEventListener("mouseup", origUp);
+        c.addEventListener("mouseup", state._onMouseUp);
+
+        c.__customLocationsPatched = true;
+        return true;
+    }
+    let patchTries = 0;
+    const patchInterval = setInterval(() => {
+        if (_patchCanvasHandlers() || ++patchTries > 200) clearInterval(patchInterval);
+    }, 200);
+
+    // ── 3) Placement modal — pick kind, name, faction ───────────────────────
+    function _openPlaceLocationModal(xPct, yPct) {
+        _ensureFields(state.scenario);
+        const facList = Object.keys(state.scenario.factions || {});
+        const facOpts = facList.map(n => `<option value="${_esc(n)}">${_esc(n)}</option>`).join("");
+        const kindOpts = Object.keys(_kinds())
+            .map(k => `<option value="${_esc(k)}">${_esc(_kinds()[k].label)}</option>`)
+            .join("");
+
+        const id = "modal-place-custom-location";
+        const existing = document.getElementById(id);
+        if (existing) existing.remove();
+
+        const wrap = document.createElement("div");
+        wrap.id = id;
+        wrap.style.cssText = `
+            position:fixed;inset:0;z-index:30000;
+            background:rgba(0,0,0,0.7);
+            display:flex;align-items:center;justify-content:center;
+            font-family:Tahoma,Verdana,sans-serif;
+        `;
+        wrap.innerHTML = `
+            <div style="background:#1a1f2a;border:2px solid #4a8fa8;border-radius:6px;
+                        max-width:420px;width:92vw;color:#cfd8dc;padding:0;">
+                <div style="padding:10px 14px;background:linear-gradient(to bottom,#3a5475,#1e2d40);
+                            border-bottom:1px solid #4a6680;display:flex;justify-content:space-between;align-items:center;">
+                    <strong style="color:#f5d76e;">Place Location at (${(xPct * 100).toFixed(1)}%, ${(yPct * 100).toFixed(1)}%)</strong>
+                    <button id="pl-close" style="background:#4a1515;color:#ffcccc;border:none;padding:3px 9px;cursor:pointer;font-weight:bold;">✕</button>
+                </div>
+                <div style="padding:14px;display:grid;grid-template-columns:max-content 1fr;gap:8px 12px;align-items:center;font-size:13px;">
+                    <label>Kind</label>
+                    <select id="pl-kind" style="background:#0e1218;color:#cfd8dc;border:1px solid #4a8fa8;padding:4px 6px;">${kindOpts}</select>
+                    <label>Display name</label>
+                    <input id="pl-name" type="text" placeholder="e.g. Powder Magazine" style="background:#0e1218;color:#cfd8dc;border:1px solid #4a8fa8;padding:4px 6px;">
+                    <label>Faction</label>
+                    <select id="pl-fac" style="background:#0e1218;color:#cfd8dc;border:1px solid #4a8fa8;padding:4px 6px;">${facOpts}</select>
+                </div>
+                <div style="padding:10px 14px;background:#141821;border-top:1px solid #4a6680;text-align:right;">
+                    <button id="pl-cancel" style="padding:5px 12px;background:#3a3a3a;color:#cfd8dc;border:none;cursor:pointer;margin-right:6px;">Cancel</button>
+                    <button id="pl-save" style="padding:5px 14px;background:#1565c0;color:#fff;border:none;cursor:pointer;font-weight:bold;">Place</button>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(wrap);
+
+        const close = () => wrap.remove();
+        document.getElementById("pl-close").onclick   = close;
+        document.getElementById("pl-cancel").onclick  = close;
+        document.getElementById("pl-save").onclick = () => {
+            const kind = document.getElementById("pl-kind").value;
+            const nameInput = document.getElementById("pl-name").value.trim();
+            const faction = document.getElementById("pl-fac").value;
+            const kindLabel = (_kinds()[kind] && _kinds()[kind].label) || kind;
+            const loc = {
+                id:      _genLocId(kind),
+                xPct, yPct,
+                kind,
+                name:    nameInput || kindLabel,
+                faction: faction || facList[0] || "Player",
+            };
+            state.scenario.customLocations.push(loc);
+            close();
+        };
+    }
+
+    // ── 4) Render hook — draw location markers on the editor canvas. Chains
+    //       onto whatever _postDrawHook is already registered (e.g. from
+    //       scenario_tools_panel.js's NPC/Player overlay) rather than
+    //       replacing it, so both sets of markers render together. ────────
+    function _drawLocationsInTransform(ctx, cam) {
+        if (!state || !state.scenario) return;
+        const X = state.scenario.dimensions.tilesX;
+        const Y = state.scenario.dimensions.tilesY;
+        if (!X || !Y) return;
+        const TILE_PX = 4;
+
+        (state.scenario.customLocations || []).forEach(l => {
+            if (typeof l.xPct !== "number") return;
+            const px = l.xPct * X * TILE_PX;
+            const py = l.yPct * Y * TILE_PX;
+            const fcol = (state.scenario.factions[l.faction] && state.scenario.factions[l.faction].color) || "#888";
+            const r = 2.8 / Math.max(0.5, cam.zoom * 0.5);
+
+            // Square marker — distinct from the city hexagon and NPC diamond
+            ctx.fillStyle = fcol;
+            ctx.strokeStyle = (l === state.selectedCustomLocation) ? "#ffeb3b" : "#000";
+            ctx.lineWidth = 1 / cam.zoom;
+            ctx.beginPath();
+            ctx.rect(px - r, py - r, r * 2, r * 2);
+            ctx.fill();
+            ctx.stroke();
+
+            if (cam.zoom > 0.6) {
+                const kindLabel = (_kinds()[l.kind] && _kinds()[l.kind].label) || l.kind;
+                ctx.fillStyle   = "#fff";
+                ctx.strokeStyle = "#000";
+                ctx.lineWidth   = 1.5 / cam.zoom;
+                ctx.font        = `${Math.max(7, 9 / cam.zoom)}px Tahoma`;
+                ctx.textAlign   = "center";
+                const lbl = "🏚 " + (l.name || kindLabel);
+                ctx.strokeText(lbl, px, py - r - 2);
+                ctx.fillText(lbl,   px, py - r - 2);
+            }
+        });
+    }
+    // Chain onto any existing hook (e.g. scenario_tools_panel.js's NPC/Player
+    // overlay) instead of overwriting it.
+    const _prevPostDrawHook = state._postDrawHook;
+    state._postDrawHook = function (ctx, cam) {
+        if (typeof _prevPostDrawHook === "function") _prevPostDrawHook(ctx, cam);
+        _drawLocationsInTransform(ctx, cam);
+    };
+
+    console.log("[ScenarioEditorCustomLocations] Ready — custom location tools installed.");
+});
+
+})(); // end IIFE

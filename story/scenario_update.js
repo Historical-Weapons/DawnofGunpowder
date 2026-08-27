@@ -1,4 +1,17 @@
 // =============================================================================
+// SESSION CHANGELOG (for fusion with the other diverging Story 3 session)
+// =============================================================================
+//   - Fixed a false-positive Story 2 detection: "Xiaran Dominion" was treated
+//     as a Story-2 fingerprint faction in 3 places (_maybeBootStory2Campaign,
+//     the in-place check, and the launch-routing check), but it is also one
+//     of the scenario editor's own DEFAULT_FACTIONS — enabled on every
+//     brand-new custom scenario. Any custom map made in the editor was
+//     getting silently hijacked into Story 2's terrain on load. Detection is
+//     now meta.campaignScript/meta.importedFrom ONLY. Engine fix, not
+//     narrative — safe regardless of which Story 3 continuation wins.
+// =============================================================================
+
+// =============================================================================
 // SCENARIO RUNTIME — scenario_update.js  (v4.0 — cooperative hook edition)
 // =============================================================================
 // Provides the bridge that takes a scenario document (from the editor or a
@@ -202,17 +215,18 @@ function _maybeBootStory2Campaign(scenarioDoc) {
     const _campaignModule = window.MongolConquestScenario || window.SuzhouScenario;
     if (!_campaignModule || typeof _campaignModule.install !== 'function') return;
 
-    // Detect Story 2 by meta tag OR by the presence of the "Xiaran Dominion"
-    // faction (unique to Story 2). importedFrom is set by senario_devmade_import.js
-    // on the exported JSON; campaignScript is set manually in Story_2_Dev.js.
-    // Both must be checked for symmetry with Story 1's _maybeBootStory1Campaign.
+    // Detect Story 2 by meta tag ONLY. "Xiaran Dominion" used to be treated
+    // as a Story-2 fingerprint faction, but it is one of the editor's own
+    // DEFAULT_FACTIONS (enabled:true on every brand-new custom scenario), so
+    // that check false-positived on ANY custom map made in the scenario
+    // editor — routing it into the Story 2 campaign script instead of the
+    // player's own content. importedFrom is set by senario_devmade_import.js
+    // only on scenarios explicitly captured via "Import Story 2"; campaignScript
+    // is set manually in Story_2_Dev.js. Both are reliable, explicit tags.
     const _meta2     = scenarioDoc.meta || {};
-    const _fac2      = scenarioDoc.factions || {};
-    const _facNames2 = Array.isArray(_fac2) ? _fac2 : Object.keys(_fac2);
     const _isMeta2   = _meta2.campaignScript === 'story2';
     const _isImported2 = _meta2.importedFrom === 'story2';
-    const _isXiaran  = _facNames2.includes('Xiaran Dominion');
-    if (!_isMeta2 && !_isImported2 && !_isXiaran) return;
+    if (!_isMeta2 && !_isImported2) return;
 
     if (window.__campaignStory2Active) {
         // Already booted (e.g. initGame_story2 ran this session) — skip.
@@ -306,13 +320,17 @@ function launch(scenarioDoc) {
             const _inPlaceDoc  = rt.pending;
             const _inPlaceMeta = (_inPlaceDoc && _inPlaceDoc.meta)     || {};
             const _inPlaceFacs = Object.keys((_inPlaceDoc && _inPlaceDoc.factions) || {});
+            // NOTE: Kamakura Shogunate is safe as a fingerprint faction (it's
+            // not one of the editor's DEFAULT_FACTIONS). "Xiaran Dominion" is
+            // NOT safe — it IS a default faction enabled on every brand-new
+            // custom scenario — so Story 2 detection here is meta-tag only
+            // (see _maybeBootStory2Campaign for the full explanation).
             const _inPlaceIsStory =
                 _inPlaceMeta.campaignScript === 'story1' ||
                 _inPlaceMeta.importedFrom   === 'story1' ||
                 _inPlaceFacs.includes('Kamakura Shogunate') ||
                 _inPlaceMeta.campaignScript === 'story2' ||
-                _inPlaceMeta.importedFrom   === 'story2' ||
-                _inPlaceFacs.includes('Xiaran Dominion');
+                _inPlaceMeta.importedFrom   === 'story2';
 
             if (_inPlaceIsStory) {
                 // Let the story routing block below handle it with a fresh initGame_storyN call.
@@ -363,11 +381,15 @@ function launch(scenarioDoc) {
         const _lPendingMeta = (_lPendingDoc && _lPendingDoc.meta)     || {};
         const _lPendingFacs = Object.keys((_lPendingDoc && _lPendingDoc.factions) || {});
 
+        // NOTE: "Xiaran Dominion" (and the stray "Xia" check) used to count
+        // as a Story 2 fingerprint here, but it's one of the editor's own
+        // DEFAULT_FACTIONS — enabled on every brand-new custom scenario — so
+        // that heuristic false-positived on ordinary custom maps and silently
+        // replaced them with the Hexi Corridor terrain on launch. Detection
+        // is meta-tag only now (see _maybeBootStory2Campaign above).
         const _lIsStory2 =
             _lPendingMeta.campaignScript === 'story2' ||
-            _lPendingMeta.importedFrom   === 'story2' ||
-            _lPendingFacs.includes('Xiaran Dominion')||
-            _lPendingFacs.includes('Xia');
+            _lPendingMeta.importedFrom   === 'story2';
 
         const _lIsStory1 =
             _lPendingMeta.campaignScript === 'story1' ||

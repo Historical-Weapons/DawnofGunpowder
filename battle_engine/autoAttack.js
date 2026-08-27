@@ -124,7 +124,53 @@
         const env0 = _env();
         if (env0 && env0.units) {
           env0.units.forEach(u => {
-            if (u.side === 'player') { u.selected = false; u._lazyManual = false; u.disableAICombat = false; }
+            // FIX ("horse legs dancing on the General, only when auto-attack is
+            // pressed"): this used to be `u.side === 'player'` with no isCommander
+            // exclusion, unlike literally every other disableAICombat freeze/
+            // unfreeze pass in this codebase (siegebattle.js's own freeze loop,
+            // the SURGERY 1 pattern, etc. all guard with `!u.isCommander`).
+            // The commander spawns with disableAICombat: true (customsiegebattle.js
+            // / siegebattle.js's spawnSiegeCommander) specifically so
+            // ai_categories.js's processTargeting/processAction treat it as
+            // player-driven and leave it alone — sandboxmode_update.js's own
+            // per-frame block is the ONE system meant to own pCmdr.target/state/
+            // velocity, syncing them straight from WASD input and pCmdr.vx=vy=0
+            // every frame. Clearing disableAICombat here un-suppressed BOTH of
+            // processTargeting's own guards (its "SURGERY 1" bail-out, and
+            // processAction's "SURGERY 2: COMBAT/ACTION HARD BLOCK") for the
+            // commander specifically, which let the full generic AI pipeline
+            // start running on the exact same unit object every frame too —
+            // acquiring its own live enemy target, driving its own state
+            // ("attacking"/"moving"/"idle") and, for a horse-archer-type unit
+            // like the General (isRangedCav), deliberately keeping vx/vy nonzero
+            // to kite (see the isRangedCav exception in _handleCombatExecution).
+            // Two independent systems fighting over state/target/velocity on the
+            // same object every single frame is exactly what reads as "dancing"
+            // — and why it only ever showed up once auto-attack was pressed:
+            // without it, disableAICombat stayed true and only
+            // sandboxmode_update.js ever touched the commander at all.
+            // FIX ("shield/hold units barely move once auto-attack is
+            // pressed"): this used to blindly clear _lazyManual for every
+            // player unit, which silently re-admitted anything ALREADY
+            // running its own dedicated tactic (Shield/Hold/Skirm/Charge —
+            // see RTSControls.js's setAiTactic) into getLivePlayers() on
+            // the very next tick. That handed the same unit to two
+            // competing controllers at once — this shared engine's own
+            // lazyOrderMove/lazyOrderHold/etc. AND the tactic's own
+            // formation/shield-tick logic, each re-issuing orders over the
+            // other every tick, which read as "barely moves." 🤖 is only
+            // meant to claim whole-army/untagged units and Adapt (which
+            // explicitly opts into this engine — see ensureAdaptRunning's
+            // own comment flagging this exact fireAuto scoping problem);
+            // any unit with an independent tactic tag must be left
+            // completely alone here, the same way a player's own
+            // selection/manual order already exempts a unit elsewhere.
+            if (u.side === 'player' && !u.isCommander) {
+              const hasOwnTactic = u.aiTacticGroup && u.aiTacticGroup !== 'auto';
+              if (!hasOwnTactic) {
+                u.selected = false; u._lazyManual = false; u.disableAICombat = false;
+              }
+            }
           });
         }
       }
@@ -156,10 +202,30 @@
         const pu = env.units.filter(u => u.side === 'player');
         restoreSpeeds(pu);
         pu.forEach(u => {
+          // REVISED per direct request ("the red dot toggle of autoattack
+          // should disable all units AI"): this previously exempted any
+          // unit running its own brain-emoji tactic (Shield/Hold/Skirm/
+          // Charge), so 🛑 only killed the shared lazy-auto engine, not
+          // those — see the old comment this replaced for the reasoning
+          // at the time. That's now explicitly reversed: 🛑 is a TRUE
+          // global stop, including tactic-tagged units. Clearing the tag
+          // (not just setting orderType) is what actually silences each
+          // tactic's own dedicated per-frame logic (Shield's tick
+          // interval, HOLD's lock-in, Skirm's kiting/poke-and-run) — they
+          // key off aiTacticGroup every tick, so once it's gone they have
+          // nothing left to act on for this unit.
+          u.aiTacticGroup = undefined;
+          u.aiTacticNumber = undefined;
           // _lazyManual = true here is what makes this the true GLOBAL stop:
           // it excludes every unit from getLivePlayers() above AND from
           // Lazy General AI's getLazyControlledUnits() in
           // battlefield_commands.js, so nothing keeps moving them.
+          // hold_position itself still isn't "do nothing at all" — its own
+          // dedicated aggro logic (battlefield_commands.js/ai_categories.js,
+          // 70px melee / full weapon range ranged, fight-only-if-already-
+          // in-range) is the intentional self-preservation floor: a
+          // disabled unit still defends itself if something walks up to
+          // it, it just never chases.
           u.selected = false; u.hasOrders = true; u._lazyManual = true;
           u.orderType = 'hold_position'; u.vx = 0; u.vy = 0;
           u.orderTargetPoint = _safe(u.x, u.y);
@@ -200,18 +266,50 @@
       // Intentionally does nothing to global state anymore — see comment above.
     };
 
+    // FIX ("Adapt-tagged unit still charges / does nothing"): RTSControls.js's
+    // Cmd.setAiTactic('auto') has always called
+    // W.MC3TacticalAI.ensureAdaptRunning() to start the shared tactical
+    // engine on demand for a unit tagged ADAPT, guarded with
+    // `typeof === 'function'` — but this function never actually existed on
+    // the namespace, so the call silently no-op'd. An Adapt-tagged unit got
+    // `_lazyManual = false` (correctly re-admitting it to getLivePlayers())
+    // but nothing was actually running triggerTacticalAssault()'s interval
+    // loop unless the player had separately already pressed 🤖, so the unit
+    // just kept whatever orderType it last had (often still 'seek_engage'
+    // from a prior Charge tag, which is exactly why it looked like Adapt was
+    // "still charging").
+    //
+    // Deliberately NOT just calling fireAuto(): fireAuto() is whole-army
+    // scoped — it force-deselects and clears _lazyManual on every player
+    // unit (see its own comment above), which would silently wipe out any
+    // other unit's independent Hold/Charge/Skirm tag or current selection
+    // the instant a single unit was tagged Adapt. All this needs to do is
+    // make sure the interval loop is actually alive; getLivePlayers()'s
+    // per-unit _lazyManual filter (already correct) handles which units the
+    // now-running loop actually drives.
+    const ensureAdaptRunning = () => {
+      if (autoRunning) return; // engine already live — nothing to do
+      autoRunning  = true;
+      isManualMode = false;
+      if (autoBtn) autoBtn.style.pointerEvents  = 'none';
+      if (manualBtn) {
+        manualBtn.style.pointerEvents = 'auto';
+        manualBtn.style.opacity       = '1';
+      }
+      triggerTacticalAssault();
+    };
+
     // Small public surface so other files (RTSControls.js Cmd.*, and the
     // desktop keydown handler in battlefield_commands.js) can trigger the
     // revert without reaching into this IIFE's closed-over state.
     W.MC3TacticalAI = W.MC3TacticalAI || {};
     W.MC3TacticalAI.isAutoRunning = () => autoRunning;
     W.MC3TacticalAI.revertToManualOnCommand = revertToManualOnCommand;
-    // Lets a siege-start choke point (see siegebattle.js) simulate a real press
-    // of the 🤖/🏯 button after a short randomized delay, instead of duplicating
-    // fireAuto's setup (clearing selection/_lazyManual, flipping button state,
-    // calling triggerTacticalAssault). Passing no event is safe — fireAuto only
-    // touches ev when one is provided.
-    W.MC3TacticalAI.triggerAutoPress = () => { if (!autoRunning) fireAuto(null); };
+    W.MC3TacticalAI.ensureAdaptRunning = ensureAdaptRunning;
+    // REMOVED: auto-attack no longer self-triggers. The player must
+    // physically press the 🤖 button — nothing (including any siege-start
+    // choke point) may simulate that press on their behalf anymore.
+    W.MC3TacticalAI.triggerAutoPress = () => {};
 
     autoBtn.addEventListener('touchstart',   fireAuto,     { passive: false });
     autoBtn.addEventListener('pointerdown',  fireAuto);
@@ -304,15 +402,6 @@ function _safe(x, y, margin = 50) {
         u.stats.speed = u.origSmartSpeed;
         delete u.origSmartSpeed;
       }
-      // SURGERY: battlefield_commands.js's lazyBackupSpeed/lazySetSpeedScale
-      // use a differently-named backup (_lazyOrigSpeed), so a unit whose
-      // speed was scaled through that system wasn't being reverted by this
-      // global kill-switch path at all. Cross-check both so neither system
-      // can leave a unit permanently stuck at a scaled speed.
-      if (u._lazyOrigSpeed !== undefined && u.stats) {
-        u.stats.speed = u._lazyOrigSpeed;
-        delete u._lazyOrigSpeed;
-      }
     });
   }
 
@@ -387,7 +476,9 @@ function _safe(x, y, margin = 50) {
     if (speed && unit.stats) unit.stats.speed = Math.min(unit.stats.speed, speed);
     unit.hasOrders       = true;
     unit.orderType       = 'move_to_point';
-    unit.selected        = true;
+    // REMOVED: unit.selected = true — auto-attack drives units via
+    // hasOrders/orderType/orderTargetPoint alone. Selection reflects the
+    // player's own choice and must never be set by the AI.
     unit.reactionDelay   = Math.floor(Math.random() * 8);
     unit.formationTimer  = 200;
     unit.orderTargetPoint = _safe(wx, wy);
@@ -580,7 +671,6 @@ function _safe(x, y, margin = 50) {
       const oy = u.formationOffsetY || 0;
       u.hasOrders        = true;
       u.orderType        = 'move_to_point';
-      u.selected         = true;
       u.reactionDelay    = 0;
       u.orderTargetPoint = _safe(advX + ox, advY + oy);
     });
@@ -603,14 +693,14 @@ function _safe(x, y, margin = 50) {
     b.cavalry.forEach((u, i) => {
       const angle = (i / Math.max(1, b.cavalry.length)) * Math.PI * 2;
       u.hasOrders = true; u.orderType = 'move_to_point';
-      u.selected = true; u.reactionDelay = 0;
+      u.reactionDelay = 0;
       u.orderTargetPoint = _safe(gx + Math.cos(angle) * 80, gy + Math.sin(angle) * 80);
     });
 
     b.ranged.forEach((u, i) => {
       const angle = (i / Math.max(1, b.ranged.length)) * Math.PI * 2;
       u.hasOrders = true; u.orderType = 'move_to_point';
-      u.selected = true; u.reactionDelay = 0;
+      u.reactionDelay = 0;
       u.orderTargetPoint = _safe(gx + Math.cos(angle) * 130, gy + Math.sin(angle) * 130);
     });
 
@@ -707,24 +797,63 @@ function _safe(x, y, margin = 50) {
     // One-time guard for the fanatic/sniper role assignment below — this
     // runs on every runAssignment() tick (light interval), but the roll
     // should only happen once per siege, not re-roll every re-check.
-    let fanaticSniperRolesAssigned = false;
+    // BUGFIX ("units revert to counter_battery and get stuck vibrating at
+    // the breached gate long after they'd already crossed"): this used to
+    // be a plain local `let`, scoped to _runSiege() itself. Toggling the
+    // manual killswitch and pressing auto-attack again mid-siege calls
+    // fireAuto() -> triggerTacticalAssault() -> _runSiege() FRESH, creating
+    // a brand-new `false` here and letting the roll below fire a second
+    // time. Its candidate pool (rangedTroops, below) has no exclusion for
+    // units already siegeRole "assault_complete" — i.e. units that already
+    // breached the gate and are mid-seek_engage fighting inside the city.
+    // Any of those unlucky enough to get re-picked had their role silently
+    // overwritten back to "counter_battery", which hands their targeting
+    // to ai_categories.js's counter-battery snipe override and drops them
+    // out of both of siegeEngineLogic.js's post-breach wall-clamp
+    // exemptions (neither "assault_complete"/ladder nor the isGateBreached
+    // x-window still applies once siegeRole changes and the unit's target
+    // jumps elsewhere) — stranding them right where the clamp's crude
+    // 1.8px/tick fallback nudge happened to leave them. Hanging the flag
+    // off battleEnvironment instead survives the manual/auto toggle, and
+    // still resets cleanly on a genuinely NEW siege since battleEnvironment
+    // itself gets rebuilt then.
+    if (battleEnvironment.__fanaticSniperRolesAssigned === undefined) {
+        battleEnvironment.__fanaticSniperRolesAssigned = false;
+    }
+
+    const SIEGE_AUTO_PACE_SCALE = 1.3; // +30% pace for units under siege auto-attack control
 
     const runAssignment = () => {
       let pUnits = getLivePlayers();
       if (!pUnits.length) return;
 
-      // SURGERY: +30% pace for units under active siege auto-attack control.
-      // Reuses lazySetSpeedScale (battlefield_commands.js) rather than a new
-      // ad-hoc multiplier — it already backs up/restores correctly, and both
-      // revert paths (this file's global kill-switch, and
-      // lazyTakeManualControl on manual selection) now check both backup
-      // systems, so a unit can't get stuck boosted no matter which path the
-      // player exits through. Idempotent: re-running this on an
-      // already-boosted unit is a no-op beyond re-asserting 1.3x, so it's
-      // safe to call on every light-interval tick, not just once.
-      if (typeof lazySetSpeedScale === 'function') {
-        pUnits.forEach(u => lazySetSpeedScale(u, 1.3));
-      }
+      // SURGERY: +30% pace for auto-attack siege units. Same origSmartSpeed
+      // backup/restore idiom used elsewhere in this file (see restoreSpeeds
+      // above and its call in _stopAI below) — idempotent, so re-running this
+      // every tick on units already at the boosted speed is harmless, and
+      // _stopAI's existing restoreSpeeds(getLivePlayers()) call reverts it
+      // automatically the moment the player hits the manual killswitch or
+      // the siege AI otherwise stops. No new cleanup path needed there.
+      pUnits.forEach(u => {
+        if (!u.stats) return;
+        if (u.origSmartSpeed === undefined) u.origSmartSpeed = u.stats.speed;
+        u.stats.speed = u.origSmartSpeed * SIEGE_AUTO_PACE_SCALE;
+      });
+
+      // Straggler cleanup: a unit the player just peeled into manual control
+      // (_lazyManual) drops out of getLivePlayers() on the very next call,
+      // so the boost above would simply stop being re-applied to it rather
+      // than being reverted — it'd keep the +30% speed indefinitely under
+      // manual control. Sweep the full unit list (not just pUnits) each tick
+      // so anyone who dropped out of the live set gets restored to normal
+      // pace within one interval tick (~1.5s).
+      env.units.forEach(u => {
+        if (u.side === 'player' && (u._lazyManual || u.hp <= 0) &&
+            u.origSmartSpeed !== undefined && u.stats) {
+          u.stats.speed = u.origSmartSpeed;
+          delete u.origSmartSpeed;
+        }
+      });
 
       // Only hand units to executeSiegeAssaultAI if they don't already have a
       // live siege assignment — this is what keeps the interval from fighting
@@ -732,11 +861,82 @@ function _safe(x, y, margin = 50) {
       //   - it has no siege_assault order yet (fresh unit / first press), or
       //   - its assigned ram/ladder/trebuchet has died (siegeTarget.hp <= 0), or
       //   - it's a ram_pusher/ladder_carrier stuck with no siegeTarget at all.
+      //
+      // BUGFIX ("ladder units retreat south with no animation"): a unit that
+      // just climbed a ladder exits ai_categories.js's climb/settle pipeline
+      // with orderType flipped to "seek_engage" (see _handleMovement's
+      // SETTLE PHASE) so processTacticalOrders' own seek_engage handler can
+      // take over targeting. But orderType is no longer "siege_assault" at
+      // that point, so the check below (`u.orderType !== 'siege_assault'`)
+      // treated it as a fresh, unassigned unit and swept it straight back
+      // into executeSiegeAssaultAI on the very next 1.5s tick. That function
+      // has no concept of a unit already being on the wall — it categorizes
+      // by role and can hand a ram_pusher/ladder_carrier assignment pointing
+      // back at a ram or a ladder base to a unit that had already fought its
+      // way past all of that. The resulting orderType/siegeTarget mutation
+      // is a plain data write with no transition, which is exactly the
+      // "floating south, no walking animation" symptom. A unit that is
+      // isClimbing, settling (the post-climb drift phase), or already onWall
+      // has already done its ladder/ram job and should never be handed back
+      // for re-categorization — exclude all three from needsAssignment
+      // outright. (RESERVES REMOVED — see battlefield_commands.js's
+      // executeSiegeAssaultAI: there is no more cavalry_reserve/camp role for
+      // units to get swept into anymore; every unit is ranged shooter, ram
+      // pusher, or ladder crew, permanently.)
+      // BUGFIX: ladder_fanatic and counter_battery units (assigned once,
+      // below, via their own one-time roll) use orderType "ladder_crew", not
+      // "siege_assault" — so without this exclusion they matched the
+      // `u.orderType !== 'siege_assault'` check above and got swept into
+      // executeSiegeAssaultAI on literally the very next 1.5s tick, which
+      // overwrote their siegeRole/orderType mid-task (often mid-drag, before
+      // the ladder they were hauling ever reached the wall). Both roles are
+      // fully self-managing: siegeEngineLogic.js's ladder-drag block already
+      // reverts a ladder_fanatic back to siegeRole "normal" / orderType
+      // "siege_assault" the instant all ladders are deployed, at which point
+      // it naturally re-enters needsAssignment and gets a normal assignment
+      // from executeSiegeAssaultAI like anyone else. counter_battery is a
+      // standing role with no equivalent revert-trigger needed here.
+      // GATE VERSION OF THE SAME BUG: a unit tagged siegeRole
+      // "assault_complete" already made it through the breached gate and
+      // was handed off to orderType "seek_engage" by processTacticalOrders
+      // (battlefield_commands.js) — it's fighting inside the city now, same
+      // as a unit that just finished a ladder climb. Without this
+      // exclusion, this filter saw its orderType was no longer
+      // 'siege_assault' (line below) and swept it straight back into
+      // executeSiegeAssaultAI on the very next 1.5s tick, which handed it a
+      // fresh ram_pusher/ladder_carrier assignment pointing back at the
+      // ram/ladder near the gate — silently undoing the handoff. Every unit
+      // that made it through got yanked back within moments of arriving,
+      // which is why successful attackers never accumulated on the city
+      // side and instead kept piling up right back at the gate mouth.
       const needsAssignment = pUnits.filter(u => {
+        if (u.onWall || u.isClimbing || u.settling) return false;
+        if (u.siegeRole === 'ladder_fanatic' || u.siegeRole === 'counter_battery' ||
+            u.siegeRole === 'assault_complete' ||
+            u.orderType === 'ladder_crew') return false;
         if (u.orderType !== 'siege_assault') return true;
         if ((u.siegeRole === 'ram_pusher' || u.siegeRole === 'ladder_carrier' ||
              u.siegeRole === 'trebuchet_crew') &&
             (!u.siegeTarget || u.siegeTarget.hp <= 0)) return true;
+        // BUGFIX ("a small number of units — usually ranged/gunpowder —
+        // linger permanently as an unassigned reserve, flickering left-
+        // right in tiny steps and never touching a ladder or ram"):
+        // executeSiegeAssaultAI's "no rams/ladders exist yet" fallback
+        // (very start of the battle, before equipment has spawned) leaves
+        // a unit with orderType 'siege_assault' but siegeRole explicitly
+        // null, on the assumption that THIS filter would naturally re-sweep
+        // it the moment real equipment became available. It never did:
+        // with siegeRole null, the check above (named roles only) is
+        // false, and orderType is already 'siege_assault', so every
+        // condition here fell through to `return false` — permanently.
+        // Whichever units happened to be evaluated in that exact first
+        // tick (before rams/ladders existed) were locked out of ever
+        // getting a real assignment for the rest of the battle, landing
+        // in processTacticalOrders' siege_assault `default` case forever,
+        // which — separately — re-rolls a random +/-20px target every
+        // single tick with no caching, producing the reported flicker.
+        // Fix: also re-sweep any unit with no siegeRole at all.
+        if (!u.siegeRole) return true;
         return false;
       });
 
@@ -755,9 +955,20 @@ function _safe(x, y, margin = 50) {
       // start. Moved here so it only happens the moment real automation
       // actually begins (this function runs whether that's the 1-3s
       // auto-press timer or a manual button press) — once per siege.
-      if (!fanaticSniperRolesAssigned && typeof canUseSiegeEngines === 'function') {
-        fanaticSniperRolesAssigned = true;
-        let pUnitsForRoles = pUnits.filter(u => !u.isCommander);
+      if (!battleEnvironment.__fanaticSniperRolesAssigned && typeof canUseSiegeEngines === 'function') {
+        battleEnvironment.__fanaticSniperRolesAssigned = true;
+        // BUGFIX: exclude units already past the gate (siegeRole
+        // "assault_complete", set by triggerGateBreach in
+        // siege_function_helpers.js) from both candidate pools below, as a
+        // second independent guard alongside the battleEnvironment-scoped
+        // flag above. A unit already fighting inside the city has nothing
+        // to do with fanatic/sniper role assignment and must never have its
+        // siegeRole silently overwritten back to "counter_battery" — doing
+        // so hands its targeting to ai_categories.js's counter-battery
+        // snipe override and stops siegeEngineLogic.js's post-breach
+        // wall-clamp exemptions from applying to it, stranding it at the
+        // gate.
+        let pUnitsForRoles = pUnits.filter(u => !u.isCommander && u.siegeRole !== 'assault_complete');
         let validClimbers = pUnitsForRoles.filter(u => !u.stats?.isRanged && canUseSiegeEngines(u));
         let rangedTroops = pUnitsForRoles.filter(u => u.stats?.isRanged || String(u.stats?.role).toLowerCase().includes("archer"));
 
@@ -841,7 +1052,7 @@ function _safe(x, y, margin = 50) {
             u.orderType = 'move_to_point'; u.target = null;
             u.orderTargetPoint = safeAnchor; return;
           }
-          u.selected = true; u.hasOrders = true; u.isPatrolling = false;
+          u.hasOrders = true; u.isPatrolling = false;
           if (u.orderType === 'hold_position' || u.orderType === 'move_to_point' || !u.orderType) {
             u.orderType = 'seek_engage'; u.orderTargetPoint = null; u.target = null;
           }
@@ -852,7 +1063,7 @@ function _safe(x, y, margin = 50) {
       }
 
       pUnits.forEach(u => {
-        u.selected = true; u.hasOrders = true;
+        u.hasOrders = true;
         const surface = typeof W.getNavalSurfaceAt === 'function'
           ? W.getNavalSurfaceAt(u.x, u.y) : 'DECK';
 
@@ -1101,7 +1312,7 @@ function _safe(x, y, margin = 50) {
       // the unit is allowed to wade through to break the deadlock.
 
       u.hasOrders = true; u.orderType = 'move_to_point';
-      u.selected  = true; u.reactionDelay = Math.floor(Math.random() * 5);
+      u.reactionDelay = Math.floor(Math.random() * 5);
       u.orderTargetPoint = _safe(cx + ox, cy + oy);
       if (u.origSmartSpeed === undefined && u.stats) u.origSmartSpeed = u.stats.speed;
     });

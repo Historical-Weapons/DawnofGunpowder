@@ -198,11 +198,12 @@ function _shouldLOD(x, y, unit) {
     if (Math.abs(x - player.x) < 2 && Math.abs(y - player.y) < 2) return false;
 
     // Desktop quality: ≥80% = LOD disabled (default is 80%, so default = no dots)
-    // NOTE: desktopBattleQuality is permanently locked to 100 (see
-    // settings_ui.js — desktop always runs MAX, no LOD ever). The branch
-    // below is therefore always skipped on desktop by design; it only
-    // matters if this function is ever reused somewhere desktopBattleQuality
-    // isn't locked.
+    // UPDATE: desktopBattleQuality is no longer locked to 100 — settings_ui.js's
+    // Graphics Quality preset (LOW/MED/HIGH/MAX, all four now selectable on
+    // desktop) writes real values here, and the Advanced slider can too. The
+    // branch below is live in practice now, not just in theory: a desktop
+    // player on LOW or MED will actually see units drop to dots past
+    // dynLodDist, same as the mobile MB2 dot zone does.
     var dq = (typeof window.desktopBattleQuality === 'number')
               ? Math.max(0, Math.min(100, window.desktopBattleQuality)) : 80;
     if (dq >= 80) return false;
@@ -309,8 +310,8 @@ function _install() {
         '%c[OPT-BATTLES v1.3] Installed successfully\n' +
         '  Native/Capacitor  : ' + IS_NATIVE + '\n' +
         '  Desktop quality   : window.desktopBattleQuality=' + (typeof window.desktopBattleQuality === 'number' ? window.desktopBattleQuality : 100) + '%\n' +
-        '                      (always 100% / MAX on desktop — locked in settings_ui.js)\n' +
-        '                      (0%=200px LOD, 80%=800px LOD, ≥80%=LOD disabled / default)\n' +
+        '                      (selectable via LOW/MED/HIGH/MAX in settings_ui.js — MAX is the desktop default, no longer locked)\n' +
+        '                      (0%=200px LOD, 80%=800px LOD, ≥80%=LOD disabled — still the desktop default via MAX)\n' +
         '                      Controlled by Graphics Quality slider in Options menu\n' +
         '  PB1 Infantry LOD  (dynamic threshold, dot replace)\n' +
         '  PB2 Cavalry LOD   (dynamic threshold, sized dot)\n' +

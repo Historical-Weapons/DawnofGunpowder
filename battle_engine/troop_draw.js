@@ -8,80 +8,60 @@ const SORT_INTERVAL = IS_NATIVE_DRAW ? 200 : 100;
 
 	let sortedUnitsCache = []; // Store the sorted copy here
  
-function drawBattleUnits(ctx) {
-	
+// ============================================================================
+// GATE DEPTH-SORT HELPERS (siege battles only)
+// ----------------------------------------------------------------------------
+// The gate is a single static rectangle painted by renderDynamicGates(),
+// entirely separate from the Y-sorted unit list. Previously it was always
+// drawn AFTER every unit in the outer render loop (sandboxmode_update.js),
+// so it visually sat in front of attackers on its near/outside side just as
+// much as it hid defenders on its far/inside side -- no depth illusion, the
+// gate just always won.
+//
+// Fix: split the Y-sorted unit list into a "behind the gate" pass (drawn
+// BEFORE renderDynamicGates) and an "in front of the gate" pass (drawn
+// AFTER it), using the gate's own vertical centroid as the dividing line --
+// the gate becomes one more Y-positioned object in the painter's-algorithm
+// order instead of a fixed overlay.
+//
+// BACKUP RULE: a siege attacker (side "player") who is not actively
+// climbing / staged on the wall always renders in the "front" pass
+// regardless of Y -- a ground attacker vanishing behind gate timber reads
+// as broken rendering, not depth, even if they're crowded right up against
+// the doors.
+//
+// EXCEPTION: a broken/open gate isn't drawn by renderDynamicGates at all --
+// it moves its own hitbox off-map instead (see fortification_system.js) --
+// so getActiveSiegeGate() below returns null for it and drawBattleUnits
+// falls back to a single normal pass, identical to pre-fix behavior.
+// ============================================================================
+function isSiegeAttackerNonClimber(unit) {
+    return unit.side === 'player' &&
+           !unit.isClimbing &&
+           !unit.onWall &&
+           !unit.settling &&
+           !(unit.siegeRole && unit.siegeRole.includes('ladder'));
+}
 
-        const centerX = BATTLE_WORLD_WIDTH / 2 - 150; 
-        const pColor = (currentBattleData && currentBattleData.playerColor) ? currentBattleData.playerColor : "#2196f3";
-        const eColor = (currentBattleData && currentBattleData.enemyColor) ? currentBattleData.enemyColor : "#f44336";
+function getActiveSiegeGate() {
+    if (typeof inSiegeBattle === 'undefined' || !inSiegeBattle) return null;
+    if (typeof inNavalBattle !== 'undefined' && inNavalBattle) return null;
 
-// Modified to show supply lines in both standard land battles AND River battles
-    const isRiverBattle = typeof worldTerrainType !== 'undefined' && worldTerrainType.includes("River");
+    const gates = (typeof battleEnvironment !== 'undefined' && battleEnvironment &&
+                   battleEnvironment.cityGates && battleEnvironment.cityGates.length)
+        ? battleEnvironment.cityGates
+        : (typeof overheadCityGates !== 'undefined' ? overheadCityGates : []);
+    if (!gates || !gates.length) return null;
 
-    if (!window.inNavalBattle || isRiverBattle) {
-        // Calculate offsets to ensure lines stay on the solid ground banks 
-        // even if the river meanders heavily near the top/bottom edges
-        const topSupplyY = 0;
-        const bottomSupplyY = BATTLE_WORLD_HEIGHT ;
+    // "Active" = still standing: has a drawn rect, HP left, and not flagged
+    // open. Mirrors the exact condition renderDynamicGates() itself checks
+    // before it bails out and yeets the gate's hitbox off-map.
+    const isActive = g => g && g.pixelRect && g.gateHP > 0 && !g.isOpen;
+    return gates.find(g => g.side === "south" && isActive(g)) || gates.find(isActive) || null;
+}
 
-        // Pass a dummy camera {x:0, y:0} because the canvas is already translated
-        // Enemy Supply Line (Top)
-        drawSupplyLines(ctx, centerX, topSupplyY, eColor, {x: 0, y: 0});
-        
-        // Player Supply Line (Bottom)
-        drawSupplyLines(ctx, centerX, bottomSupplyY, pColor, {x: 0, y: 0});
-    }
-
-	
-// --- CLEAN FIX: Only sort the cache, leave the original array alone ---
-    if (performance.now() - lastSortTime > SORT_INTERVAL) {
-        sortedUnitsCache = [...battleEnvironment.units].sort((a, b) => a.y - b.y);
-        lastSortTime = performance.now();
-    }
-
-    let time = Date.now() / 50;
-
-
-
-
- // ---> RENDER GROUND EFFECTS <---
-    if (battleEnvironment.groundEffects) {
-        battleEnvironment.groundEffects.forEach(ge => {
-            if (typeof camera !== 'undefined' && camera && typeof isOnScreen === 'function') {
-                if (!isOnScreen(ge, camera)) return;
-            }
-            ctx.save();
-            ctx.translate(ge.x, ge.y);
-            ctx.rotate(ge.angle);
-			
-// FIX (ship flicker): use a seed that's frozen once and never recomputed.
-        // Land-stuck effects have static x/y so re-deriving the seed from x/y
-        // every frame was harmless there — but ship-stuck effects get x/y
-        // re-derived every frame from the ship's sway/rock wobble (so the
-        // decal can track the moving deck), and feeding that live, ever-so-
-        // slightly-changing position into the hash made drawStuckProjectileOrEffect
-        // pick a different sprite variant almost every frame = flicker.
-        // ai_categories.js now stamps a `seed` on ground effects at spawn time;
-        // this is just a defensive fallback + one-time cache for any effect
-        // that doesn't have one yet, so it self-heals rather than flickering.
-        if (typeof ge.seed !== 'number') {
-            ge.seed = (ge.x * 12.9898) + (ge.y * 78.233);
-        }
-        const geSeed = ge.seed;
-
-        if (ge.stuckOnStructure) {
-            ctx.globalAlpha = (ge.structureTile === 6 || ge.structureTile === 7) ? 0.78 : 0.92;
-        }
-        
-        drawStuckProjectileOrEffect(ctx, ge.type, geSeed);
-        
-        ctx.globalAlpha = 1.0;
-            ctx.restore();
-        });
-    }
-
-    sortedUnitsCache.forEach(unit => {
-		
+function renderUnitSpriteLayer(ctx, unitList, time) {
+    unitList.forEach(unit => {		
 		// --- FIREWALL: Skip corrupt data ---
     if (isNaN(unit.x) || isNaN(unit.y)) return; 
     // ---> INSERT CULLING HERE <---
@@ -91,6 +71,7 @@ function drawBattleUnits(ctx) {
         if (typeof camera !== 'undefined' && camera && typeof isOnScreen === 'function') {
             if (!isOnScreen(unit, camera)) return;
         }
+
         let isMoving = unit.state === "moving";
         let frame = time + unit.animOffset;
         let isAttacking = unit.state === "attacking" && unit.cooldown > (unit.stats.isRanged ? 30 : 40);
@@ -152,10 +133,19 @@ if (isEnemyGeneral) {
 if ((typeof player !== 'undefined' && unit === player) || unit.isCommander) {
     visType = "horse_archer"; 
 } else if (unit.stats.role === ROLES.CAVALRY || unit.stats.role === ROLES.MOUNTED_GUNNER) {
-    // If it's a mounted gunner or the name contains "Camel", use the camel renderer
+    // ROBUST FIX: this used to key off unit.unitType === "Camel Cannon",
+    // which broke the instant the roster key was renamed to "Cannon"
+    // (only the .name display field was meant to change) — with no
+    // "Camel Cannon"/"camel" match, it fell all the way through to the
+    // generic "cavalry" branch, i.e. the default mounted lancer visuals.
+    // ROLES.MOUNTED_GUNNER is unique to the Cannon unit in troop_system.js,
+    // so gating on the role instead of the name/key makes this immune to
+    // any future rename.
     if (unit.unitType === "War Elephant") {
         visType = "elephant";
-    } else if (unit.unitType === "Camel Cannon" || unit.unitType.toLowerCase().includes("camel")) {
+    } else if (unit.stats.role === ROLES.MOUNTED_GUNNER) {
+        visType = "camel_cannon";
+    } else if (unit.unitType.toLowerCase().includes("camel")) {
         visType = "camel";
     } else {
         visType = "cavalry";
@@ -193,9 +183,12 @@ if ((typeof player !== 'undefined' && unit === player) || unit.isCommander) {
 if (unit.stats.isRanged && unit.stats.ammo <= 0) {
     if (visType === "horse_archer") {
         visType = "cavalry"; 
-    } else if (visType === "camel") {
-        // KEEP it as a camel! We handle its melee mode inside drawCavalryUnit.
-        visType = "camel"; 
+    } else if (visType === "camel" || visType === "camel_cannon") {
+        // KEEP it as a camel/camel_cannon! We handle its melee mode inside drawCavalryUnit.
+        // (camel_cannon added: same reasoning as "camel" above — cavscript.js's
+        // MODE A "SWORD COMBAT (CANNON STOWED)" branch needs visType to stay
+        // camel_cannon to fire; without this it would've fallen to the
+        // generic shortsword infantry visuals the moment ammo hit 0.)
     } else {
         visType = "shortsword"; 
     }
@@ -417,7 +410,7 @@ if (isDead) {
 // =============================================================
 
 // 1. Dispatch to the correct renderer
-if (["cavalry", "elephant", "camel", "horse_archer"].includes(visType)) {
+if (["cavalry", "elephant", "camel", "horse_archer", "camel_cannon"].includes(visType)) {
     // ── CAVALRY ORIENTATION FIX ──────────────────────────────────
     // The cavalry sprite's natural direction (dir=1 throughout cavscript)
     // is LEFT-facing — opposite of infantry. We negate facingDir here so
@@ -549,7 +542,143 @@ if (isDead) {
 //ctx.strokeStyle = "#000";
 //ctx.lineWidth = 1;
 //ctx.strokeRect(unit.x - barWidth / 2, barY, barWidth, barHeight);
-}); 
+    });
+}
+
+function drawBattleUnits(ctx) {
+	
+
+        const centerX = BATTLE_WORLD_WIDTH / 2 - 150; 
+        const pColor = (currentBattleData && currentBattleData.playerColor) ? currentBattleData.playerColor : "#2196f3";
+        const eColor = (currentBattleData && currentBattleData.enemyColor) ? currentBattleData.enemyColor : "#f44336";
+
+// Modified to show supply lines in both standard land battles AND River battles
+    const isRiverBattle = typeof worldTerrainType !== 'undefined' && worldTerrainType.includes("River");
+
+    if (!window.inNavalBattle || isRiverBattle) {
+        const isSiegeNow = typeof inSiegeBattle !== 'undefined' && inSiegeBattle;
+        const isSurvivalNow = typeof window.__IS_SURVIVAL_BATTLE__ !== 'undefined' && window.__IS_SURVIVAL_BATTLE__;
+
+        if (isSiegeNow || isSurvivalNow) {
+            // SURGERY: siege battles get NO baggage train/caravan on either
+            // side — per direct request. (Previously drew a fixed top/bottom
+            // line formation here; that call is now skipped entirely.)
+            // SURGERY: Survival mode battles also get no baggage train — per
+            // direct request (decorative wagons/caravans don't fit a
+            // wave-defense scene). Gated on window.__IS_SURVIVAL_BATTLE__,
+            // set by battle_engine/survival_mode.js for the duration of a run.
+        } else {
+            // SURGERY: baggage train now follows each side's own randomized
+            // spawn corner (window.battleSpawnAssignment — now rolled for
+            // river battles too, not just standard land, see
+            // battlefield_launch.js) instead of a fixed top/bottom line:
+            // anchored near that side's spawn point, then pushed further
+            // along "rear" (away from the fight) so it sits behind the army
+            // rather than in the middle of the formation. Falls back to the
+            // old fixed anchor if no assignment exists yet. Clamped to
+            // MARGIN so the wagon ring (see drawSupplyLines) can't spread
+            // off the map edge — this is also what keeps it on the solid
+            // bank for river battles without needing to know anything
+            // about the river's actual shape.
+            const REAR_PUSH = 260;
+            const MARGIN = 140;
+
+            const eGeo = window.battleSpawnAssignment && window.battleSpawnAssignment.enemy;
+            let eAnchorX = eGeo ? (eGeo.ax + eGeo.rear.x * REAR_PUSH) : centerX;
+            let eAnchorY = eGeo ? (eGeo.ay + eGeo.rear.y * REAR_PUSH) : 0;
+            eAnchorX = Math.max(MARGIN, Math.min(BATTLE_WORLD_WIDTH  - MARGIN, eAnchorX));
+            eAnchorY = Math.max(MARGIN, Math.min(BATTLE_WORLD_HEIGHT - MARGIN, eAnchorY));
+
+            const pGeo = window.battleSpawnAssignment && window.battleSpawnAssignment.player;
+            let pAnchorX = pGeo ? (pGeo.ax + pGeo.rear.x * REAR_PUSH) : centerX;
+            let pAnchorY = pGeo ? (pGeo.ay + pGeo.rear.y * REAR_PUSH) : BATTLE_WORLD_HEIGHT;
+            pAnchorX = Math.max(MARGIN, Math.min(BATTLE_WORLD_WIDTH  - MARGIN, pAnchorX));
+            pAnchorY = Math.max(MARGIN, Math.min(BATTLE_WORLD_HEIGHT - MARGIN, pAnchorY));
+
+            // Pass a dummy camera {x:0, y:0} because the canvas is already translated
+            drawSupplyLines(ctx, eAnchorX, eAnchorY, eColor, {x: 0, y: 0});
+            drawSupplyLines(ctx, pAnchorX, pAnchorY, pColor, {x: 0, y: 0});
+        }
+    }
+
+	
+// --- CLEAN FIX: Only sort the cache, leave the original array alone ---
+    if (performance.now() - lastSortTime > SORT_INTERVAL) {
+        sortedUnitsCache = [...battleEnvironment.units].sort((a, b) => a.y - b.y);
+        lastSortTime = performance.now();
+    }
+
+    let time = Date.now() / 50;
+
+
+
+
+ // ---> RENDER GROUND EFFECTS <---
+    if (battleEnvironment.groundEffects) {
+        battleEnvironment.groundEffects.forEach(ge => {
+            if (typeof camera !== 'undefined' && camera && typeof isOnScreen === 'function') {
+                if (!isOnScreen(ge, camera)) return;
+            }
+            ctx.save();
+            ctx.translate(ge.x, ge.y);
+            ctx.rotate(ge.angle);
+			
+// FIX (ship flicker): use a seed that's frozen once and never recomputed.
+        // Land-stuck effects have static x/y so re-deriving the seed from x/y
+        // every frame was harmless there — but ship-stuck effects get x/y
+        // re-derived every frame from the ship's sway/rock wobble (so the
+        // decal can track the moving deck), and feeding that live, ever-so-
+        // slightly-changing position into the hash made drawStuckProjectileOrEffect
+        // pick a different sprite variant almost every frame = flicker.
+        // ai_categories.js now stamps a `seed` on ground effects at spawn time;
+        // this is just a defensive fallback + one-time cache for any effect
+        // that doesn't have one yet, so it self-heals rather than flickering.
+        if (typeof ge.seed !== 'number') {
+            ge.seed = (ge.x * 12.9898) + (ge.y * 78.233);
+        }
+        const geSeed = ge.seed;
+
+        if (ge.stuckOnStructure) {
+            ctx.globalAlpha = (ge.structureTile === 6 || ge.structureTile === 7) ? 0.78 : 0.92;
+        }
+        
+        drawStuckProjectileOrEffect(ctx, ge.type, geSeed);
+        
+        ctx.globalAlpha = 1.0;
+            ctx.restore();
+        });
+    }
+
+    const _activeGate = (typeof getActiveSiegeGate === 'function') ? getActiveSiegeGate() : null;
+
+    if (_activeGate) {
+        // Split into "behind" (inside/far side) vs "front" (outside/near
+        // side + non-climbing attackers) relative to the gate's own
+        // vertical centroid, so the gate itself can be drawn in between.
+        const gateCenterY = _activeGate.pixelRect.y + (_activeGate.pixelRect.h / 2); // <<<<
+        const behindGate = [];
+        const frontGate = [];
+        sortedUnitsCache.forEach(unit => {
+            if (isSiegeAttackerNonClimber(unit) || unit.y >= gateCenterY) {
+                frontGate.push(unit);
+            } else {
+                behindGate.push(unit);
+            }
+        });
+
+        renderUnitSpriteLayer(ctx, behindGate, time);
+        if (typeof renderDynamicGates === 'function') renderDynamicGates(ctx);
+        // Tell the outer battle render loop (sandboxmode_update.js) to skip
+        // its own renderDynamicGates() call this frame -- the gate has
+        // already been drawn here, mid-way through the unit list, and
+        // drawing it again afterward would paint it right back over the
+        // "front" units we just rendered below.
+        window.__siegeGateDrawnInline = true;
+        renderUnitSpriteLayer(ctx, frontGate, time);
+    } else {
+        window.__siegeGateDrawnInline = false;
+        renderUnitSpriteLayer(ctx, sortedUnitsCache, time);
+    }
 
 battleEnvironment.projectiles.forEach(p => {
 		if (isNaN(p.x) || isNaN(p.y)) return; // Safety check

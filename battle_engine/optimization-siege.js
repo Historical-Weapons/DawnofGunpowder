@@ -125,8 +125,9 @@
 //               this was a permanent no-op. The actual fix now lives
 //               directly inside MB2's _lodTier() in optimization-mobile-
 //               battles.js (mobile; active) and _shouldLOD() in this file's
-//               sibling optimization-battles.js (desktop; inert by design
-//               since desktop's LOD is always disabled at MAX quality).
+//               sibling optimization-battles.js (desktop; active whenever
+//               desktopBattleQuality is below the ≥80 disable cutoff — no
+//               longer locked to MAX-only, see settings_ui.js).
 //               See the full explanation above _ps8_siegeLOD() below.
 //
 //  PS9 ★★★☆☆  Wall-clamping supplement (P8 compensation)
@@ -649,10 +650,11 @@ function _ps7_bgCanvasLowZoom() {
 //
 //  FIX: siege-context LOD tightening is now implemented directly inside
 //  the two real LOD functions —
-//    optimization-battles.js   _shouldLOD()   (desktop; inert in practice
-//                               since desktopBattleQuality is locked to 100,
-//                               which always disables LOD before reaching
-//                               the siege branch — desktop never had LOD)
+//    optimization-battles.js   _shouldLOD()   (desktop; ACTIVE whenever
+//                               desktopBattleQuality is below the ≥80
+//                               disable cutoff — desktop is no longer locked
+//                               to 100/MAX, settings_ui.js's Graphics Quality
+//                               preset can put it on LOW/MED same as mobile)
 //    optimization-mobile-battles.js   MB2's _lodTier()   (mobile; ACTIVE —
 //                               tightens lodPx by ~25-30% during siege,
 //                               scaled per-tier same as everywhere else)

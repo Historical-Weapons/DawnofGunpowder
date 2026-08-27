@@ -1,3 +1,17 @@
+// =============================================================================
+// SESSION CHANGELOG (for fusion with the other diverging Story 3 session)
+// =============================================================================
+//   - Added an `else if (window.inCustomLocationMode)` branch (a no-op,
+//     mirroring the existing inCityMode branch) so the main update() loop
+//     stops falling through to OVERWORLD MODE while the player is inside a
+//     camp_system.js custom (non-city) location. camp_system.js's own
+//     _locTick()/_locRender() already fully own movement/collision/camera/
+//     rendering for that mode — this branch just stops a second, competing
+//     movement pass and overworld/economy ticks from running underneath it.
+//   - Pure engine fix, not narrative — safe regardless of which Story 3
+//     chapter-10+ continuation wins.
+// =============================================================================
+
 let economyTick = 0;
  let uiSyncTick = 0;
  
@@ -58,6 +72,32 @@ function calculateMovement(speed, map, tileSize, cols, rows, isCity = false) {
 
     if (isClimbing) {
         currentSpeed *= 0.20;
+    }
+
+    // ---> MOUNTED ACCELERATION RAMP (battle mode only) <---
+    // Mirrors updateSpeedRamp/getRampedSpeed in ai_categories.js: the
+    // commander no longer snaps instantly to top speed. currentSpeed above
+    // is the top-speed ceiling for this frame (unchanged, still whatever
+    // troop_system.js's General entry + all the multipliers upstream add up
+    // to); player.currentSpeedMult ramps 0->1 while a movement key is held
+    // and 1->0 when nothing is pressed, at a rate scaled by the mount's
+    // mass (activeUnit.stats.mass — General is HEAVY_CAV, mass 150) so a
+    // heavier mount takes longer to reach full gallop and longer to stop,
+    // exactly like AI-controlled cavalry now does.
+    if (inBattleMode && isMounted) {
+        if (player.currentSpeedMult === undefined) player.currentSpeedMult = 0;
+
+        const wantsToMove = Boolean(keys['w'] || keys['arrowup'] || keys['s'] || keys['arrowdown'] ||
+            keys['a'] || keys['arrowleft'] || keys['d'] || keys['arrowright']);
+
+        let mass = activeUnit.stats?.mass || 80;
+        let rate = Math.max(0.012, Math.min(0.05, 4 / mass));
+
+        player.currentSpeedMult = wantsToMove
+            ? Math.min(1, player.currentSpeedMult + rate)
+            : Math.max(0, player.currentSpeedMult - rate);
+
+        currentSpeed *= player.currentSpeedMult;
     }
 
     if (inCityMode && !inBattleMode && keys['p']) {
@@ -142,12 +182,56 @@ function calculateMovement(speed, map, tileSize, cols, rows, isCity = false) {
         let tileY = battleEnvironment.grid[Math.floor(player.x / BATTLE_TILE_SIZE)]?.[Math.floor(nextY / BATTLE_TILE_SIZE)];
 
         let bypassGateCollision = false;
-        if (typeof inSiegeBattle !== 'undefined' && inSiegeBattle && typeof SiegeTopography !== 'undefined') {
+        // SURGERY: The player-controlled unit here is always the commander
+        // (activeUnit = pCmdr above), which is always mounted/large. Mounted
+        // units never get this bypass — they must resolve through real
+        // isBattleCollision so they still collide with the still-solid
+        // pillar columns and with siege engines (rams, towers, etc.) instead
+        // of ghosting through them near the breach. Non-mounted fallback
+        // (isMounted false) keeps the old jostling-relief behavior.
+        if (typeof inSiegeBattle !== 'undefined' && inSiegeBattle && typeof SiegeTopography !== 'undefined' && !isMounted) {
             let isBreached = window.__SIEGE_GATE_BREACHED__;
             if (isBreached) {
-                let distToGateX = Math.abs(nextX - SiegeTopography.gatePixelX);
-                let distToGateY = Math.abs(nextY - SiegeTopography.gatePixelY);
-                if (distToGateX < 45 && distToGateY < 250) bypassGateCollision = true;
+                // BUGFIX ("general can partially enter the gate-flank corridor
+                // from one side but not the other, only during a live siege
+                // after the gate breaks"): this used to test nextX/nextY
+                // against gatePixelX/Y on two INDEPENDENT axis checks
+                // (distToGateX feeding canMoveX, distToGateY feeding
+                // canMoveY) -- and canMoveX/canMoveY each already sample a
+                // DIFFERENT tile (tileX uses player.y, tileY uses player.x;
+                // see lines above). Because bypass and blocking were decided
+                // per-axis instead of as one combined position check, a
+                // diagonal approach could earn bypass clearance on one axis
+                // while the other axis was still evaluated normally -- which
+                // axis "won" depended on which WASD keys were held, producing
+                // an asymmetric partial-entry that had nothing to do with the
+                // gate's geometry (the gate itself is built perfectly
+                // symmetric around midX in fortification_system.js).
+                // On top of that, the box half-width (45px) was a magic
+                // number uncoupled from the actual pillar positions, wide
+                // enough to bleed into the flanking wall/pillar tiles
+                // (tiles 6/7/8/10 -- the "vertical bars" that correctly block
+                // the corridor sides in city-visit mode via isCityCollision).
+                // Those pillar tiles were never meant to be touched by this
+                // siege-only bypass at all -- it exists to let units walk
+                // through the now-gone GATE tile, not the walls beside it.
+                //
+                // Fix: derive the bypass half-width directly from the same
+                // gateRadius/CITY_TILE_SIZE constants fortification_system.js
+                // used to place the pillars (gateRadius=6), minus one tile so
+                // the pillar columns themselves are explicitly excluded --
+                // and compute ONE symmetric boolean from the player's CURRENT
+                // position, used identically for both axes, instead of
+                // re-deriving it per axis from the candidate next position.
+                // That guarantees the bypass zone can never extend past the
+                // true interior opening on either flank, regardless of
+                // approach direction.
+                let tile = (typeof CITY_TILE_SIZE !== 'undefined') ? CITY_TILE_SIZE : BATTLE_TILE_SIZE;
+                let gateRadiusTiles = 6; // must match gateRadius in fortification_system.js
+                let halfWidth = Math.max(0, gateRadiusTiles - 1) * tile; // exclude the pillar column itself
+                let distToGateX = Math.abs(player.x - SiegeTopography.gatePixelX);
+                let distToGateY = Math.abs(player.y - SiegeTopography.gatePixelY);
+                if (distToGateX < halfWidth && distToGateY < 250) bypassGateCollision = true;
             }
         }
 
@@ -212,15 +296,16 @@ function calculateMovement(speed, map, tileSize, cols, rows, isCity = false) {
         // city-placement only, so we bypass that check here.
         const isWaterTile = destTile && ["Ocean", "Coastal", "River", "Sea", "Deep Ocean"].includes(destTile.name);
 
-        if (
-            ntx >= 0 &&
-            ntx < (cols || 0) &&
-            nty >= 0 &&
-            nty < (rows || 0) &&
-            (!destTile?.impassable || isWaterTile)
-        ) {
+        const inBounds = ntx >= 0 && ntx < (cols || 0) && nty >= 0 && nty < (rows || 0);
+        const isPassable = !destTile?.impassable || isWaterTile;
+
+        if (inBounds && isPassable) {
             player.x = nextX;
             player.y = nextY;
+        } else if (inBounds && destTile && destTile.isGate && typeof s3NotifyGateBlocked === 'function') {
+            // Story 3's frontier gate — explain why, instead of just stopping
+            // the player silently at the wall.
+            s3NotifyGateBlocked();
         }
     }
 }
@@ -470,14 +555,14 @@ function update() {
 					        if (player.x > maxX) player.x = maxX;
 					        if (player.y < minY) player.y = minY;
 					        if (player.y > maxY) player.y = maxY;
-					        // Extra safety: if commander somehow landed on WATER/EDGE,
-					        // snap back toward ship center
-					        if (typeof window.getNavalSurfaceAt === 'function') {
-					            const surf = window.getNavalSurfaceAt(player.x, player.y);
-					            if (surf === 'WATER' || surf === 'EDGE') {
-					                player.x = ship.x;
-					                player.y = ship.y;
-					            }
+					        // SURGERY: hull edge now acts like a solid wall instead of
+					        // teleporting the commander back to ship center on a water hit —
+					        // reverts to the last confirmed dry spot instead (falling back to
+					        // the zone centroid only the very first time, same as troops/
+					        // enemies — see BLS_preDeployWaterSafety in battlefield_logic.js,
+					        // which now handles naval AND river zones identically).
+					        if (typeof window.BLS_preDeployWaterSafety === 'function') {
+					            window.BLS_preDeployWaterSafety(player, z);
 					        }
 					    } else if (z.type !== "naval") {
 					        // Standard rectangle clamp for land / river / siege
@@ -485,6 +570,14 @@ function update() {
 					        if (player.x > z.maxX) player.x = z.maxX;
 					        if (player.y < z.minY) player.y = z.minY;
 					        if (player.y > z.maxY) player.y = z.maxY;
+					        // River water safety-net for the commander — same wall-revert
+					        // helper used for troops/enemies (see BLS_preDeployWaterSafety in
+					        // battlefield_logic.js). "Just in case" backstop per direct
+					        // request — normal movement shouldn't let the commander reach
+					        // water in the first place, but this catches it if it ever does.
+					        if (z.type === "river" && typeof window.BLS_preDeployWaterSafety === 'function') {
+					            window.BLS_preDeployWaterSafety(player, z);
+					        }
 					    }
 					}
 					
@@ -508,7 +601,20 @@ function update() {
 						// on deck freely while the ship carries everyone with it.
 						pCmdr.x = player.x; pCmdr.y = player.y;
 						pCmdr.isMoving = player.isMoving;
-						if (player.isMoving) pCmdr.state = "moving";
+						// FIX: this was one-directional — it only ever set "moving" and
+						// never set it back, so once the player moved once, pCmdr.state
+						// stayed "moving" forever (see cavscript.js legSwing/bob, which
+						// key off unit.state === "moving" via troop_draw.js's isMoving).
+						// ai_categories.js's per-frame movement loop toggles state both
+						// ways for AI units but explicitly skips commanders
+						// (`if (!unit.isCommander) unit.state = "idle";`), since the
+						// player commander's state is supposed to be fully owned here —
+						// this else branch is what was missing to actually own it.
+						if (player.isMoving) {
+							pCmdr.state = "moving";
+						} else if (pCmdr.state !== "attacking") {
+							pCmdr.state = "idle";
+						}
 
 						if (keys['a'] || keys['arrowleft']) {
 							pCmdr.direction = player.direction = -1;
@@ -543,18 +649,60 @@ function update() {
 						}
 					}
 					
-					if (keys['p']) {
+					// SURVIVAL MODE GUARD: this whole P-exit block is the generic
+					// campaign/custom-battle "near-victory auto-exit" trigger. Survival's
+					// own monitor (survivalMode.js) is the sole authority on ending a
+					// wave — letting this fire too could misread a nearly-cleared wave
+					// as a defeat (it routes through window.leaveBattlefield, which
+					// Survival's guard now treats as a forced defeat) the instant the
+					// player presses P near the end of a fight they were about to win.
+					if (keys['p'] && !window.__IS_SURVIVAL_BATTLE__) {
 						const scale = currentBattleData?.initialCounts?.player > 300 ? 5 : 1; 
 						const enemyNetCount = aliveEnemies * scale;
 						const enemyInitial = currentBattleData?.initialCounts?.enemy || 1;
 
 						if (disableAICombatDefeated || (enemyNetCount / enemyInitial < 0.10) || (enemyNetCount < 5)) {
-							(typeof inSiegeBattle !== 'undefined' && inSiegeBattle) ? concludeSiegeBattlefield(player) : leaveBattlefield(player);
+							// SURGERY: Custom Battle mode gets a hard reload instead of
+							// routing through leaveBattlefield/handleCustomBattleExit.
+							// Root cause: exiting a custom battle mid-fight (via P or the
+							// ↩️ button) is supposed to go through handleCustomBattleExit
+							// (custom_battle_gui.js), which the game installs by reassigning
+							// the window.leaveBattlefield PROPERTY. This line used to call
+							// the bare `leaveBattlefield` identifier, which resolves via the
+							// lexical scope chain straight to the original campaign function
+							// in battlefield_logic.js — the hijack can never intercept a bare
+							// call. Switching that call to `window.leaveBattlefield` fixed
+							// the direct symptom, but every OTHER custom-battle-only reset
+							// (window.__IS_CUSTOM_BATTLE__, customBattleActive,
+							// window.cleanupCustomSiege(), the cbRegicideMonitor /
+							// cbCustomBattleMonitor intervals, originalLeaveBattlefield
+							// restoration, etc. — see handleCustomBattleExit's full body) is
+							// still only reachable through that same fragile call chain, and
+							// this codebase has already shown multiple independent ways for
+							// a mid-battle exit to end up not fully cleaning up. Rather than
+							// keep chasing individual leaks one at a time, a hard reload for
+							// custom mode specifically guarantees a fully clean slate every
+							// time, at the cost of losing the in-progress custom battle setup
+							// (acceptable — the player was already choosing to exit).
+							// Sandbox/story mode are UNCHANGED — they still use the original
+							// leaveBattlefield/concludeSiegeBattlefield path, since that path
+							// is the real campaign-continuity system (overworld position,
+							// roster losses, quest hooks, etc.) and a reload there would be
+							// destructive.
+							if (window.__IS_CUSTOM_BATTLE__) {
+								console.log("[P-exit] Custom Battle mode — hard reloading to guarantee clean state.");
+								window.location.reload();
+							} else {
+								(typeof inSiegeBattle !== 'undefined' && inSiegeBattle) ? concludeSiegeBattlefield(player) : window.leaveBattlefield(player);
+							}
 						}
 						keys['p'] = false;
 					}
 
-					if (disableAICombatDefeated || aliveEnemies === 0) {
+					// SURVIVAL MODE GUARD: same reasoning as the P-exit block above —
+					// this bottom banner is the generic campaign/custom-battle
+					// "victory/defeat, press P" prompt, and Survival never wants it.
+					if (!window.__IS_SURVIVAL_BATTLE__ && (disableAICombatDefeated || aliveEnemies === 0)) {
 						ctx.save();
 						ctx.setTransform(1, 0, 0, 1, 0, 0); 
 						ctx.fillStyle = "rgba(0, 0, 0, 0.6)";
@@ -626,6 +774,24 @@ function update() {
 					wasInCity = false;
 				}
 			}
+
+    } else if (typeof window.inCustomLocationMode !== 'undefined' && window.inCustomLocationMode) {
+        // ==========================================
+        // 🏚️ CUSTOM (NON-CITY) LOCATION MODE
+        // ==========================================
+        // Without this branch, inCustomLocationMode fell all the way through
+        // to the OVERWORLD MODE branch below — meaning that while the player
+        // was inside a barracks/depot/stables/etc. (player.x/y holding the
+        // location's own LOC_CX/LOC_CY-based coordinates), the overworld
+        // branch was STILL running every frame: a second, competing
+        // calculateMovement() pass on top of camp_system.js's own _locTick()
+        // movement, overworld terrain lookups against nonsensical tile
+        // positions, economy/diplomacy/siege ticks, and cohesion decay from
+        // the resulting drift. camp_system.js's _locTick()/_locRender()
+        // already own movement, collision, camera and rendering for this
+        // mode entirely (see the custom-locations system), so this branch is
+        // intentionally a no-op — it exists purely to stop the overworld
+        // branch from double-processing the same frame.
 
     } else {
         // ==========================================
@@ -885,6 +1051,10 @@ function update() {
     }
 
     if (++uiSyncTick % 30 === 0) syncSiegeUIVisibility();
+
+    // Custom (non-city) military locations — shows/hides the "Enter <kind>"
+    // prompt based on player proximity. See custom_locations_system.js.
+    if (typeof updateCustomLocationProximity === 'function') updateCustomLocationProximity();
 }
 
 
@@ -1007,7 +1177,11 @@ const canDrawForts = !(typeof inNavalBattle !== 'undefined' && inNavalBattle) &&
 
 if (canDrawForts) {
     // Gates and Towers appear in both Sieges and City Exploration
-    if (typeof renderDynamicGates === 'function') renderDynamicGates(ctx);
+    // GATE DEPTH-SORT: when the siege gate is intact, drawBattleUnits()
+    // (troop_draw.js) already drew it itself, sandwiched between the
+    // "behind" and "front" unit passes, and sets this flag so we don't
+    // draw it a second time here and paint back over those front units.
+    if (typeof renderDynamicGates === 'function' && !window.__siegeGateDrawnInline) renderDynamicGates(ctx);
     if (typeof renderDynamicTowers === 'function') renderDynamicTowers(ctx);
 
     // Siege Engines (Rams/Towers) usually only appear during active Siege Battles
@@ -1076,6 +1250,14 @@ if (canDrawForts) {
         // -----------------------------------------------------------------------
 
         if (typeof drawSiegeVisuals === 'function') drawSiegeVisuals(ctx);
+        // Story 3 (Ming frontier): the wall's one real gate is drawn fresh
+        // every frame — not baked into bgCanvas — so it can flip between
+        // open/closed instantly. See story3_map_and_update.js: _s3DrawGate.
+        if (typeof s3DrawGate === 'function') s3DrawGate(ctx);
+        // Custom (non-city) military locations — barracks, storage, stables,
+        // watchtowers, garrison posts, maintenance yards. See
+        // custom_locations_system.js: drawCustomLocationMarkers.
+        if (typeof drawCustomLocationMarkers === 'function') drawCustomLocationMarkers(ctx);
         let halfWidth = (canvas.width / 2) / zoom;
         let halfHeight = (canvas.height / 2) / zoom;
         let camLeft = player.x - halfWidth - 150;
@@ -1225,6 +1407,13 @@ drawVictoryStateOverlay(ctx, canvas.width, canvas.height);
 // A dedicated function that ONLY runs at the very end of the frame
 function drawMasterStateOverlay(ctx, canvasWidth, canvasHeight) {
     if (typeof inBattleMode === 'undefined' || !inBattleMode) return;
+    // SURVIVAL MODE GUARD: Survival has its own dedicated "THE LINE HAS
+    // FALLEN" defeat screen (survivalMode.js), shown only once its monitor
+    // confirms every player unit is actually dead. This generic overlay
+    // watches ONLY the commander's hp and would show "YOU HAVE FALLEN"
+    // full-screen on top of (or instead of) that real flow the moment the
+    // commander alone drops, which is neither accurate nor wanted here.
+    if (window.__IS_SURVIVAL_BATTLE__) return;
     if (typeof battleEnvironment === 'undefined' || !battleEnvironment.units) return;
 
     let pCmdr = battleEnvironment.units.find(u => u.isCommander && u.side === "player");
@@ -1258,6 +1447,19 @@ function drawMasterStateOverlay(ctx, canvasWidth, canvasHeight) {
 function drawVictoryStateOverlay(ctx, canvasWidth, canvasHeight) {
     // 1. Guards: Ensure we are in battle and the environment exists
     if (typeof inBattleMode === 'undefined' || !inBattleMode) return;
+    // SURVIVAL MODE GUARD (THE ACTUAL FIX): this is the full-screen "VICTORY"
+    // overlay the player keeps seeing. It fires on ANY frame where
+    // battleEnvironment.units contains zero living non-player units — which
+    // is exactly the state that exists for a few frames EVERY time Survival
+    // clears battleEnvironment.units at the top of launchSurvivalDay() and
+    // waits on generateBattlefield()'s (chunked/async) callback to repopulate
+    // it. inBattleMode is already true by then, so this function was firing
+    // almost immediately after "Begin Defense"/"Begin Wave", well before any
+    // real combat happened or the wave was actually won. Survival Mode has
+    // its own real victory-adjacent screen (the Day-Held recap in
+    // survivalMode.js's showDayPrepMenu, driven by its own monitor watching
+    // actual unit counts) and must never show this generic overlay at all.
+    if (window.__IS_SURVIVAL_BATTLE__) return;
     if (typeof battleEnvironment === 'undefined' || !battleEnvironment.units) return;
 
     // 2. Count alive enemies (excluding the player's side)

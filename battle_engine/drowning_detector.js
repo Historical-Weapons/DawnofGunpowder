@@ -176,12 +176,35 @@ if (_tileSize && window.battleEnvironment && battleEnvironment.grid) {
     // cleanupCustomBattleEnvironments(); campaign path triggers initNavalBattle().
     // Clearing is safe because _getPaths rebuilds on next access. Ships are
     // always re-generated at battle start, so old cache keys won't collide.
+    //
+    // SURGERY: also resets window.player._lastDeckX/_lastDeckY here. The new
+    // water-as-wall collision system (battlefield_logic.js's
+    // BLS_preDeployWaterSafety / applyNavalWaterCollision, and the commander
+    // clamp in sandboxmode_update.js) all revert to that cached "last
+    // confirmed dry position" instead of teleporting to a fixed point. Every
+    // battle unit is a fresh object each battle, so no cross-battle stale
+    // data is possible there \u2014 but window.player is the SAME persistent
+    // object reused across every battle in a session, so its cached position
+    // from a previous map (a different ship, a different river) must not be
+    // trusted as a revert target for a brand new battle. Both hooks below
+    // already fire on every battle start (custom AND campaign, naval AND
+    // land/river \u2014 enterBattlefield in battlefield_launch.js also resets
+    // this directly for the same reason), so this is just piggy-backing on
+    // scaffolding that already exists for the exact same "clear stale
+    // per-battle state" purpose.
+    function _resetPlayerDeckCache() {
+        if (typeof window !== 'undefined' && window.player) {
+            window.player._lastDeckX = null;
+            window.player._lastDeckY = null;
+        }
+    }
 
     const _wrapCleanup = function () {
         const orig = window.cleanupCustomBattleEnvironments;
         if (typeof orig === 'function' && !orig._detectorPatched) {
             window.cleanupCustomBattleEnvironments = function () {
                 _cache.clear();
+                _resetPlayerDeckCache();
                 orig.apply(this, arguments);
             };
             window.cleanupCustomBattleEnvironments._detectorPatched = true;
@@ -193,6 +216,7 @@ if (_tileSize && window.battleEnvironment && battleEnvironment.grid) {
             const orig = window.initNavalBattle;
             window.initNavalBattle = function () {
                 _cache.clear();
+                _resetPlayerDeckCache();
                 orig.apply(this, arguments);
             };
             window.initNavalBattle._detectorPatched = true;

@@ -280,8 +280,34 @@ if (minDistToEdge <= wallThick - 3) {
                                    (distToStartY < cornerBuffer || distToEndY < cornerBuffer);
 
                 if (!isCornerArea) {
-                    if (y === startY + wallThick - 1 && x % towerInterval === 0) towers.push({ x: x, y: y + 1, side: 'N' });
-                    else if (y === endY - wallThick + 1 && x % towerInterval === 0) towers.push({ x: x, y: y - 1, side: 'S' });
+                    // BUGFIX ("general can partially enter the gate-flank gap
+                    // from one side but not the other — same battle, every
+                    // time"): tower placement on the N/S walls used to test
+                    // the raw world coordinate (`x % towerInterval === 0`)
+                    // against an absolute modulus. That has no relationship
+                    // to the gate's position (midX ± gateRadius) — CITY_COLS,
+                    // towerInterval (75), and gateRadius (6) essentially
+                    // never divide out evenly, so the two gate flanks ended
+                    // up different distances from their nearest tower. One
+                    // flank could land a tower tile-for-tile against the
+                    // gate corner (solid, correct collision); the other
+                    // flank's nearest tower fell one or more tiles further
+                    // out, leaving a gap the general could partially wedge
+                    // into. This was baked into the one-time city-generation
+                    // grid, so it was identical and reproducible for the
+                    // rest of that battle — matching exactly what was
+                    // reported. The E/W walls have no gate (overheadCityGates
+                    // only defines north/south) so they're intentionally left
+                    // on the original absolute modulus — nothing to be
+                    // symmetric around there.
+                    // Fix: measure the N/S modulus from the gate's own
+                    // center (midX) instead of from world-origin 0. This
+                    // guarantees the tower pattern is mirror-symmetric
+                    // around the gate, the same way the gate's own
+                    // pillars/isGateZone test already is via Math.abs(x -
+                    // midX) elsewhere in this function.
+                    if (y === startY + wallThick - 1 && Math.abs(x - midX) % towerInterval === 0) towers.push({ x: x, y: y + 1, side: 'N' });
+                    else if (y === endY - wallThick + 1 && Math.abs(x - midX) % towerInterval === 0) towers.push({ x: x, y: y - 1, side: 'S' });
                     else if (x === startX + wallThick - 1 && y % towerInterval === 0) towers.push({ x: x + 1, y: y, side: 'W' });
                     else if (x === endX - wallThick + 1 && y % towerInterval === 0) towers.push({ x: x - 1, y: y, side: 'E' });
                 }
@@ -693,7 +719,23 @@ function updateCityGates(grid) {
     if (!gates || !gates.length || !grid) return;
 
     const margin = 45;
-    const wallThick = 12;
+    // FIX ("invisible wall just past the gate, one-way, general exempt"):
+    // this used to be 12 — a separate, hardcoded copy of the gate depth
+    // that had drifted out of sync with wallThick=10 used everywhere else
+    // in this file (buildCityWalls, gate.bounds, drawCityGateBlock). This
+    // function runs every frame (see battlefield_logic.js's "Real-time
+    // Collision Grid Synchronization") and, while the gate is still closed,
+    // stamps solid stone 12 tiles deep — 2 tiles deeper than the 10-tile
+    // zone triggerGateBreach() actually clears on breach. The instant the
+    // gate breaks, triggerGateBreach() removes it from the array this
+    // function reads, so those 2 extra tiles never get revisited by
+    // anything ever again — a permanent, full-width, frozen band of solid
+    // wall sitting just past the doorway that no amount of AI/steering
+    // logic can walk through, because this is real terrain collision
+    // (isBattleCollision reads it directly), not an AI decision. Matching
+    // this to the canonical 10 means there's nothing left outside the zone
+    // triggerGateBreach actually opens.
+    const wallThick = 10;
     const midX = Math.floor(CITY_COLS / 2);
     const gateRadius = 6;
 

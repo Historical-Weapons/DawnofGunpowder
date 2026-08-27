@@ -19,6 +19,7 @@ window.launchCustomSiege = function(playerSetup, enemySetup, selectedMap) {
       
         window.__SIEGE_GATE_BREACHED__ = false;
         window.__SIEGE_AUTO_RETREAT_TRIGGERED__ = false; // FIX: Hard reset the win-timer flag
+        window.__siegeGatePillars__ = []; // SURGERY: don't inherit pillar hitboxes from a previous siege
 
         // 1. Setup Siege Dimensions
         BATTLE_WORLD_WIDTH = CITY_WORLD_WIDTH;  
@@ -74,7 +75,17 @@ window.launchCustomSiege = function(playerSetup, enemySetup, selectedMap) {
         let formattedEnemyRoster = enemySetup.roster.map(u => ({ type: u }));
         deploySiegeDefenders(enemySetup.faction, enemySetup.roster.length, "enemy", formattedEnemyRoster);
         // Spawn Enemy General in the Plaza
-        spawnSiegeCommander("enemy", enemySetup.faction, enemySetup.color, SiegeTopography.gatePixelX, SiegeTopography.plazaPixelY);
+        // FOLLOW-UP FIX: was SiegeTopography.plazaPixelY (wallPixelY-600, far
+        // north) — same stale anchor as the deploySiegeDefenders spawn math,
+        // the siegeEngineLogic.js patrol/fallback targets, and the pre-deploy
+        // enemy zone box. All of those (including this line) now read the
+        // single shared SiegeTopography.defenderRallyPixelY instead of each
+        // hardcoding "gatePixelY - 200" separately — this call site spawns
+        // the commander directly with literal coordinates rather than going
+        // through deploySiegeDefenders, so it needed its own correction too.
+        spawnSiegeCommander("enemy", enemySetup.faction, enemySetup.color, SiegeTopography.gatePixelX, SiegeTopography.defenderRallyPixelY);
+        console.log("[customsiegebattle] enemy commander spawn call: gatePixelX=" + SiegeTopography.gatePixelX +
+            " defenderRallyPixelY=" + SiegeTopography.defenderRallyPixelY);
 
         // 5. Deploy Attackers (Player) at the siege camp
         let pStartY = SiegeTopography.campPixelY + 200;
@@ -105,6 +116,7 @@ window.launchCustomSiege = function(playerSetup, enemySetup, selectedMap) {
     } else {
         zoom = 0.8;
     }
+
 	window.isPaused = false;
     if (typeof startCustomBattleMonitor === 'function') startCustomBattleMonitor(); //referee
 
@@ -153,6 +165,7 @@ window.launchCustomSiege = function(playerSetup, enemySetup, selectedMap) {
         // Hard reset all global siege flags
         inSiegeBattle = false;
         window.__SIEGE_GATE_BREACHED__ = false;
+        window.__siegeGatePillars__ = [];
 
         // Eradicate siege engines to prevent ghost spawns in the next battle
         if (typeof siegeEquipment !== 'undefined') {
@@ -201,7 +214,14 @@ window.launchCustomSiege = function(playerSetup, enemySetup, selectedMap) {
             let visType = "peasant";
             const role = template.role;
             if (role === (typeof ROLES !== 'undefined' ? ROLES.CAVALRY : "Cavalry") || role === (typeof ROLES !== 'undefined' ? ROLES.MOUNTED_GUNNER : "Mounted Gunner")) {
-                visType = unitKey === "War Elephant" ? "elephant" : (unitKey.includes("Camel") ? "camel" : "cavalry");
+                // See custom_battle_gui.js's identical fix — now role-driven
+                // instead of keying off unitKey === "Camel Cannon", which
+                // broke once the roster key itself was renamed to "Cannon"
+                // (not just the .name display field). ROLES.MOUNTED_GUNNER
+                // is unique to the Cannon unit, so this is rename-proof.
+                visType = unitKey === "War Elephant" ? "elephant"
+                    : role === (typeof ROLES !== 'undefined' ? ROLES.MOUNTED_GUNNER : "Mounted Gunner") ? "camel_cannon"
+                    : (unitKey.includes("Camel") ? "camel" : "cavalry");
             } else if (role === (typeof ROLES !== 'undefined' ? ROLES.HORSE_ARCHER : "Horse Archer")) visType = "horse_archer";
             else if (role === (typeof ROLES !== 'undefined' ? ROLES.PIKE : "Pikeman") || unitKey.includes("Glaive")) visType = "spearman";
             else if (role === (typeof ROLES !== 'undefined' ? ROLES.SHIELD : "Shield")) visType = "sword_shield";

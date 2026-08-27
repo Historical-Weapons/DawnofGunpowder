@@ -201,11 +201,16 @@ function resolvePreviewSpec(unit) {
     return { mode: "infantry", type: "peasant", ammo, zoom: 1.72, xBias: 0.47, yBias: 0.72 };
   }
 
-if (lower.includes("camel cannon")) {
-  return { 
+if (lower === "cannon") {
+  return {
     mode: "cavalry",
-    type: "camel",              // ✅ THIS is the mount
-    subtype: "camel_cannon",    // ✅ weapon/platform
+    type: "camel_cannon",       // ✅ matches loading-screen.js's working
+                                 //    pattern -- drawCavalryUnit only ever
+                                 //    reads spec.type below, so the old
+                                 //    separate type:"camel" + subtype
+                                 //    split never actually rendered the
+                                 //    cannon (subtype was unused at the
+                                 //    call site).
     ammo,
     zoom: 1.42,
     xBias: 0.44,
@@ -623,7 +628,7 @@ modal.currentUnit = unit; // SURGERY: Track current unit for resizing
     subtitle.style.fontWeight = "400";
     subtitle.style.fontSize = "11px";
     subtitle.style.color = "#cfcfcf";
-    subtitle.textContent = unit.mounted ? "Mounted" : "Foot";
+    subtitle.textContent = unit.category || (unit.mounted ? "Mounted" : "Foot");
     row.appendChild(subtitle);
 
     row.addEventListener("click", () => selectUnit(unit));

@@ -1,3 +1,24 @@
+// =============================================================================
+// SESSION CHANGELOG (for fusion with the other diverging Story 3 session)
+// =============================================================================
+//   - Fixed the quest auto-chain: STORY_QUESTS is meant to be a linear
+//     dependsOn chain where completing one quest auto-activates the next
+//     (yellow waypoint marker + objective banner). The auto-chain logic
+//     used to live ONLY inside the proximity auto-complete path — but every
+//     Story 3 quest sets noAutoComplete:true (completion is gated behind its
+//     dialogue/cutscene finishing, not mere proximity), so that path never
+//     ran for Story 3. Net effect: the quest marker/banner went dark after
+//     Chapter 1 and never updated again for the rest of the story, even
+//     though the trigger chain kept advancing normally underneath.
+//   - Fix: moved the auto-chain (find next quest whose dependsOn === the
+//     completed id, activate it) into complete() itself, so it fires on
+//     every completion path, not just the proximity one.
+//   - This is a general fix to shared quest-tracking infrastructure, not
+//     Story-3-specific narrative content — safe regardless of which Story 3
+//     chapter-10+ continuation wins (and will matter a lot for whichever one
+//     does, since both presumably want the marker to keep working).
+// =============================================================================
+
 // ============================================================================
 // STORY QUEST PATCH — story_quest_patch.js
 // ============================================================================
@@ -147,12 +168,32 @@ function complete(id) {
         console.log("[StoryQuests] complete(" + id + ") skipped — current is " + state.active.id);
         return;
     }
-    state.completed.push(state.active.id);
-    state.history.push({ event: "complete", id: state.active.id, t: Date.now() });
-    console.log("[StoryQuests] Completed:", state.active.id);
+    const completedId = state.active.id;
+    state.completed.push(completedId);
+    state.history.push({ event: "complete", id: completedId, t: Date.now() });
+    console.log("[StoryQuests] Completed:", completedId);
     state.active = null;
     state.arriveLatched = false;
     _hideBanner();
+
+    // Auto-chain to whichever catalogue quest depends on the one that just
+    // completed. This used to only happen inside _proximityTick()'s own
+    // auto-complete path — which every one of Story 3's quests opts out of
+    // via noAutoComplete (so a dialogue/cutscene, not mere proximity, decides
+    // the moment of completion). That meant completing a Story 3 quest via
+    // its trigger's own story_quest_complete action never activated the next
+    // quest: the yellow waypoint marker and objective banner silently went
+    // dark after Chapter 1 and never came back for the rest of the story.
+    // Living here instead, chaining now fires on EVERY completion path.
+    const next = _catalogue.list.find(q =>
+        q.dependsOn === completedId &&
+        !state.completed.includes(q.id) &&
+        q.autoActivate !== false
+    );
+    if (next) {
+        console.log("[StoryQuests] Chaining to:", next.id);
+        set(next);
+    }
 }
 
 function clear() {
@@ -217,24 +258,14 @@ function _proximityTick() {
     // whose dependsOn === this quest's id. Lets you build linear story chains
     // purely from the editor without extra trigger actions.
     // noAutoComplete: skipped — the trigger's own story_quest_complete action
-    // will call complete() once units/dialogue have been delivered.
+    // will call complete() once units/dialogue have been delivered, and
+    // complete() itself now performs the same auto-chain (see complete()).
     const arrivedId = state.active.id;
     if (state.active.noAutoComplete) {
         console.log("[StoryQuests] Arrived at", arrivedId, "— noAutoComplete set, waiting for explicit complete()");
         return;
     }
-    setTimeout(() => {
-        complete(arrivedId);
-        const next = _catalogue.list.find(q =>
-            q.dependsOn === arrivedId &&
-            !state.completed.includes(q.id) &&
-            q.autoActivate !== false
-        );
-        if (next) {
-            console.log("[StoryQuests] Chaining to:", next.id);
-            set(next);
-        }
-    }, 80);
+    setTimeout(() => { complete(arrivedId); }, 80);
 }
 
 setInterval(_proximityTick, 250);

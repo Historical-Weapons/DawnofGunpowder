@@ -22,15 +22,37 @@ const troopGUI= {
         "Javelinier": ["Firelance"],
         "Firelance": ["Heavy Firelance"],
         "Heavy Firelance": [],
-        "Spearman": ["Lancer"],
+        // Heavy Spearman/Heavy Glaive added this session (see
+        // units_expansion.js) — both deliberately ethnic-neutral, so
+        // both branch from the generic Spearman rather than needing a
+        // faction gate, same as Lancer already does.
+        "Spearman": ["Lancer", "Heavy Spearman", "Heavy Glaive"],
+        "Heavy Spearman": [],
+        "Heavy Glaive": [],
         "Lancer": ["Heavy Lancer"],
 		"Heavy Lancer": [],
-        "Archer": ["Horse Archer"],
+        // Heavy Bowman added this session (see units_expansion.js) —
+        // ethnic-neutral, branches from the generic Archer.
+        "Archer": ["Horse Archer", "Heavy Bowman"],
+        "Heavy Bowman": [],
         "Horse Archer": ["Heavy Horse Archer"],
-        "Shielded Infantry": ["Light Two Handed"],
+        // Heavy Shieldman added this session (see units_expansion.js) —
+        // ethnic-neutral, branches from Shielded Infantry rather than
+        // Light Two Handed since it's a defensive upgrade of the SAME
+        // shield-and-armor role, not a weapon-family change.
+        "Shielded Infantry": ["Light Two Handed", "Heavy Shieldman"],
+        "Heavy Shieldman": [],
         "Light Two Handed": ["Heavy Two Handed"],
         "Bomb": ["Hand Cannoneer"],
-        "Hand Cannoneer": []
+        // Sanyanchong added this session (see units_expansion.js) — NOT
+        // ethnic-neutral (explicitly Ming Chinese, unlike the four
+        // above), so it's placed as a further specialization of Hand
+        // Cannoneer rather than added generically. See the chat summary
+        // for why Tanegashima and the Breech-Loading Cannon are NOT
+        // wired in here yet — both raise a faction question this file
+        // can't safely answer on its own.
+        "Hand Cannoneer": ["Sanyanchong"],
+        "Sanyanchong": []
     },
 
 // Faction Unique Map
@@ -436,12 +458,23 @@ Object.assign(troopGUI, {
         // 1. RESTRICTED HIERARCHY: Pre-Gunpowder Japan
         // Bans: Guns, Bombs, Firelances, Shields, Crossbows, Javelins, Slingers, Lancers
         // Allows: Spears -> Glaive, Bows -> Horse Archery
+        //
+        // Heavy Spearman/Heavy Glaive/Heavy Bowman added this session
+        // (see units_expansion.js) — all three fit the existing spear/
+        // glaive/bow allowance and stay consistent with the shield ban
+        // (Heavy Shieldman deliberately NOT added here) and the gun ban
+        // (Sanyanchong/Tanegashima deliberately NOT added here, on top
+        // of Tanegashima not being wired into the sandbox hierarchy at
+        // all yet — see that note above).
         this.hierarchy = {
             "Militia": ["Spearman", "Archer"],
-            "Spearman": ["Glaiveman", "Lancer","Light Two Handed" ],
+            "Spearman": ["Glaiveman", "Lancer","Light Two Handed", "Heavy Spearman", "Heavy Glaive" ],
+            "Heavy Spearman": [],
+            "Heavy Glaive": [],
             "Glaiveman": [], // End of line
 			"Light Two Handed": ["Heavy Two Handed"],
-            "Archer": ["Horse Archer"],
+            "Archer": ["Horse Archer", "Heavy Bowman"],
+            "Heavy Bowman": [],
 			      
         "Lancer": ["Heavy Lancer"],
 		"Heavy Lancer": [],

@@ -1,3 +1,39 @@
+// ════════════════════════════════════════════════════════════════════════
+// SURGERY: GUARANTEED SINGLE SOURCE OF TRUTH FOR "IS THE GATE BREACHED?"
+// ════════════════════════════════════════════════════════════════════════
+// Previously this exact question was recomputed independently in ~10+ places
+// across ai_categories.js and battlefield_commands.js, each with slightly
+// different logic (some checked window.__SIEGE_GATE_BREACHED__ OR the gate
+// object, some only checked one or the other, some treated a missing gate
+// reference as breached and some didn't). That inconsistency is what let
+// units fall through the cracks between "gate still standing" and "gate is
+// down" — there was no single guaranteed choke point, so fixes in one spot
+// never covered every path a unit's AI could take.
+//
+// isSiegeGateBreached() is now the ONE place that answers this question.
+// Everything else should call this instead of re-deriving it locally.
+function isSiegeGateBreached() {
+    if (!(typeof inSiegeBattle !== 'undefined' && inSiegeBattle)) return false;
+    if (window.__SIEGE_GATE_BREACHED__) return true;
+    // Prefer the LIVE battle gate. Custom Siege Battle deep-clones
+    // overheadCityGates into battleEnvironment.cityGates (see
+    // customsiegebattle.js), so that's always the correct copy to read once
+    // it exists. Standard (campaign) sieges assign battleEnvironment.cityGates
+    // = overheadCityGates BY REFERENCE (siegebattle.js), so checking either
+    // agrees there too. The overheadCityGates fallback only matters for the
+    // brief window (any battle mode) before battleEnvironment.cityGates has
+    // been populated at all.
+    let gate = (typeof battleEnvironment !== 'undefined' && battleEnvironment.cityGates && battleEnvironment.cityGates.length > 0)
+        ? battleEnvironment.cityGates.find(g => g.side === "south")
+        : (typeof overheadCityGates !== 'undefined' ? overheadCityGates.find(g => g.side === "south") : null);
+    // No gate reference at all is treated as breached (fail OPEN to normal
+    // combat instead of leaving every defender frozen in a pre-breach hold
+    // state forever due to a missing/uninitialized reference).
+    return !gate || gate.isOpen || gate.gateHP <= 0;
+}
+window.isSiegeGateBreached = isSiegeGateBreached;
+
+
 function canUseSiegeEngines(unit) {
 	
 	
@@ -57,6 +93,84 @@ function isSiegeRangedDefender(unit) {
     );
 }
 
+// ============================================================================
+// WATER / DECK AVOIDANCE — shared by AI TACTIC: SKIRMISH KITING, AI TACTIC:
+// HOLD (formation placement), and AI TACTIC: SHIELD (formation advance), per
+// direct request: "skirmish command in a ship will always try to not jump to
+// the water if possible, charge doesn't care... river water is irrelevant
+// cuz that's more a land battle... hold command forming circles also try to
+// avoid jumping to water."
+//
+// Deliberately naval-ship-only. An earlier version of this helper also
+// treated grid tile ID 4 as "water" for land/river maps — but river battles
+// use that SAME tile ID for their river tiles (see sandboxmode_update.js's
+// updateRiverPhysics, "Check for BOTH River (4) and Ocean (11)"), and rivers
+// are explicitly NOT what this avoidance is for per direct clarification
+// ("river water is more a land battle"). So this only ever fires on a true
+// Ocean/Coastal naval map, using the same window.getNavalSurfaceAt('DECK' |
+// not-'DECK') the rest of the codebase already treats as the authoritative
+// on-deck test (battlefield_logic.js, sandboxmode_update.js's own river/
+// naval physics dispatch, etc.) — not a separate hand-rolled geometry copy.
+function _isOnAnyDeck(x, y) {
+    // Not a real ocean/coastal naval map (includes river battles, which use
+    // window.inRiverBattle instead and are excluded here on purpose) —
+    // never block movement on this check.
+    if (!window.inNavalBattle) return true;
+    if (typeof navalEnvironment !== 'undefined' &&
+        navalEnvironment.mapType !== 'Ocean' && navalEnvironment.mapType !== 'Coastal') return true;
+    if (typeof window.getNavalSurfaceAt !== 'function') return true; // helper missing — don't block movement
+    return window.getNavalSurfaceAt(x, y) === 'DECK';
+}
+
+
+// ============================================================================
+// MOUNTED UNIT ACCELERATION / DECELERATION
+// ============================================================================
+// Horses (and other mounted/large units) no longer snap instantly to top
+// speed. unit.currentSpeedMult ramps 0 -> 1 (accelerating) or 1 -> 0
+// (decelerating/stopping) each frame _handleMovement runs for that unit.
+// Top speed itself is unchanged — it's still exactly unit.stats.speed from
+// troop_system.js. This only controls how quickly a mount reaches that
+// ceiling from a standstill, and how quickly it sheds speed when it stops
+// or reverses. Rate is derived from unit.stats.mass (already set on every
+// Troop via weightClass — see troop_system.js), so heavier mounts (Heavy
+// Cav: 150, Elephant: 500) accelerate/decelerate more sluggishly than
+// light Cav (80) with zero new stats needed.
+//
+// Infantry are untouched: getRampedSpeed() returns unit.stats.speed
+// unmodified for any unit that isn't mounted/large, and the one call site
+// that uses it in _handleMovement is itself gated to isLargeUnit only.
+function isMountedForAccel(unit) {
+    return Boolean(unit.stats?.isLarge || unit.isMounted ||
+        (unit.unitType && String(unit.unitType).toLowerCase().match(/(cav|horse|camel|eleph|lancer)/)));
+}
+
+function updateSpeedRamp(unit, wantsToMove) {
+    if (!isMountedForAccel(unit)) return; // infantry: no ramp, no-op
+
+    if (unit.currentSpeedMult === undefined) unit.currentSpeedMult = 0;
+
+    // Heavier mounts ramp slower in both directions. CAV (mass 80) is the
+    // baseline; HEAVY_CAV (150) and ELEPHANT (500) scale down from there.
+    // Clamped so even the Elephant still reaches top speed in a few seconds,
+    // not glacially — this is a "momentum feel," not a hard physics sim.
+    let mass = unit.stats?.mass || 80;
+    let rate = Math.max(0.012, Math.min(0.05, 4 / mass)); // per-frame ramp step
+
+    if (wantsToMove) {
+        unit.currentSpeedMult = Math.min(1, unit.currentSpeedMult + rate);
+    } else {
+        // Gradual deceleration — same mass-scaled rate, ramping back to 0
+        // instead of cutting to a dead stop the instant orders/target drop.
+        unit.currentSpeedMult = Math.max(0, unit.currentSpeedMult - rate);
+    }
+}
+
+function getRampedSpeed(unit) {
+    if (!isMountedForAccel(unit)) return unit.stats.speed; // infantry unaffected
+    let mult = (unit.currentSpeedMult !== undefined) ? unit.currentSpeedMult : 1;
+    return unit.stats.speed * mult;
+}
 
 const AICategories = {
 
@@ -147,24 +261,50 @@ processMoraleAndFleeing: function(unit, pCount, eCount, currentBattleData) {
     }
 
     if (unit.stats.armor >= 30 && currentBattleData.frames < 18000) baseTick *= 0.01;
-    // SURGERY: "assault momentum" — significantly resist fleeing for the
-    // first 3 real minutes (10800 frames @ 60fps) of a siege, player
-    // attackers only. Same shape/magnitude as the armor protection directly
-    // above (99% decay reduction, not a hard floor — a unit that was
-    // already breaking before this window, or hits the hard-panic-from-
-    // casualties override below, can still flee; this only slows the climb
-    // toward that point). Scoped to attackers specifically, not defenders,
-    // and only while actually in a siege.
-    const inSiegeNow = typeof inSiegeBattle !== 'undefined' && inSiegeBattle;
-    if (inSiegeNow && unit.side === 'player' && currentBattleData.frames < 10800) baseTick *= 0.01;
     if (unit.stats.armor < 5 && unit.target && hpPct < 0.9 && !weOutnumberEnemy) baseTick += 0.02;
 
     // --- CASUALTY MORALITY DEBUFF ---
     const casualtyPct = unit.casualtyMoralePct || 0;
     const casualtyMult = unit.casualtyMoraleMultiplier || 1;
 
+    // FIX ("months ago units flee when morale is very low but now nobody
+    // flees anymore... the flee mechanic is realistic to make chain routs"
+    // — direct request): baseTick above is 0 for any unit over 80% HP
+    // (unless the 5:1-outnumbered case fired), which meant a healthy
+    // unit's morale could NEVER decay from its army collapsing around it —
+    // the casualtyMult multiplier a few lines below had nothing to
+    // multiply for most of the army at any given moment, since 0 * any
+    // multiplier is still 0. That's the actual break in "chain routing":
+    // one side taking heavy losses should be able to sweep even its
+    // still-healthy troops into a rout, not just units who happen to be
+    // personally wounded. Fixed with a small baseline tied to the SAME
+    // 0.30 threshold applyCasualtyPressureToSide (battlefield_logic.js)
+    // already uses as its first real pressure tier — deliberately not
+    // "any combat at all," so an ordinary even fight still doesn't cause
+    // healthy troops to randomly waver; this only activates once a side
+    // has visibly started losing. weOutnumberEnemy (checked, not
+    // re-derived) still zeroes it exactly as it already does above, so a
+    // winning side's healthy units remain immune regardless of the other
+    // side's own losses.
+    if (baseTick === 0 && !weOutnumberEnemy && casualtyPct >= 0.30) {
+        baseTick = 0.015;
+    }
+
     if (casualtyPct >= 0.60) {
         baseTick *= casualtyMult;
+    }
+
+    // --- SIEGE ATTACKER OPENING RESOLVE (first 3 minutes) ---
+    // A deliberate "opening charge" boost: the assaulting side shrugs off
+    // panic almost entirely for the first 10800 frames (3min @ 60fps — same
+    // frame-count convention as the armor/18000-frame check above, just a
+    // shorter window and scoped to player-side siege attackers specifically)
+    // so the attack doesn't evaporate to a stray flee roll before it even
+    // reaches the wall. Applied last so it scales down whatever the combined
+    // baseTick became, casualty debuff included.
+    const inSiegeForResolve = typeof inSiegeBattle !== 'undefined' && inSiegeBattle;
+    if (inSiegeForResolve && unit.side === 'player' && currentBattleData.frames < 10800) {
+        baseTick *= 0.05; // 95% less likely to break during the opening push
     }
 
     if (baseTick > 0) {
@@ -197,8 +337,56 @@ processTargeting: function(unit, units) {
 	// 1. Move the inSiege check ABOVE the ram validation
 let inSiege = typeof inSiegeBattle !== 'undefined' && inSiegeBattle;
 
+    // GUARANTEED TOP-LEVEL GATE CHECK — see isSiegeGateBreached() at the top
+    // of this file. Computed once, here, before any siege-specific branch
+    // below gets a chance to run. This is now the only isGateBreached value
+    // used anywhere in this function.
+    let isGateBreached = isSiegeGateBreached();
+
+    // PLAYER GATE-BREACH HANDOFF — mirrors the enemy one further down
+    // (search GATE-BREACH HANDOFF), which only covers unit.side === "enemy".
+    // Attackers have no equivalent: the SIEGE MACRO-TARGETING OVERHAUL below
+    // (the block that walks them toward the gate_funnel/plaza dummy points)
+    // is gated on `!isGateBreached`, so it stops assigning/advancing targets
+    // for EVERYONE the instant the gate goes down. And the dummy-target
+    // cleanup loop right below this (`clear the gate gathering dummy`) is
+    // also `unit.side === "enemy"` only, so an attacker's stale dummy target
+    // never gets cleared either. Combined with orderType "siege_assault"
+    // making the very next check (SURGERY 1, right below) bail out of this
+    // whole function immediately — every frame, forever — the result is:
+    // any attacker who was still walking to (or had already reached) its
+    // gate_funnel staging point at the moment of breach just stops there.
+    // dx/dy to that fixed dummy point hit ~0 and nothing ever exists to send
+    // them onward into the plaza. This is what was producing the cluster of
+    // units frozen right in the gate opening after it broke.
+    //
+    // Fix: hand non-crew siege_assault attackers the exact same
+    // orderType = "seek_engage" promotion the Q key already gives via
+    // battlefield_commands.js's Q-E-R-F handlers, and drop the dummy target
+    // (only if it IS a dummy — a unit already trading blows with a real
+    // enemy keeps that target). Once orderType is seek_engage, the very
+    // next `["siege_assault", ...].includes(unit.orderType)` check no
+    // longer matches, so this function continues instead of bailing, and
+    // the seek_engage guard just below hands the unit to
+    // processTacticalOrders/pickSmartCombatTarget — the same real combat
+    // AI a manual Q-press already uses. Ram/ladder/engine crew are left
+    // alone; battlefield_commands.js's Q-E-R-F handlers own reassigning
+    // active siege-engine duty, not this function.
+    if (inSiege && isGateBreached && !unit.disableAICombat &&
+        unit.side === "player" && unit.orderType === "siege_assault") {
+        const isActiveCrew = ["ram_pusher", "ladder_carrier", "battering_ram", "engine_crew"].includes(unit.siegeRole);
+        if (!isActiveCrew) {
+            unit.orderType = "seek_engage";
+            if (unit.target && unit.target.isDummy) unit.target = null;
+        }
+    }
+
     // SURGERY 1: Protect all manual field commands from the AI target scanner
-    if (unit.disableAICombat || ["siege_assault", "follow", "retreat", "move_to_point", "hold_position"].includes(unit.orderType)) {
+    // _formationLocked checked explicitly (not just via orderType==='move_to_point')
+    // so this stays safe even if something changes orderType mid-march without
+    // knowing about this dependency — see the matching guard added to
+    // processTacticalOrders() in battlefield_commands.js.
+    if (unit.disableAICombat || unit._formationLocked || ["siege_assault", "follow", "retreat", "move_to_point", "hold_position"].includes(unit.orderType)) {
         return; 
     }
 
@@ -251,7 +439,16 @@ let inSiege = typeof inSiegeBattle !== 'undefined' && inSiegeBattle;
     //      ranged backline (archers/crossbow/hand-cannon, bonusVsLarge:0)
     //      they can fight without being countered — "don't suicide charge
     //      into the spear wall, go pick off the archers instead."
-    if (unit.side === "enemy" && unit.orderType === "seek_engage" && !inSiege) {
+    //
+    // GATE-BREACH HANDOFF: a siege whose gate is down/open is no longer a
+    // siege tactically — it's a land battle happening inside a city walls.
+    // Once isGateBreached is true this block runs for EVERY enemy unit, not
+    // just ones already tagged seek_engage — EnemyLandStrategyAI never runs
+    // during a siege at all, so no siege unit would ever organically pick up
+    // that orderType on its own. Ordinary non-siege battles are completely
+    // unaffected: they still require the real seek_engage tag exactly as
+    // before, via the `!inSiege` half of this condition.
+    if (unit.side === "enemy" && (isGateBreached || (!inSiege && unit.orderType === "seek_engage"))) {
         const isLandContext = !(typeof inNavalBattle !== 'undefined' && inNavalBattle);
 
         let scannerIsMounted = false;
@@ -340,7 +537,15 @@ let inSiege = typeof inSiegeBattle !== 'undefined' && inSiegeBattle;
             }
         }
         if (nearestEnemy) {
-            unit.target = nearestEnemy;
+            // SURGERY: post-breach city defenders need the same wall/building
+            // steering attackers already get via getCityNavTarget() (see
+            // battlefield_commands.js) — plain open-field land battles never
+            // have buildings on the grid, so this is a no-op there (the
+            // function hands back realTarget unchanged whenever nothing's in
+            // the way, including whenever the target is already close).
+            unit.target = (isGateBreached && typeof getCityNavTarget === 'function')
+                ? getCityNavTarget(unit, nearestEnemy)
+                : nearestEnemy;
         }
         return; // EnemyLandStrategyAI is in charge; don't run the random scanner
     }
@@ -349,7 +554,7 @@ let inSiege = typeof inSiegeBattle !== 'undefined' && inSiegeBattle;
 // --- NEW GUARD: PACIFY EARLY-GAME WALL DEFENDERS (PATCHED) ---
         let southGate = (typeof battleEnvironment !== 'undefined' && battleEnvironment.cityGates) 
             ? battleEnvironment.cityGates.find(g => g.side === "south") : null;
-        let isGateBreached = window.__SIEGE_GATE_BREACHED__ || (southGate && (southGate.isOpen || southGate.gateHP <= 0));
+        // isGateBreached already computed once at the top of this function.
 
         if (typeof inSiegeBattle !== 'undefined' && inSiegeBattle && unit.side === "enemy") {
             let areLaddersDeployed = typeof siegeEquipment !== 'undefined' && 
@@ -447,7 +652,15 @@ if (inSiege && (unit.siegeRole === "treb_crew" || unit.siegeRole === "trebuchet_
       // ==========================================
         // SIEGE MACRO-TARGETING OVERHAUL
         // ==========================================
-        if (inSiege) {
+        // GUARANTEED GATE GUARD: this whole block — attacker ladder/gate
+        // macro-logic AND defender wall-duty macro-logic below — is now
+        // reachable ONLY while the siege gate is still standing. The instant
+        // isGateBreached flips true, every unit here falls straight through
+        // to the land-AI smart-targeting block further up this function
+        // instead (see the GATE-BREACH HANDOFF comment near the top). No
+        // sub-branch inside this block needs its own isGateBreached check
+        // anymore — that's the whole point of guaranteeing it here.
+        if (inSiege && !isGateBreached) {
             let gateX = typeof SiegeTopography !== 'undefined' ? SiegeTopography.gatePixelX : BATTLE_WORLD_WIDTH / 2;
             let gateY = typeof SiegeTopography !== 'undefined' ? SiegeTopography.gatePixelY : BATTLE_WORLD_HEIGHT / 2;
 
@@ -518,27 +731,15 @@ if (unit.side === "player") {
                         return;
                     }
 
-                    // Look for the "1. GATE BREACHED" block inside processTargeting
-                    if (isGateBreached) {
-                        // Force role swap — even active ladder-climbers drop their task
-                        unit.siegeRole        = "gate_charger";
-                        unit.isClimbing       = false;
-                        unit.onWall           = false;
-                        unit.hasOrders        = true;
-                        unit.orderType        = "move_to_point";
-                        unit.breachRush       = true;
-                        unit.priorityOverride = true; // tells processAction to skip engagement logic
-
-                        // Simply move everyone to the old gate centroid to funnel through the gap
-                        unit.target = { 
-                            x: gateCentroid.x, 
-                            y: gateCentroid.y,
-                            hp: 99, 
-                            isDummy: true, 
-                            priority: "gate_funnel" 
-                        };
-                        return;
-                    }
+                    // NOTE: the old "gate just breached — reroute everyone to
+                    // the gate centroid" reassignment that used to live here
+                    // is now dead code by construction: this entire macro-
+                    // targeting block only runs while `!isGateBreached` (see
+                    // the guaranteed guard above), so isGateBreached can never
+                    // be true at this point. The instant the gate goes down,
+                    // player siege_assault units get their land-AI handoff
+                    // from processTacticalOrders() in battlefield_commands.js
+                    // instead (smart target + getCityNavTarget steering).
 
                     // 2. LADDERS DEPLOYED (GATE INTACT) -> STORM THE LADDERS (Two-Phase Charge)
                     if (areLaddersDeployed && canUseSiegeEngines(unit)) {
@@ -603,16 +804,15 @@ if (unit.side === "player") {
             // DEFENDER COMMON GOAL (PATCHED)
             // ==========================================
             if (unit.side === "enemy") {
-                
-                if (isGateBreached && !unit.onWall) {
-                    if (!unit.target || unit.target.priority !== "plaza") {
-                        unit.target = plazaTarget;
-                    }
-                    return;
-                }
-
-                // PRE-BREACH DEFENSE SPLIT: No 3-second skipping allowed.
-                if (!isGateBreached) {
+                // NOTE: the old "gate just breached -> rush to the plaza"
+                // dummy-point assignment that used to live here is dead code
+                // by construction now — this whole DEFENDER COMMON GOAL
+                // section only runs while `!isGateBreached` (see the
+                // guaranteed guard on the enclosing block above). The instant
+                // the gate goes down, defenders get the real smart land-AI
+                // targeting (with getCityNavTarget steering) from the block
+                // near the top of this function instead of a plaza waypoint.
+                {
                     const duty = siegeDefenseRoll(unit);
                     const ranged = isSiegeRangedDefender(unit);
                     const siegeCrew = canUseSiegeEngines(unit);
@@ -755,6 +955,112 @@ if (unit.side === "player") {
 
 processAction: function(unit, battleEnv, currentBattleData, player) {
 
+// ---> FORMATION-LOCK: player-drawn drag formations override ALL AI <---
+// While a unit is marching to a waypoint assigned by the Total War-style
+// drag formation (see battlefield_commands.js's executeBoxFormationMove),
+// it ignores every other AI system entirely — no targeting, no combat, no
+// siege ladder hand-off, no HOLD/SHIELD/SKIRM/CHARGE tactic logic further
+// down, nothing below this point runs. This is a harder guarantee than
+// relying on orderType==='move_to_point' being respected everywhere else
+// in this function: it runs before ANYTHING else, so no future branch can
+// accidentally reintroduce a stop-to-fight case, and it holds even for
+// cases that specific priority doesn't cover (e.g. isRocketLocked units).
+// Clears itself the instant the unit arrives. Arrival now hands the unit
+// straight to hold_position and returns (see below) instead of falling
+// through to whatever AI/tactic was left — the unit stops, holds that
+// exact spot facing the direction the arrow pointed, and only fights back
+// if something comes within its hold_position aggro range. Any tactic the
+// unit had before this order (skirmish/stand_ground/etc.) was already
+// cleared when the order was issued (executeBoxFormationMove), so there's
+// nothing left to resume. Cmd.stop(), cancelAiTactic(), and setAiTactic()
+// in RTSControls.js all clear this flag directly too, so a player-issued
+// HOLD/STOP/cancel/any-other-tactic interrupts the march immediately
+// instead of waiting for arrival.
+if (unit._formationLocked) {
+    if (!unit.orderTargetPoint) {
+        unit._formationLocked = false;
+    } else {
+        let fdx = unit.orderTargetPoint.x - unit.x;
+        let fdy = unit.orderTargetPoint.y - unit.y;
+        let fdist = Math.hypot(fdx, fdy);
+        const FORMATION_ARRIVAL_THRESHOLD = 14;
+        if (fdist <= FORMATION_ARRIVAL_THRESHOLD) {
+            // ARRIVED — Total War-style drag-waypoint march is complete.
+            //
+            // FIX ("destinations slightly off / not landing on the
+            // waypoint often"): this used to just zero velocity wherever
+            // physics/collision happened to leave the unit inside the 14px
+            // tolerance ring and stop there. Snap directly onto the exact
+            // ordered point instead — never more than
+            // FORMATION_ARRIVAL_THRESHOLD px of correction, so it reads as
+            // the unit finishing its step cleanly, not teleporting.
+            unit.x = unit.orderTargetPoint.x;
+            unit.y = unit.orderTargetPoint.y;
+            unit.vx = 0;
+            unit.vy = 0;
+            unit._formationLocked = false;
+
+            // FIX ("arrow direction should be the FINAL facing, not
+            // whatever way the unit happened to be walking when it
+            // stopped"): troop_draw.js derives facingDir/facingDirY purely
+            // from this-frame-vs-last-frame position deltas, so a unit
+            // that just stops keeps whatever facing its last moving frame
+            // produced — the approach angle into its formation slot, which
+            // is usually NOT the direction the player actually drew.
+            // executeBoxFormationMove (battlefield_commands.js) stamps the
+            // resolved formation angle onto every unit via
+            // calculateFormationOffsets; reuse that same 0-rad-is-"up"
+            // fx/fy convention (matches renderFormationArrowPreview's
+            // preview-arrow math exactly) to resolve a final facing here.
+            //
+            // Also re-stamp _prevX/_prevY to the SAME snapped position so
+            // troop_draw.js's next per-frame delta computes to zero this
+            // frame — otherwise the position snap above (up to 14px) would
+            // itself register as "movement" the instant troop_draw.js next
+            // runs, and its own delta-based logic could immediately
+            // recompute (and stomp) the facing we're about to set here,
+            // undoing this fix on the very frame it takes effect.
+            if (typeof unit._formationFacingAngle === 'number') {
+                const _fa = unit._formationFacingAngle;
+                const _ffx = Math.sin(_fa), _ffy = -Math.cos(_fa);
+                if (Math.abs(_ffx) >= Math.abs(_ffy)) {
+                    unit.facingDir  = _ffx >= 0 ? 1 : -1;
+                    unit.facingDirY = 0;
+                } else {
+                    unit.facingDirY = _ffy >= 0 ? 1 : -1;
+                }
+                unit._flipTick  = 0;
+                unit._vFlipTick = 0;
+            }
+            unit._prevX = unit.x;
+            unit._prevY = unit.y;
+
+            // STOP — hand off to the exact same "hold this spot, still
+            // fight anyone who gets close" behavior the E/STOP command and
+            // the HOLD tactic's own arrival both use
+            // (processTacticalOrders' hold_position branch in
+            // battlefield_commands.js): ranged units engage out to their
+            // full range, melee units get a 70px self-defense radius, and
+            // with nobody in range the unit just stands fast right here.
+            // This unit's own leftover AI tactic (skirmish/stand_ground/
+            // etc, if any) was already cleared the moment this order was
+            // issued — see executeBoxFormationMove — so there's nothing
+            // else left that should resume.
+            unit.hasOrders        = true;
+            unit.orderType        = "hold_position";
+            unit.orderTargetPoint = null;
+            unit.target            = null;
+            unit.formationTimer    = 0;
+            unit.state              = "idle";
+            return;
+        } else {
+            this._handleMovement(unit, fdx, fdy, fdist, battleEnv);
+            unit.state = "moving";
+            return;
+        }
+    }
+}
+
 // ---> REMOVED: camera-visibility AI skip <---
 // This used to early-return for any unit not currently on screen, which
 // meant off-camera units never got processAction (movement/combat) called
@@ -766,9 +1072,9 @@ processAction: function(unit, battleEnv, currentBattleData, player) {
 // must keep running for every unit regardless of camera position.
 
 // ---> SURGERY: Evaluate the gate status FIRST before the ladder logic
-        let southGate = (typeof battleEnvironment !== 'undefined' && battleEnvironment.cityGates) 
-            ? battleEnvironment.cityGates.find(g => g.side === "south") : null;
-        let isGateBreached = window.__SIEGE_GATE_BREACHED__ || (southGate && (southGate.isOpen || southGate.gateHP <= 0));
+        // Now sourced from the single canonical isSiegeGateBreached() helper
+        // (see the top of this file) instead of a local recompute.
+        let isGateBreached = isSiegeGateBreached();
 
 if (!isGateBreached && unit.side === "player" && unit.target && !unit.target.isDummy && unit.onWall !== unit.target.onWall && canUseSiegeEngines(unit)) {
 	
@@ -810,24 +1116,6 @@ if (!isGateBreached && unit.side === "player" && unit.target && !unit.target.isD
         let inSiege = typeof inSiegeBattle !== "undefined" && inSiegeBattle;
 
         // =========================================================
-        // ---> FIX: PRE-BREACH CAVALRY HARD FREEZE <---
-        // =========================================================
-        if (inSiege && unit.side === "player" && unit.siegeRole === "cavalry_reserve") {
-            let southGate = (typeof battleEnvironment !== 'undefined' && battleEnvironment.cityGates) 
-                ? battleEnvironment.cityGates.find(g => g.side === "south") : null;
-            let isGateBreached = window.__SIEGE_GATE_BREACHED__ || (southGate && (southGate.isOpen || southGate.gateHP <= 0));
-
-            if (!isGateBreached) {
-                unit.vx = 0;
-                unit.vy = 0;
-                unit.state = "idle";
-                // Restore stamina while resting, but absolutely NO pathfinding, pinballing, or attacking
-                if (unit.stats.stamina < 100 && Math.random() > 0.9) unit.stats.stamina++;
-                return; 
-            }
-        }
-
-        // =========================================================
         // ---> FIX: UNCOMMANDED SIEGE ATTACKER HARD FREEZE (ALL ROLES) <---
         // =========================================================
         // Root cause: with no orders yet, processTargeting()'s generic fallback
@@ -840,20 +1128,29 @@ if (!isGateBreached && unit.side === "player" && unit.target && !unit.target.isD
         // the wall" (dist < 20 before it holds). That block was written for
         // open-field battles, where "walk toward the enemy by default" is
         // correct; it was never given a siege exclusion, so it fires here too.
-        // The cavalry_reserve freeze above is really just a special case of
-        // this same problem for one role. Fix: freeze every player siege unit
-        // outright — melee, ranged, gunpowder, cavalry alike — the instant it
-        // has no orders, before it ever reaches that fallback or _handleMovement.
-        // Land battles are completely untouched (inSiege gates this entirely),
-        // and this stands down the moment the player selects the unit and
-        // issues any real command (hasOrders flips true, orderType gets set —
-        // see executeSiegeAssaultAI / the Q-E-R-F handlers in
+        // RESERVES REMOVED (explicit request): this used to also carry a
+        // separate "cavalry_reserve" freeze case above this one, parking every
+        // mounted unit motionless at camp until the gate broke. That entire
+        // reserve mechanism — along with the two OTHER independent reserve/
+        // freeze systems that used to exist (a random 2% whole-army draft in
+        // executeSiegeAssaultAI, and a second competing AI driver in
+        // siegeEngineLogic.js) — has been removed. See battlefield_commands.js's
+        // executeSiegeAssaultAI for the current model: every unit is either a
+        // ranged shooter, a ram pusher, or ladder crew (active or queued),
+        // permanently, with nothing ever routed back to a reserve/camp state.
+        // Fix: freeze every player siege unit outright — melee, ranged,
+        // gunpowder, cavalry alike — the instant it has no orders, before it
+        // ever reaches that fallback or _handleMovement. Land battles are
+        // completely untouched (inSiege gates this entirely), and this stands
+        // down the moment the player selects the unit and issues any real
+        // command (hasOrders flips true, orderType gets set — see
+        // executeSiegeAssaultAI / the Q-E-R-F handlers in
         // battlefield_commands.js), at which point normal siege AI resumes.
         if (inSiege && unit.side === "player" && !unit.hasOrders && !unit.isCommander) {
             unit.vx = 0;
             unit.vy = 0;
             unit.state = "idle";
-            // Same stamina-regen courtesy as the cavalry freeze — resting, not fighting.
+            // Same stamina-regen courtesy as before — resting, not fighting.
             if (unit.stats.stamina < 100 && Math.random() > 0.9) unit.stats.stamina++;
             return;
         }
@@ -873,6 +1170,48 @@ if (!isGateBreached && unit.side === "player" && unit.target && !unit.target.isD
         }
 
 // SURGERY 2: Add 'follow' and 'retreat' so units don't drop into combat logic against their own waypoints
+        //
+        // BUGFIX ("ram pushers/gate-freed units permanently stuck at the
+        // broken gate, immune to new orders"): priorityOverride was set
+        // once (siegeEngineLogic.js's gate-breach hand-off, ai_categories.js's
+        // own gate_charger hand-off) and never cleared anywhere in the
+        // codebase. Once true, this branch short-circuited on its own
+        // FIRST clause every tick forever, steering the unit at a frozen
+        // one-time dummy target (siegeEngineLogic.js line ~166: gateX,
+        // gateY-20) with no logic anywhere to ever hand the unit a new
+        // waypoint once it arrived — _handleMovement is a pure physics
+        // integrator with no re-targeting of its own. Manual player move
+        // orders (battlefield_commands.js) only ever write orderTargetPoint/
+        // orderType, never touch priorityOverride or unit.target directly,
+        // so a freed unit kept re-locking onto the stale gate point every
+        // frame no matter what the player clicked — reading as "collision"
+        // when it was really a dead waypoint with no continuation.
+        //
+        // Fix: priorityOverride/dummy-target lock only holds while it's
+        // actually still driving toward genuinely unclaimed navigation —
+        // the moment something has supplied a real (non-dummy) target, or
+        // the player has issued a fresh point via orderTargetPoint, that's
+        // real re-aiming and the override should stand down instead of
+        // being sticky forever. We detect "fresh player order" by orderType
+        // no longer being one of the funnel/dummy order types, or by
+        // orderTargetPoint having been set to something new since the
+        // dummy target was assigned.
+        if (unit.priorityOverride && unit.target && !unit.target.isDummy) {
+            // Something (seek_engage resolving a live enemy, a manual
+            // attack-move, etc.) has already given this unit a real target.
+            // The dummy-funnel job is done — release the lock instead of
+            // re-deriving movement from a target that's no longer a dummy
+            // waypoint we own.
+            unit.priorityOverride = false;
+        } else if (unit.priorityOverride && unit.orderTargetPoint &&
+            (!unit.target || unit.orderTargetPoint.x !== unit.target.x || unit.orderTargetPoint.y !== unit.target.y)) {
+            // The player (or formation logic) issued a fresh destination
+            // that doesn't match the frozen dummy point — honor it and
+            // drop the override so this unit is no longer immune to orders.
+            unit.priorityOverride = false;
+            unit.target = { x: unit.orderTargetPoint.x, y: unit.orderTargetPoint.y, hp: 9999, isDummy: true };
+        }
+
         if (unit.priorityOverride || ((["siege_assault", "move_to_point", "follow", "retreat"].includes(unit.orderType)) && unit.target && unit.target.isDummy)) {
 
              let dx = unit.target.x - unit.x;
@@ -881,6 +1220,93 @@ if (!isGateBreached && unit.side === "player" && unit.target && !unit.target.isD
              this._handleMovement(unit, dx, dy, dist, battleEnv);
              let hasMoved = Math.abs(unit.x - oldX) > 0.1 || Math.abs(unit.y - oldY) > 0.1;
              unit.state = hasMoved ? "moving" : "idle";
+
+             // DEBUG: [DUMMY-LOCK] logs every tick a unit spends inside this
+             // branch, throttled to a couple times a second per unit so it
+             // doesn't flood the console. If a stuck unit is logging this
+             // with dist staying roughly constant and NOT shrinking over
+             // several seconds, it's stuck on approach (something else —
+             // e.g. the GATE-CLAMP snap in siegeEngineLogic.js, or plain
+             // unit-vs-unit collision — is preventing it from ever closing
+             // the distance to its own target). If dist is near 0 and
+             // staying there, it means this branch's own dist<20 release
+             // below isn't firing — check hasMoved/unit.state in that case.
+             if (window.__SIEGE_DEBUG_GATE__) {
+                 unit.__debugLastLog = unit.__debugLastLog || 0;
+                 if (Date.now() - unit.__debugLastLog > 500) {
+                     unit.__debugLastLog = Date.now();
+                     console.log(
+                         "%c[DUMMY-LOCK] unit driving toward dummy/override target",
+                         "color:#000;background:#f1c40f;font-weight:bold;padding:2px 4px;",
+                         {
+                             unitId: unit.id ?? unit.name ?? "(no id)",
+                             siegeRole: unit.siegeRole,
+                             orderType: unit.orderType,
+                             priorityOverride: unit.priorityOverride,
+                             unitX: Math.round(unit.x),
+                             unitY: Math.round(unit.y),
+                             targetX: Math.round(unit.target.x),
+                             targetY: Math.round(unit.target.y),
+                             dist: Math.round(dist),
+                             hasMoved,
+                             state: unit.state
+                         }
+                     );
+                 }
+             }
+
+             // BUGFIX continued: arriving at the dummy point used to be a
+             // dead end (dist collapses toward 0, _handleMovement zeroes
+             // velocity, nothing ever supplies a next waypoint). Once truly
+             // close, release the lock and hand the unit to normal
+             // seek_engage targeting instead of leaving it parked forever.
+             if (dist < 20 && unit.target && unit.target.isDummy) {
+                 // ── AI TACTIC: HOLD — FORMATION LOCK-IN ─────────────────
+                 // A stand_ground (HOLD)-tagged unit walking to its
+                 // calculateFormationOffsets() slot (see RTSControls.js's
+                 // Cmd.setAiTactic 'stand_ground' branch: move_to_point +
+                 // a dummy target at cx+offsetX/cy+offsetY) is still just a
+                 // dummy-target arrival exactly like siege_assault/follow/
+                 // retreat funnel through above — but it must NOT fall into
+                 // the generic seek_engage hand-off below like they do.
+                 // "Formation king: never chases, prioritizes staying
+                 // together" (RTSControls.js doc comment) means arriving at
+                 // the slot should lock the unit into actually holding it,
+                 // not immediately release it to chase the nearest enemy.
+                 // Also covers the formationTimer running out before actual
+                 // arrival (a crowded/blocked slot) so a Hold unit can't get
+                 // stuck marching forever either way.
+                 if (unit.aiTacticGroup === 'stand_ground') {
+                     unit.priorityOverride = false;
+                     unit.target = null;
+                     unit.orderType = "hold_position";
+                     unit.hasOrders = true;
+                     unit.formationTimer = 0;
+                     return;
+                 }
+                 if (window.__SIEGE_DEBUG_GATE__) {
+                     console.log(
+                         "%c[DUMMY-LOCK] released — handing off to seek_engage",
+                         "color:#fff;background:#27ae60;font-weight:bold;padding:2px 4px;",
+                         { unitId: unit.id ?? unit.name ?? "(no id)", finalDist: Math.round(dist) }
+                     );
+                 }
+                 unit.priorityOverride = false;
+                 unit.target = null;
+                 unit.orderType = "seek_engage";
+                 unit.hasOrders = true;
+             } else if (unit.aiTacticGroup === 'stand_ground' && unit.formationTimer === 0 &&
+                        unit.target && unit.target.isDummy) {
+                 // formationTimer expired (decremented once per tick near the
+                 // top of this function) before the unit actually reached its
+                 // slot — e.g. a blocked/crowded formation position. Lock into
+                 // hold_position wherever it currently stands rather than
+                 // marching indefinitely toward an unreachable point.
+                 unit.priorityOverride = false;
+                 unit.target = null;
+                 unit.orderType = "hold_position";
+                 unit.hasOrders = true;
+             }
              return;
         }
          
@@ -901,6 +1327,40 @@ if (!isGateBreached && unit.side === "player" && unit.target && !unit.target.isD
         // microLightCav's kite orderMove vectors actually execute frame-to-frame.
         const isRangedCav = isMountedOrLarge && !!(unit.stats?.isRanged) &&
             (unit.stats?.ammo > 0 || unit.ammo > 0);
+
+        // ROCKET HARD LOCK — per direct request: "once its shooting, its in
+        // machine gun mode and CANNOT switch to any other orientation until
+        // all ammunition is exhausted. it cannot move, it cannot stop
+        // shooting until all rounds fired for specifically rocket." Unlike
+        // every other ranged unit type (which can still reposition/chase
+        // while in statusrange — see the dist > rangeThreshold movement
+        // branch below), a Rocket unit that's actively in ranged stance
+        // with live ammo is fully pinned in place for the whole volley:
+        // no movement, no orientation change (paired with infscript.js's
+        // own _rocketLocked direction lock, which already holds the
+        // up/down pose for the same duration — this is the AI-side
+        // counterpart that stops the unit's actual x/y from changing
+        // too). The lock releases the instant ammo hits 0 (updateStance
+        // demotes currentStance to "statusmelee" on its own, so this
+        // condition naturally goes false and normal melee-closing
+        // movement resumes automatically — no separate release logic
+        // needed here).
+        //
+        // FIX — added `unit.state === "attacking"`: currentStance flips to
+        // "statusrange" the moment the unit has ammo and is outside melee
+        // distance (15), which is true from far across the map, long before
+        // it's within its actual weapon range. Without this clause the lock
+        // was already true on approach, forcing `!isRocketLocked` to false in
+        // the `dist > rangeThreshold` check below regardless of real distance —
+        // the unit skipped movement entirely and fired from wherever it
+        // happened to be. `unit.state` only becomes "attacking" inside the
+        // else-branch below, i.e. after a prior frame already confirmed the
+        // unit was within rangeThreshold — so the lock now only grabs hold
+        // once the unit has legitimately closed to range.
+        const isRocketLocked = unit.unitType === "Rocket" &&
+            unit.stats?.currentStance === "statusrange" &&
+            unit.state === "attacking" &&
+            unit.stats?.ammo > 0;
 
         if (unit.target) {
             if (inSiege && unit.side === "player" && isMountedOrLarge) {
@@ -931,14 +1391,317 @@ if (!isGateBreached && unit.side === "player" && unit.target && !unit.target.isD
             let dy = unit.target.y - unit.y;
             let dist = Math.hypot(dx, dy);
 
+            // ── AI TACTIC: SKIRMISH KITING ──────────────────────────────
+            // Skirmish-tagged units (and auto-tagged ranged units, which
+            // pick skirmish for themselves — see RTSControls.js's
+            // Cmd.setAiTactic doc comment) retreat once a live enemy target
+            // closes inside a "danger zone" fraction of their weapon range,
+            // rather than standing still or advancing into melee. This
+            // trades one frame's attack for survivability — genuine
+            // hit-and-run skirmishing, not simultaneous walk+shoot (this
+            // engine's attack execution and movement are mutually
+            // exclusive per frame, so that's not available without a much
+            // larger change). Gated on !inSiege: getSiegePathfindingVector
+            // further down in this function steers using unit.target's
+            // real position regardless of the dx/dy passed to
+            // _handleMovement, which would fight a reversed retreat vector
+            // during a siege specifically — every other battle type
+            // (land/river/naval/survival) has no such conflict.
+            //
+            // FIX ("it also flickers with ranged units"): this used to be a
+            // single hard threshold — the instant dist crossed
+            // _kiteThreshold the unit retreated, and the instant it drifted
+            // back over that exact same line (even by a sub-pixel amount,
+            // e.g. from the retreat step itself, or the enemy's own
+            // movement) kiting simply stopped firing with no minimum
+            // commitment at all. Sitting right at that boundary — which is
+            // exactly where a retreating unit naturally ends up, since
+            // retreating IS what pushes dist back across the line — flipped
+            // the behavior every single frame: retreat one frame, stop the
+            // next, retreat again, read as a flicker/vibration in place.
+            // Same class of bug as the melee poke-and-run flicker fixed
+            // just above (search "FIX" near AI TACTIC: SKIRMISH
+            // POKE-AND-RUN) and fixed the same way: real hysteresis instead
+            // of one shared line. _kiteThreshold is now only the point that
+            // STARTS a retreat; once retreating, the unit commits until
+            // EITHER it's opened a clear KITE_STOP_MARGIN of extra distance
+            // past that threshold, OR its own minimum commitment timer
+            // expires — whichever comes first — so a single frame of
+            // crossing back over the original line can't instantly cancel
+            // the retreat.
+            const _onRangedSiegeDuty = ['treb_crew', 'trebuchet_crew', 'engine_crew', 'counter_battery'].indexOf(unit.siegeRole) !== -1;
+            const _wantsSkirmish = unit.aiTacticGroup === 'skirmish' ||
+                (unit.aiTacticGroup === 'auto' && unit.stats.isRanged);
+            const _hasAmmo = !(unit.stats.ammo !== undefined && unit.stats.ammo <= 0);
+            if (_wantsSkirmish && !inSiege && !_onRangedSiegeDuty && unit.stats.isRanged && _hasAmmo &&
+                !unit.target.isDummy && unit.target.hp > 0) {
+                const _kiteThreshold  = (unit.stats.range || 200) * 0.55;
+                const _kiteStopMargin = (unit.stats.range || 200) * 0.12; // extra clearance before a commitment retreat is satisfied
+                const _kiteNow = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+
+                const _alreadyKiting = unit._skirmKiteUntil && _kiteNow < unit._skirmKiteUntil;
+                const _shouldStartKiting = dist < _kiteThreshold && dist > 0.1;
+                // Once started, stay committed until either real clearance
+                // is opened up or the timer runs out — not just one frame
+                // back over the starting line.
+                const _shouldContinueKiting = _alreadyKiting && dist < (_kiteThreshold + _kiteStopMargin) && dist > 0.1;
+
+                if (_shouldStartKiting || _shouldContinueKiting) {
+                    if (!_alreadyKiting) {
+                        // Freshly starting a retreat beat — commit for a
+                        // short randomized window so a single frame of
+                        // wobble right at the threshold can't cancel it
+                        // immediately. Mirrors the melee poke-and-run
+                        // timing above.
+                        unit._skirmKiteUntil = _kiteNow + 300 + Math.random() * 300; // ~0.3–0.6s commitment
+                    }
+                    let _kx = -dx, _ky = -dy;
+                    // WATER-AVOIDANCE (per direct request: "skirmish command
+                    // in a ship will always try to not jump to the water if
+                    // possible, charge doesn't care"). Straight-back kiting
+                    // on a ship deck can walk a unit right off the edge into
+                    // open water. Only relevant on naval maps — on land there
+                    // is no deck edge to fall off, so this is fully skipped
+                    // there. CHARGE is deliberately untouched: it never
+                    // routes through this block at all, and no equivalent
+                    // check was added to its rangeThreshold override above —
+                    // "charge doesn't care" per direct request.
+                    if (window.inNavalBattle) {
+                        const _retreatMag = Math.hypot(_kx, _ky) || 1;
+                        const _stepBack = (_kx / _retreatMag) * 24;
+                        const _stepBackY = (_ky / _retreatMag) * 24;
+                        if (_isOnAnyDeck(unit.x + _stepBack, unit.y + _stepBackY)) {
+                            // Straight retreat stays on deck — use it as-is.
+                        } else {
+                            // Straight retreat would step into water. Try a
+                            // handful of alternate retreat headings (still
+                            // net "away from the enemy", just angled) and use
+                            // the first one that keeps the unit on deck.
+                            // Falls back to the original straight-back vector
+                            // (still better than standing still and eating
+                            // melee) only if literally every angle tried is
+                            // water — e.g. a unit already cornered at the
+                            // ship's edge with the enemy blocking the only
+                            // dry direction.
+                            let _found = false;
+                            const _baseAngle = Math.atan2(_ky, _kx);
+                            const _angleOffsets = [0.4, -0.4, 0.8, -0.8, 1.2, -1.2, 1.6, -1.6];
+                            for (let _ai = 0; _ai < _angleOffsets.length; _ai++) {
+                                const _tryAngle = _baseAngle + _angleOffsets[_ai];
+                                const _tx = Math.cos(_tryAngle) * 24;
+                                const _ty = Math.sin(_tryAngle) * 24;
+                                if (_isOnAnyDeck(unit.x + _tx, unit.y + _ty)) {
+                                    _kx = Math.cos(_tryAngle) * _retreatMag;
+                                    _ky = Math.sin(_tryAngle) * _retreatMag;
+                                    _found = true;
+                                    break;
+                                }
+                            }
+                            // if nothing dry was found, _kx/_ky stay as the
+                            // original straight-back vector (deliberate
+                            // last-resort fallback, see comment above).
+                        }
+                    }
+                    this._handleMovement(unit, _kx, _ky, dist, battleEnv);
+                    unit.state = "moving";
+                    return;
+                } else if (unit._skirmKiteUntil) {
+                    // No longer starting or continuing a kite — clear the
+                    // stale commitment timer so a later re-entry into range
+                    // starts a fresh randomized window rather than
+                    // inheriting an old timestamp.
+                    unit._skirmKiteUntil = 0;
+                }
+            }
+
+            // ── AI TACTIC: SKIRMISH POKE-AND-RUN (melee) ────────────────
+            // Per direct request: "for the skirmish all melee units once
+            // reach 200 pixels or less should almost never try to attack
+            // but instead try to poke and run back giving ground, the goal
+            // is to get near the enemy and then run away but if gap too
+            // large come close again to keep trying to do that with slight
+            // randomness." Keeps last turn's isolation targeting completely
+            // untouched (battlefield_commands.js still picks WHICH enemy a
+            // melee skirmish unit goes after) — this only changes what the
+            // unit does once it's near that target: approach normally while
+            // far, then once within ~200px cycle poke-forward /
+            // retreat-back instead of settling into a stationary melee
+            // trade. A small per-unit state machine (_skirmPokeUntil,
+            // _skirmPokeMode) avoids flickering every single frame right at
+            // the 200px boundary — once a mode is chosen it holds for a
+            // short randomized duration before re-evaluating.
+            //
+            // FIX ("a little too jerky as if its trying to move forward and
+            // backwards same time or something or just flickering while
+            // retreating"): the original version let 'poke' close the
+            // ENTIRE remaining gap every beat (all the way to point-blank,
+            // dist≈0) before the timer flipped it to 'retreat' — two
+            // problems followed from that. First, at dist≈0 the retreat
+            // angle (atan2(-dy,-dx)) becomes numerically unstable: tiny
+            // sub-pixel position deltas swing the angle wildly frame to
+            // frame, which reads as flickering/vibrating rather than a
+            // clean about-face. Second, ramming to point-blank every poke
+            // beat left basically no gap for 'retreat' to open before its
+            // own timer expired and flipped back to 'poke' again, so the
+            // unit visibly looked like it was doing both at once. Fixed
+            // with real hysteresis instead of pure time-limiting: 'poke'
+            // now stops advancing once it reaches POKE_FLOOR (~55px, close
+            // enough to look aggressive without ever reaching dist≈0), and
+            // 'retreat' stops retreating once it's opened DIST past
+            // POKE_RANGE by RETREAT_MARGIN (~40px clear buffer, not just
+            // barely crossing back under 200). Each mode can now also exit
+            // EARLY (before its timer) once it's reached its own distance
+            // goal, and a mode is only picked when the timer expires AND
+            // the current mode has nothing left to accomplish — so a unit
+            // that reaches the poke floor early just holds there smoothly
+            // (jittering isn't needed once already at the target distance)
+            // instead of ping-ponging. Also guards the near-zero-distance
+            // case directly: if dist ever drops below a tiny epsilon,
+            // treats it as "already at the poke floor" rather than
+            // computing a noisy direction from a near-zero vector.
+            //
+            // Gated on !inSiege for the same reason as the ranged kiting
+            // block above (getSiegePathfindingVector overrides steering
+            // during a siege) — and per direct request ("during a siege all
+            // these ai logic is secondary to operating siege equipment"),
+            // also skips a unit currently holding a committed siege role so
+            // that work is never interrupted.
+            const _wantsMeleeSkirmish = unit.aiTacticGroup === 'skirmish' && !unit.stats.isRanged;
+            const _onSiegeDuty = ['ladder_carrier', 'ram_pusher', 'trebuchet_crew'].indexOf(unit.siegeRole) !== -1;
+            if (_wantsMeleeSkirmish && !inSiege && !_onSiegeDuty &&
+                !unit.target.isDummy && unit.target.hp > 0) {
+                const POKE_RANGE     = 200;
+                const POKE_FLOOR     = 55;  // how close 'poke' is willing to press in — never point-blank
+                const RETREAT_MARGIN = 40;  // how far past POKE_RANGE 'retreat' opens up before it's satisfied
+                const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+
+                if (dist <= POKE_RANGE) {
+                    const timerExpired = !unit._skirmPokeUntil || now >= unit._skirmPokeUntil;
+                    // A mode is also considered "done" once it's reached its
+                    // own distance goal — this is what stops poke/retreat
+                    // from overshooting into each other's territory (and
+                    // into the dist≈0 instability) even if the randomized
+                    // timer hasn't expired yet.
+                    const modeSatisfied =
+                        (unit._skirmPokeMode === 'poke'    && dist <= POKE_FLOOR) ||
+                        (unit._skirmPokeMode === 'retreat' && dist >= POKE_RANGE + RETREAT_MARGIN);
+
+                    if (!unit._skirmPokeMode || timerExpired || modeSatisfied) {
+                        // Time to re-roll. Slight randomness per direct
+                        // request ("with slight randomness") — both which
+                        // mode comes next and how long it holds. Biased
+                        // toward whichever direction still has room to move
+                        // so it doesn't immediately re-pick a mode that's
+                        // already satisfied (e.g. dist already at the poke
+                        // floor shouldn't have much chance of rolling
+                        // 'poke' again).
+                        const canPoke    = dist > POKE_FLOOR + 5;
+                        const canRetreat = dist < POKE_RANGE + RETREAT_MARGIN - 5;
+                        if (canPoke && canRetreat) {
+                            unit._skirmPokeMode = (Math.random() < 0.5) ? 'poke' : 'retreat';
+                        } else if (canPoke) {
+                            unit._skirmPokeMode = 'poke';
+                        } else if (canRetreat) {
+                            unit._skirmPokeMode = 'retreat';
+                        } else {
+                            // Sitting right between both floors with no room
+                            // to move either way — hold still this beat
+                            // rather than force a direction that would just
+                            // immediately re-satisfy and flip again.
+                            unit._skirmPokeMode = 'hold';
+                        }
+                        unit._skirmPokeUntil = now + 350 + Math.random() * 400; // ~0.35–0.75s per beat
+                    }
+
+                    if (unit._skirmPokeMode === 'hold' || dist < 1) {
+                        // Guards the degenerate near-zero-distance case
+                        // directly (see fix comment above) — no direction
+                        // computed at all, unit just stands its ground for
+                        // this frame rather than risk a noisy atan2 result.
+                        unit.vx = 0;
+                        unit.vy = 0;
+                        updateSpeedRamp(unit, false);
+                    } else if (unit._skirmPokeMode === 'retreat') {
+                        // "run back giving ground" — small randomized angle
+                        // off the direct retreat line so a whole squad of
+                        // skirmishers doesn't all back away in perfect
+                        // unison.
+                        const jitter = (Math.random() - 0.5) * 0.6; // ± ~17°
+                        const baseAngle = Math.atan2(-dy, -dx);
+                        const ang = baseAngle + jitter;
+                        this._handleMovement(unit, Math.cos(ang) * dist, Math.sin(ang) * dist, dist, battleEnv);
+                    } else {
+                        // "poke" — close toward the target (a real approach,
+                        // not a full commit to melee) with the same slight
+                        // angular jitter, but only down to POKE_FLOOR — see
+                        // fix comment above for why this no longer rams all
+                        // the way to point-blank. Even so, this deliberately
+                        // does NOT let the unit's state fall through to the
+                        // normal attack branch below — "almost never try to
+                        // attack" is satisfied by simply never handing
+                        // control past this point while poke-and-run is
+                        // active. A unit that's already engaged in POKE mode
+                        // right at its own attack range will still
+                        // occasionally land a hit via the brief window each
+                        // cycle where dist naturally closes past the
+                        // engine's own melee trigger elsewhere — "almost
+                        // never," not "literally never," matching the
+                        // wording of the request.
+                        const jitter = (Math.random() - 0.5) * 0.4; // tighter jitter than retreat — still basically closing in
+                        const baseAngle = Math.atan2(dy, dx);
+                        const ang = baseAngle + jitter;
+                        this._handleMovement(unit, Math.cos(ang) * dist, Math.sin(ang) * dist, dist, battleEnv);
+                    }
+                    unit.state = "moving";
+                    return;
+                } else {
+                    // "if gap too large come close again" — outside 200px,
+                    // clear any stale poke/retreat state and let normal
+                    // seek_engage movement (later in this function) close
+                    // the distance like it already does for every other
+                    // seek_engage unit; the cycle picks back up naturally
+                    // once dist drops back under POKE_RANGE.
+                    unit._skirmPokeUntil = 0;
+                    unit._skirmPokeMode  = null;
+                }
+            }
+
 // ---> SURGERY: Prevent crash on loaded saves (Hydration Fix)
 if (typeof unit.stats.updateStance === 'function') {
     unit.stats.updateStance(dist);
 } else {
-    // Fallback logic: if the function was lost during JSON load, 
+    // Fallback logic: if the function was lost during JSON load,
     // we manually determine the stance so the AI doesn't break.
-    const meleeRange = 40; 
-    unit.stats.currentStance = (dist < meleeRange) ? "statusmelee" : "statusrange";
+    //
+    // AMMO CHECK ADDED — per direct bug report ("almost all units seem
+    // to have infinite ammo"). This fallback used to decide stance from
+    // DISTANCE ALONE, completely ignoring ammo:
+    //     unit.stats.currentStance = (dist < meleeRange) ? "statusmelee" : "statusrange";
+    // Every other stance-setter in this codebase (troop_system.js's
+    // real updateStance() method, and handlePlayerOverride's own
+    // fallback just above in this same file) correctly forces melee
+    // once ammo hits 0. This was the one path that didn't. Whenever
+    // THIS fallback runs — updateStance isn't a callable function on
+    // unit.stats, e.g. for any unit whose stats object isn't a live
+    // Troop class instance — a ranged unit sitting outside melee range
+    // would get reset to "statusrange" here on literally every single
+    // frame, even the instant after _handleCombatExecution had just
+    // correctly demoted it to "statusmelee" for having 0 ammo. Since
+    // ammo only decrements inside the "statusrange" branch, that
+    // per-frame reset let it re-enter and decrement indefinitely below
+    // zero — the unit visually never stops firing. Now mirrors the
+    // exact ammo-first logic used everywhere else: melee if unarmed-of-
+    // ammo OR within melee engagement distance, range otherwise.
+    if (!unit.stats.isRanged) {
+        unit.stats.currentStance = "statusmelee";
+    } else {
+        const MELEE_ENGAGEMENT_DISTANCE = 15;
+        if ((unit.stats.ammo !== undefined && unit.stats.ammo <= 0) || dist <= MELEE_ENGAGEMENT_DISTANCE) {
+            unit.stats.currentStance = "statusmelee";
+        } else {
+            unit.stats.currentStance = "statusrange";
+        }
+    }
 }
 
             let effectiveRange = unit.stats.currentStance === "statusmelee" ? 30 : unit.stats.range;
@@ -951,19 +1714,96 @@ if (typeof unit.stats.updateStance === 'function') {
                 rangeThreshold = effectiveRange;
             }
 
-			if (dist > rangeThreshold) {
-                // SURGERY 3: The "E" Command Leg-Lock
-                let isMeleeSelfDefense = (!unit.stats.isRanged && dist < 70); 
+            // ── AI TACTIC: CHARGE ────────────────────────────────────────
+            // melee_charge (CHARGE)-tagged ranged units close aggressively
+            // to ~20% of their own weapon range instead of stopping at the
+            // normal 80-95% engagement band above — see RTSControls.js's
+            // Cmd.setAiTactic doc comment ("Ranged units get an aggressive
+            // override... that closes to ~20% of their own range"). Melee/
+            // cavalry units already fight aggressively under plain
+            // seek_engage (no ranged engagement band applies to them at
+            // all), so this only needs to touch isRanged units. Checked
+            // after the HOLD/FOLLOW override above so a unit can never be
+            // simultaneously tagged both — aiTacticGroup is a single value
+            // per unit — and deliberately does not touch effectiveRange
+            // itself (melee stance/self-defense radius logic upstream is
+            // untouched), only how close the unit is willing to press in
+            // before it's satisfied with its position.
+            if (unit.aiTacticGroup === 'melee_charge' && unit.stats.isRanged &&
+                unit.stats.currentStance === "statusrange") {
+                rangeThreshold = effectiveRange * 0.2;
+            }
 
-             if (unit.orderType === "hold_position" && !isMeleeSelfDefense) {
-                    unit.vx = 0; 
+            // FIX ("ranged units... may just charge very close to the enemy
+            // instead of at a range reasonable distance... charge have a
+            // shortened range distance of half instead of melee distance
+            // for RANGE units. melee units continue to charge" — direct
+            // request): a plain ADVANCE order (seek_engage, no aiTacticGroup
+            // at all) has no dedicated engagement-distance rule of its own —
+            // it was falling through to whatever effectiveRange*0.8/0.95
+            // computed above, or drifting closer over successive attacking
+            // frames via the 0.95 isAlreadyAttacking branch. Ranged units
+            // given a bare ADVANCE (no CHARGE/HOLD/FOLLOW/SKIRM tag) now get
+            // a hard floor: never press closer than half their own weapon
+            // range. Melee units are untouched — effectiveRange for them is
+            // already the fixed 30px melee-engagement constant from the
+            // stance block above, not a real weapon range, so "half range"
+            // has no meaningful equivalent for them and they keep charging
+            // exactly as before. CHARGE's existing 20%-of-range override
+            // above is a distinct, deliberate tactic and takes priority
+            // whenever aiTacticGroup is actually 'melee_charge' — this only
+            // fills the previously-unhandled PLAIN-seek_engage-no-tactic
+            // case, so tagging a unit CHARGE still closes to 20% as
+            // documented, not diluted to 50%.
+            if (!unit.aiTacticGroup && unit.orderType === "seek_engage" &&
+                unit.stats.isRanged && unit.stats.currentStance === "statusrange") {
+                rangeThreshold = Math.min(rangeThreshold, effectiveRange * 0.5);
+            }
+
+			if (dist > rangeThreshold && !isRocketLocked) {
+                // ── AI TACTIC: HOLD — NEVER CHARGE, NEVER RETREAT ────────
+                // FIX ("Hold command need to ignore everything and just form
+                // a circle. After circle is formed then attack. Will not
+                // charge or retreat" / hold units still visibly closing a
+                // few steps toward a melee target): this used to only root
+                // a hold_position unit in place when !isMeleeSelfDefense —
+                // so a MELEE unit whose target was inside the 70px emergency
+                // self-defense radius (battlefield_commands.js's
+                // pickSmartCombatTarget aggroLimit for melee) but still
+                // beyond its real effectiveRange (30px melee reach) fell
+                // into the movement branch below and walked forward to close
+                // the gap. That's a small but real "charge" — exactly what a
+                // locked Hold unit must never do. A holding unit now always
+                // roots in place once it has an order and simply doesn't
+                // fight anything outside its real reach — it does not
+                // advance to close distance under any circumstance. This
+                // does not change WHICH target a melee hold unit acquires
+                // (still the existing 70px aggroLimit upstream in
+                // battlefield_commands.js — a wide "will engage if it comes
+                // close enough" radius is fine and intentional), only
+                // whether the unit is allowed to walk toward it while
+                // acquired-but-not-yet-in-range.
+                if (unit.orderType === "hold_position") {
+                    unit.vx = 0;
                     unit.vy = 0;
                     unit.state = "idle";
                 } else {
                     // ---> SURGERY: STANDARD MOVEMENT FOR ALL <---
                     this._handleMovement(unit, dx, dy, dist, battleEnv);
                 }
-			} else {
+			} else if (unit.orderType === "move_to_point" && !isRocketLocked) {
+                // FIX: a unit under an active player move order used to fall
+                // straight into the "in range, stop and shoot" branch below the
+                // instant any enemy came within firing range — the move command
+                // was silently dropped and the unit froze to fight instead. That
+                // is still correct default behavior with NO explicit order, but
+                // a player-issued move_to_point should be honored: keep moving
+                // toward the ordered destination instead of stopping dead.
+                // (Naval made this especially bad — ships are cramped, so ranged
+                // units were almost always "in range" of something and
+                // effectively never obeyed a move command at all.)
+                this._handleMovement(unit, dx, dy, dist, battleEnv);
+            } else {
 // EXTREME STOP: For ranged units in range, kill velocity completely so the animation locks cleanly
                 if (unit.stats.currentStance === "statusrange") {
                     
@@ -971,8 +1811,12 @@ if (typeof unit.stats.updateStance === 'function') {
                     // RANGED_CAV EXCEPTION: horse archers / mounted ranged keep their
                     // velocity so microLightCav's kite orderMove actually executes.
                     // They shoot while moving — that is the entire point of the unit type.
-                    // Only zero velocity for grounded ranged units.
-                    if (!isRangedCav) {
+                    // Only zero velocity for grounded ranged units. ROCKET EXCEPTION TO
+                    // THE EXCEPTION: isRocketLocked always stops dead even if somehow
+                    // also flagged isRangedCav (Rocket isn't cavalry today, but this
+                    // keeps the lock airtight if that ever changes) — a firing Rocket
+                    // never moves, full stop, no kiting.
+                    if (!isRangedCav || isRocketLocked) {
                         unit.vx = 0;
                         unit.vy = 0;
                         // Force state to prevent the engine from jittering the animation if residual velocity exists
@@ -998,11 +1842,13 @@ if (typeof unit.stats.updateStance === 'function') {
 		
 		
 // --- MOUNT & INFANTRY AUDIO ---
-        const isAnimal = unit.stats?.isLarge || unit.isMounted || String(unit.unitType).toLowerCase().match(/(cav|horse|camel|eleph)/);
+        const nameStrCheck = String(unit.unitType).toLowerCase();
+        const isCannon = unit.stats && unit.stats.role === (typeof ROLES !== 'undefined' ? ROLES.MOUNTED_GUNNER : "mounted_gunner"); // FIX: was nameStrCheck.includes("camel cannon") — that "unchanged internal id" premise stopped holding the moment the roster key became "Cannon", so this silently went false, isAnimal fell through to true via unit.stats.isLarge, and the Cannon started playing horse gallop/idle mount sounds. Role-driven now (unique to this unit), matching every other fix in this codebase from the same rename.
+        const isAnimal = !isCannon && (unit.stats?.isLarge || unit.isMounted || nameStrCheck.match(/(cav|horse|camel|eleph)/));
         
         if (isAnimal && unit.state !== "FLEEING") {
             let mType = "horse";
-            let nameStr = String(unit.unitType).toLowerCase();
+            let nameStr = nameStrCheck;
             if (nameStr.includes("elephant")) mType = "elephant";
             else if (nameStr.includes("camel")) mType = "camel";
 
@@ -1174,8 +2020,18 @@ _handleMovement: function(unit, dx, dy, dist, battleEnv) {
         if (dist < 0.1) {
             unit.vx = 0;
             unit.vy = 0;
+            updateSpeedRamp(unit, false); // stopped — begin decelerating the ramp too
             return;
         }
+
+        // Advance the mounted-unit acceleration ramp once per call. Every
+        // early-return branch below (climbing, settling, shouldHold, etc.)
+        // either wants full commitment (climbing/settling — ramp toward 1)
+        // or is explicitly stationary (shouldHold — ramp toward 0). This
+        // call defaults to "wants to move" since reaching this point means
+        // the unit has a real dx/dy toward a target; branches that actually
+        // hold still re-call updateSpeedRamp(unit, false) themselves below.
+        updateSpeedRamp(unit, true);
 		
 		
         let shouldHold = false;
@@ -1226,15 +2082,41 @@ if (unit.isClimbing && unit.targetLadder) {
         let baseSpeed = unit.stats?.speed || 1;
         unit.vy = -Math.abs(baseSpeed * 1.4); 
 
-        // 3b. CLIMB EXIT: arrived at the wall-top landing.
-        // This is the other half of the real climb state machine — without
-        // this, isClimbing would never turn back off and the unit would climb
-        // forever. On arrival we snap exactly to the landing Y (no residual
-        // velocity carrying them past it), flip onWall on as the RESULT of a
-        // completed climb, and hand them a real order so nothing downstream
-        // treats them as "uncommanded" and shoves them back off the wall.
+        // 3a. THE ACTUAL CLIMB (this was missing entirely — see BUGFIX note
+        // below). Resolve the landing Y first so it's available both for the
+        // clamp and the exit check.
+        //
+        // SURGERY (post-climb settle): instead of handing full-speed
+        // seek_engage immediately on landing, first drift a further
+        // 100-200px north at half speed (settleTargetY / settling flag
+        // below). This clears the unit off the crowded ladder-top tile
+        // before it starts fighting, and matches the requested behavior —
+        // climb, settle north a bit slower, then fight at normal speed.
+        // The settle phase is consumed in the "SETTLE PHASE" block further
+        // down this function (right before the normal movement resolves).
         let _climbTargetY = (unit.climbTargetY != null) ? unit.climbTargetY
             : (typeof SiegeTopography !== 'undefined' ? SiegeTopography.wallPixelY - 20 : unit.y - 20);
+
+        // BUGFIX (THE ACTUAL "STUCK ON LADDER" BUG): every tick above computed
+        // unit.vy but nothing ever added it to unit.y — this whole branch
+        // hard-returns at the bottom before reaching any shared movement-
+        // integration code, so a climbing unit's position never moved at all.
+        // isClimbing latched true forever, unit.y stayed pinned at its climb-
+        // entry height, and the unit just stood there indefinitely — the
+        // "invisible wall on the ladder" the rest of the codebase has been
+        // patching around (applyStuckExtractor's exclusion, the STUCK
+        // PREVENTION ladder branch, etc.) instead of fixing directly. This is
+        // that fix: actually advance the climb, every tick, strictly upward.
+        // No collision check on purpose — collisions are fully off for the
+        // whole ascent (this branch never calls isBattleCollision), and no
+        // other system can pull them back south: applyWallGravity excludes
+        // isClimbing outright, applyUnitCollisions `continue`s climbing units
+        // out of the push-resolution loop entirely, and vy is unconditionally
+        // negative (Math.abs above) so there is no code path left that can
+        // move a climbing unit south. Clamped to _climbTargetY so a fast tick
+        // can never overshoot past the landing spot.
+        unit.y = Math.max(_climbTargetY, unit.y + unit.vy);
+
         if (unit.y <= _climbTargetY) {
             unit.y            = _climbTargetY;
             unit.isClimbing   = false;
@@ -1242,13 +2124,72 @@ if (unit.isClimbing && unit.targetLadder) {
             unit.vy           = 0;
             unit.ignoreSeparation = false;
             unit.hasOrders    = true;
-            unit.orderType    = "seek_engage";
-            unit.target       = null; // let processTargeting acquire a real target now they're on the wall
+            unit.settling     = true; // consumed below: drift north, then release
+            unit.settleTargetY = unit.y - (100 + Math.random() * 100); // 100-200px further north
+            // NOTE: deliberately NOT "hold_position" — that orderType triggers
+            // active combat-aggro targeting elsewhere (battlefield_commands.js,
+            // ~line 1321), which would make a settling unit start fighting
+            // mid-drift instead of just walking north. "settling_post_climb" is
+            // a placeholder no other code path checks; processTargeting picks a
+            // real order once settle completes below.
+            unit.orderType    = "settling_post_climb";
+            unit.target       = null; // let processTargeting acquire a real target once settled
         }
 
         // 4. Hard Block: Prevent any other movement logic from running
         return;
 	}
+
+        // ============================================================================
+        // POST-CLIMB SETTLE PHASE
+        // ============================================================================
+        // Consumes unit.settling, set by the climb-exit block above. Drives the unit
+        // straight north (never south, never sideways beyond a tiny visual shake) at
+        // half speed until it clears unit.settleTargetY, then hands off to real
+        // seek_engage at normal speed. Placed here — immediately after the isClimbing
+        // block closes, BEFORE the tile-detection block below — so tile-based
+        // onWall/isClimbing flips (e.g. drifting onto a ground tile as the unit walks
+        // further into the city) can never interfere with a settling unit mid-tick.
+        // The hard return guarantees nothing past this point runs for a settling unit.
+        if (unit.settling) {
+            let baseSpeed = unit.stats?.speed || 1;
+            if (unit.y > unit.settleTargetY) {
+                unit.vx = (Math.random() - 0.5) * 0.3; // tiny cosmetic side-shake only
+                unit.vy = -Math.abs(baseSpeed * 0.5);   // strictly north, half speed
+                unit.x += unit.vx;
+                unit.y += unit.vy;
+            } else {
+                // Settle complete — release to real siege AI at full speed.
+                //
+                // BUGFIX (post-climb dead-end): this used to hand off
+                // orderType "seek_engage" directly, which just fights
+                // whatever's nearest forever. That skips the "WALL-CLIMB ->
+                // GATE RUSH" logic in processTacticalOrders
+                // (battlefield_commands.js) entirely — the code that makes an
+                // onWall unit walk to the gate and force it open if it's
+                // still shut, or funnel through and push into the plaza once
+                // it's breached — because that logic only runs for
+                // orderType "siege_assault". And because autoAttack.js's
+                // needsAssignment filter (correctly) excludes any onWall unit
+                // from ever being re-categorized, nothing downstream would
+                // ever correct the orderType later either — a landed climber
+                // was permanently stuck in plain seek_engage. Handing off
+                // "siege_assault" here instead — with onWall already true and
+                // siegeRole left as whatever it was (ladder_carrier, etc.,
+                // which that logic doesn't key on for onWall units) — lets it
+                // fall straight into the real gate-rush/plaza-rush behavior
+                // on the very next tick.
+                unit.y         = unit.settleTargetY;
+                unit.settling  = false;
+                unit.vx        = 0;
+                unit.vy        = 0;
+                unit.hasOrders = true;
+                unit.orderType = "siege_assault";
+                unit.target    = null; // let processTacticalOrders acquire a real target/waypoint
+            }
+            return;
+        }
+
         // --- 1. LADDER TRANSITION STATE CHECK ---
         let isOnLadderTile = false;
         if (inSiege && unit.side === "player" && canUseSiegeEngines(unit) && battleEnv.grid && typeof BATTLE_TILE_SIZE !== 'undefined') {
@@ -1268,7 +2209,14 @@ if (unit.isClimbing && unit.targetLadder) {
                 // ascent via the isClimbing branch above, which locks the unit
                 // to the ladder rail and drives it straight up. See the matching
                 // exit condition inside that branch for how climbing ends.
-                if (!unit.onWall && !unit.isClimbing && unit.side === "player") {
+                // Infantry only — never cavalry/large units. isBattleCollision
+                // already denies large units the tile-9 square in the first
+                // place (battlefield_logic.js), so in practice a mounted unit
+                // can't physically be standing here — but that's an indirect,
+                // cross-file guarantee. Checking isLargeUnit explicitly here
+                // too means this entry condition is correct on its own, in
+                // this file, without depending on a rule enforced elsewhere.
+                if (!unit.onWall && !unit.isClimbing && !isLargeUnit && unit.side === "player") {
                     unit.isClimbing  = true;
                     unit.targetLadder = unit.targetLadder || unit.target || { x: unit.x };
                     let wallY = typeof SiegeTopography !== 'undefined' ? SiegeTopography.wallPixelY : (unit.y - 160);
@@ -1448,8 +2396,12 @@ else if (currentTile === 8 || currentTile === 10) unit.onWall = true;
 
 // DEFENDER COHESION
 if (unit.side === "enemy") {
-    let southGate = battleEnvironment.cityGates ? battleEnvironment.cityGates.find(g => g.side === "south") : null;
-    let isGateBreached = !southGate || southGate.isOpen;
+    // Now sourced from the single canonical isSiegeGateBreached() helper —
+    // this used to only check `!southGate || southGate.isOpen`, missing the
+    // gateHP<=0 and global-flag cases other systems already checked, which
+    // could leave this specific movement behavior disagreeing with
+    // processTargeting about whether the gate was actually down.
+    let isGateBreached = isSiegeGateBreached();
     
     if (!isGateBreached) {
         // Pre-Breach: Form an organized shield wall. 
@@ -1498,6 +2450,7 @@ if (unit.side === "enemy") {
 
         if (shouldHold) {
             unit.state = "idle";
+            updateSpeedRamp(unit, false); // holding position — wind the ramp down
             if (unit.stats.stamina < 100 && Math.random() > 0.9) unit.stats.stamina++;
         } else {
             if (Math.random() > 0.9) unit.stats.stamina = Math.max(0, unit.stats.stamina - 1);
@@ -1509,9 +2462,12 @@ if (unit.side === "enemy") {
 
 // ... (Inside _handleMovement, below the moveVector calculation) ...
             
-            // Calculate base velocity
-            let vx = (moveVector.dx / moveVector.dist) * (unit.stats.speed * speedMod);
-            let vy = (moveVector.dy / moveVector.dist) * (unit.stats.speed * speedMod);
+            // Calculate base velocity — mounted units ramp up via
+            // getRampedSpeed() (see updateSpeedRamp above); infantry get
+            // unit.stats.speed back unmodified, so this line is a no-op
+            // change for them.
+            let vx = (moveVector.dx / moveVector.dist) * (getRampedSpeed(unit) * speedMod);
+            let vy = (moveVector.dy / moveVector.dist) * (getRampedSpeed(unit) * speedMod);
 
             // ---> SURGERY: LADDER PHYSICS ENGINE <---
             if (isOnLadderTile) {
@@ -1524,20 +2480,56 @@ if (unit.side === "enemy") {
             }
 
             if (unit.stats.morale > 3 && unit.stats.morale < 10) {
-                let dir = unit.side === "player" ? 1 : -1;
-                let safeEdge = unit.side === "player" ? BATTLE_WORLD_HEIGHT - 100 : 100;
-                let notAtEdge = unit.side === "player" ? unit.y < safeEdge : unit.y > safeEdge;
+                // SURGERY: drift toward this side's own assigned rear
+                // direction (was hardcoded: player drifts toward larger Y,
+                // enemy toward smaller Y). Falls back to the old fixed
+                // behavior if the spawn assignment isn't available.
+                const _geo = window.battleSpawnAssignment && window.battleSpawnAssignment[unit.side];
+                if (_geo) {
+                    const retreatedDist = (unit.x - _geo.ax) * _geo.rear.x + (unit.y - _geo.ay) * _geo.rear.y;
+                    const notAtEdge = retreatedDist < 0; // hasn't reached its own spawn line yet
 
-                if (notAtEdge) {
-                    vy = (unit.stats.speed * speedMod * 0.5) * dir;
-                    vx = (Math.random() - 0.5);
+                    if (notAtEdge) {
+                        const speed = unit.stats.speed * speedMod * 0.5;
+                        const _jitter = (Math.random() - 0.5);
+                        vx = _geo.rear.x * speed + _geo.across.x * _jitter;
+                        vy = _geo.rear.y * speed + _geo.across.y * _jitter;
+                    } else {
+                        vx = 0; vy = 0;
+                    }
                 } else {
-                    vx = 0; vy = 0;
+                    let dir = unit.side === "player" ? 1 : -1;
+                    let safeEdge = unit.side === "player" ? BATTLE_WORLD_HEIGHT - 100 : 100;
+                    let notAtEdge = unit.side === "player" ? unit.y < safeEdge : unit.y > safeEdge;
+
+                    if (notAtEdge) {
+                        vy = (unit.stats.speed * speedMod * 0.5) * dir;
+                        vx = (Math.random() - 0.5);
+                    } else {
+                        vx = 0; vy = 0;
+                    }
                 }
             }
 
 // --- EXTREME RANDOMNESS FOR ATTACKERS NEAR THE GATE ---
-if (inSiege && unit.side === "player") {
+// BUGFIX ("ladder climbers get yanked ~400px south on approach"): this
+// block used to fire for ANY player unit within 50px of the gate,
+// including units queued at (or walking to) a ladder that happens to sit
+// near the gate. Once triggered it re-rolls a fresh chaotic vx/vy addition
+// of up to +/-(speed * 4.5) on EVERY tick the condition holds — not a
+// one-time nudge — which is large enough to overpower the small legitimate
+// ladder-approach vector for several ticks in a row and read as "sprinting
+// away, then wandering back." Ladder-context units (assigned to a ladder,
+// actively climbing, already on the wall, or standing on the ladder tile
+// itself) are now excluded outright — per the standing rule elsewhere in
+// this function, nothing is allowed to push a ladder unit south. This is a
+// last-resort unstick for units that are NOT part of the ladder pipeline
+// (e.g. milling around the open gate post-breach); those already have
+// their own dedicated, forward-only unstick handling in the STUCK
+// PREVENTION OVERHAUL block right below.
+if (inSiege && unit.side === "player" &&
+    !unit.isClimbing && !unit.onWall && !isOnLadderTile &&
+    !(unit.siegeRole && unit.siegeRole.includes('ladder'))) {
     let southGate = typeof battleEnvironment !== 'undefined' && battleEnvironment.cityGates ? battleEnvironment.cityGates.find(g => g.side === "south") : null;
     let gateX = southGate && southGate.pixelRect ? southGate.pixelRect.x + (southGate.pixelRect.w / 2) : (typeof SiegeTopography !== 'undefined' ? SiegeTopography.gatePixelX : BATTLE_WORLD_WIDTH / 2);
     let gateY = southGate && southGate.pixelRect ? southGate.pixelRect.y + (southGate.pixelRect.h / 2) : (typeof SiegeTopography !== 'undefined' ? SiegeTopography.gatePixelY : BATTLE_WORLD_HEIGHT / 2);
@@ -1547,45 +2539,72 @@ if (inSiege && unit.side === "player") {
     // FIX: Only trigger the "Panic Shuffle" if the unit hasn't moved for at least 1 second (60 ticks)
     if (distToGate < 50 && unit.stuckLog && unit.stuckLog.ticks > 160) {
         // Massive, chaotic movement around the breach as a last resort
-        vx += (Math.random() - 0.5) * (unit.stats.speed * 4.5);
-        vy += (Math.random() - 0.5) * (unit.stats.speed * 4.5);
+        let panicKickX = (Math.random() - 0.5) * (unit.stats.speed * 4.5);
+        let panicKickY = (Math.random() - 0.5) * (unit.stats.speed * 4.5);
+
+        // SURGERY (pillar tunneling): isBattleCollision only samples the
+        // destination point each tick, not the swept path between old and
+        // new position. An uncapped kick here can be several times an 8px
+        // tile's width in a single tick — for infantry that's harmless
+        // (nothing that thin needs protecting), but for a large unit stuck
+        // right up against a still-solid broken-gate pillar, it's exactly
+        // enough to land the unit clean on the far side of that pillar in
+        // one frame, reading as walking straight through solid stone. Cap
+        // large units' kick well under any solid tile's width so this
+        // still unsticks a genuine crowd-jam without ever being able to
+        // clip through collision geometry.
+        if (isLargeUnit) {
+            const MAX_LARGE_PANIC_KICK = 3; // px/tick
+            panicKickX = Math.max(-MAX_LARGE_PANIC_KICK, Math.min(MAX_LARGE_PANIC_KICK, panicKickX));
+            panicKickY = Math.max(-MAX_LARGE_PANIC_KICK, Math.min(MAX_LARGE_PANIC_KICK, panicKickY));
+        }
+
+        vx += panicKickX;
+        vy += panicKickY;
     }
 }
 
 // --- STUCK PREVENTION OVERHAUL (STRICTER & CALIBRATED) ---
             if (inSiege && unit.stuckLog) {
                 
-                // 1. LADDER SPECIFIC - 5 SECOND (600 TICKS) UNSTICK FALLBACK
+                // 1. LADDER SPECIFIC UNSTICK FALLBACK
                 // Added !unit.unstickCooldown to ensure we don't trigger while already recovering
+                //
+                // SURGERY (per request: ladder units must never be sent south): the old
+                // Phase 1 here stripped isClimbing/onWall and slid the unit ~24-120px
+                // south, ejecting it from the climb pipeline entirely — that's the
+                // exact "jump off ladder" behavior being removed. Replaced with a
+                // forward-push: nudge the unit toward the ladder's X center and give
+                // it a brief northward nudge toward the wall, without touching
+                // isClimbing/onWall/climbTargetY at all. A unit mid-climb (isClimbing
+                // true) never reaches this branch anyway — _handleMovement hard-returns
+                // before here whenever isClimbing is set — so this only ever fires for
+                // isOnLadderTile (queued at the base) or onWall (just landed) units
+                // that have gone stationary too long. Both cases are fixed by "push
+                // toward the wall," never by "push away from it."
                 if ((isOnLadderTile || unit.isClimbing || unit.onWall) && !unit.unstickCooldown) {
                     
-                    if (unit.stuckLog.ticks > 300) { 
-                        if (!unit.unstickAttempts) unit.unstickAttempts = 0;
-                        unit.unstickAttempts++;
-
-                      // Phase 2: Only trigger after Phase 1 (the jump back) has already failed
-                        if (unit.unstickAttempts > 1) {
-                            // Panic for ~2.5 seconds (150 ticks) instead of 30 seconds
-                            unit.randomPanicTimer = 150; 
-                            unit.unstickAttempts = 0; 
-                            
-                            // Cooldown: prevent this unit from triggering any unstick logic 
-                            // for the next 10 seconds (600 ticks) to let them settle
-                            unit.unstickCooldown = 600; 
-                        } else {
-                            // Phase 1: Smooth vertical slide down (24 frames * 5px = 120px)
-                            unit.ladderSlideTimer = 24; 
-                            
-                            // Strip states immediately so they detach from the ladder logic
-                            unit.isClimbing = false;
-                            unit.onWall = false;
-                            unit.stuckLog.ticks = 0;
+                    if (unit.stuckLog.ticks > 300) {
+                        // Push forward toward the ladder/wall instead of ejecting south.
+                        let _pushLdr = unit.targetLadder;
+                        if (_pushLdr && typeof _pushLdr.x === 'number') {
+                            unit.x += (_pushLdr.x > unit.x ? 1 : -1) * (unit.stats.speed * 0.6);
                         }
+                        // North nudge: toward the wall, never south. onWall units are
+                        // already at the wall, so this only meaningfully moves
+                        // isOnLadderTile units still queued at the base.
+                        unit.y -= unit.stats.speed * 0.6;
+
+                        unit.stuckLog.ticks = 0;
+                        unit.unstickCooldown = 90; // brief 1.5s rest so this doesn't spam every tick
                     }
                 } 
 // 2. STANDARD LATERAL OVERRIDE FOR GROUND UNITS (1 SEC)
                 // SURGERY: Ignore lateral unstick if actively retreating to stop border sliding
-                else if (unit.stuckLog.ticks > 60 && !unit.unstickCooldown && unit.orderType !== "retreat") {
+                // Also excluded: any ladder-context unit (isOnLadderTile / isClimbing / onWall)
+                // — those are handled exclusively by branch 1 above now, since this branch's
+                // omnidirectional vx/vy jitter could otherwise still push a ladder unit south.
+                else if (!(isOnLadderTile || unit.isClimbing || unit.onWall) && unit.stuckLog.ticks > 60 && !unit.unstickCooldown && unit.orderType !== "retreat") {
                     let perpX = -vy;
                     let perpY = vx;
                     vx = perpX * 1.5 + ((Math.random() - 0.5) * unit.stats.speed);
@@ -1624,31 +2643,10 @@ if (inSiege && unit.side === "player") {
                 }
             }
 
-
-          // --- SHORT PANIC MOVEMENT (2.5 SECONDS) ---
-            if (unit.randomPanicTimer && unit.randomPanicTimer > 0) {
-                // Reduced multiplier to 3.5x so they don't look like they are teleporting
-                vx = (Math.random() - 0.5) * (unit.stats.speed * 1.1);
-                vy = (Math.random() - 0.5) * (unit.stats.speed * 1.1);
-                unit.randomPanicTimer--;
-
-                // CRITICAL: Clear stuck ticks when panic ends so they don't immediately re-trigger
-                if (unit.randomPanicTimer <= 0) {
-                    unit.stuckLog.ticks = 0;
-                }
-            }
-
-            // --- NEW SURGERY: SMOOTH VERTICAL LADDER RECOVERY ---
-            if (unit.ladderSlideTimer && unit.ladderSlideTimer > 0) {
-                vx = 0; // Cancel normal velocity calculation
-                vy = 0; 
-                
-                // Directly edit position to bypass collision entirely (5px micro-teleports)
-                unit.x += (Math.random() - 0.5) * 0.5; // Slight visual shake side-to-side
-                unit.y += 1; // Drop straight down 5 pixels
-                
-                unit.ladderSlideTimer--;
-            }
+            // (Random-panic and vertical-ladder-slide recovery blocks removed —
+            // see the STUCK PREVENTION OVERHAUL block above for the replacement
+            // forward-push-toward-wall behavior. Ladder units are never pushed
+            // south or given omnidirectional panic movement anymore.)
 
          let nextX = unit.x + vx;
             let nextY = unit.y + vy;
@@ -1669,8 +2667,9 @@ if (inSiege && unit.side === "player") {
 // SURGERY 3: Defender Hard-Line — EXTREME MEASURE (NO EXCEPTIONS)
             if (inSiege && unit.side === "enemy" && !unit.isFalling) {
 				
-                let southGate = typeof battleEnvironment !== 'undefined' && battleEnvironment.cityGates ? battleEnvironment.cityGates.find(g => g.side === "south") : null;
-                let isGateBreached = !southGate || southGate.isOpen || southGate.gateHP <= 0 || window.__SIEGE_GATE_BREACHED__;
+                // Now sourced from the single canonical isSiegeGateBreached()
+                // helper instead of a local recompute.
+                let isGateBreached = isSiegeGateBreached();
                 
                 // If the gate is still alive, absolutely NO defender crosses the wall boundary.
                 if (!isGateBreached) {
@@ -1700,18 +2699,51 @@ if (inSiege && unit.side === "player") {
                 // we FORCE canMove to false so they cannot overlap with the ladder.
                 let isBlockedCavalry = (isLargeUnit && isOnLadderTile);
 
-                let canMoveX = !isBlockedCavalry && (ignoreCollision || !isBattleCollision(nextX, unit.y, unit.onWall, unit));
-                let canMoveY = !isBlockedCavalry && (ignoreCollision || !isBattleCollision(unit.x, nextY, unit.onWall, unit));
+                // 3. SURGERY: BREACHED-GATE BYPASS CORRIDOR (parity with the player)
+                // sandboxmode_update.js already gives the player-controlled commander
+                // a bypassGateCollision escape hatch (45px X / 250px Y around the gate,
+                // active once __SIEGE_GATE_BREACHED__ is set) so he never depends on the
+                // collision grid actually being carved open at the gate — he just skips
+                // isBattleCollision entirely in that box. Regular troops had no such
+                // exemption: they rely purely on triggerGateBreach()'s grid carve, which
+                // only opens the ~11-tile lane between the (still-solid) pillar columns.
+                // A wide formation funneling in gets jostled by unit-separation physics
+                // toward those pillar edges and reads a real wall tile there, so they
+                // pile up at the threshold while the general strolls through his private
+                // bypass box. Mirroring the exact same corridor here fixes the parity gap.
+                // SURGERY: Large/mounted units (general, cavalry, elephants,
+                // camels) never get the gate-breach bypass. That corridor
+                // exists to stop crowded INFANTRY formations from jostling
+                // into the still-solid pillar columns while funneling through
+                // a breach; a large unit relying on it would also ghost
+                // straight through those pillars and through siege engines.
+                // Large units always resolve through real isBattleCollision
+                // below (which already lets them through the actual open
+                // gate lane, and now also collides them with siege engines).
+                let bypassGateCollision = false;
+                if (inSiege && window.__SIEGE_GATE_BREACHED__ && typeof SiegeTopography !== 'undefined' && !isLargeUnit) {
+                    let distToGateX = Math.abs(nextX - SiegeTopography.gatePixelX);
+                    let distToGateY = Math.abs(nextY - SiegeTopography.gatePixelY);
+                    if (distToGateX < 45 && distToGateY < 250) bypassGateCollision = true;
+                }
+
+                let canMoveX = !isBlockedCavalry && (ignoreCollision || bypassGateCollision || !isBattleCollision(nextX, unit.y, unit.onWall, unit));
+                let canMoveY = !isBlockedCavalry && (ignoreCollision || bypassGateCollision || !isBattleCollision(unit.x, nextY, unit.onWall, unit));
 
                 if (canMoveX) unit.x = nextX;
                 if (canMoveY) unit.y = nextY;
 
                 // 3. SURGERY: STUCK PROTECTION FOR LADDERS
-                // If a large unit somehow ends up stuck inside Tile 12, push them back
+                // If a large unit somehow ends up stuck inside Tile 12, push them
+                // toward the wall (north), never south — per the standing rule
+                // that any stuck-recovery nudge in a siege ladder context moves a
+                // unit forward toward the wall. Previously this pushed south
+                // ("nudge them slightly south to get them off the ladder tile"),
+                // which is exactly the kind of unwanted southward drift being
+                // removed everywhere else in this function.
                 if (isBlockedCavalry) {
                     unit.vx = 0; unit.vy = 0;
-                    // Optional: nudge them slightly south to get them off the ladder tile
-                    unit.y += 2; 
+                    unit.y -= 2; // nudge toward the wall, not away from it
                 }
 
             } else {
@@ -2322,25 +3354,112 @@ if (unit.target && unit.target.isDummy) {
 }
 
 // ---> ADD THIS CRITICAL SAFEGUARD HERE <---
-// Never pinball a unit that is actively climbing a ladder
-if (unit.isClimbing) {
+// Never pinball a unit that is actively climbing a ladder, or mid-settle
+// just after finishing a climb (unit.settling — see _handleMovement's
+// SETTLE PHASE block). In practice a settling unit already returns out of
+// _handleMovement before reaching applyPinballEscape's call site, but this
+// guard is kept in sync anyway so a south-bounce can never reach a
+// ladder-context unit even if that call ordering changes later.
+if (unit.isClimbing || unit.settling) {
     unit.positionHistory = [];
     return false;
 }
 
 // --- NEW GUARD: DO NOT BOUNCE INTENTIONALLY IDLE UNITS OR LADDER SWARMERS! ---
 // Added "hold_position" alongside retreat to prevent units from bouncing into the abyss.
-if ( unit.state === "idle" || unit.state === "attacking" || unit.disableAICombat || unit.orderType === "retreat" || unit.orderType === "hold_position" || unit.siegeRole === "cavalry_reserve" || unit.siegeRole === "treb_crew" || unit.siegeRole === "trebuchet_crew" || unit.siegeRole === "engine_crew") {
+//
+// BUGFIX ("units run south for a few seconds with NO walking animation, a
+// bit after they start trying to climb"): a unit QUEUED at a ladder
+// (siegeRole ladder_carrier/ladder_fanatic, waiting behind the crew cap —
+// see LADDER_CREW_CAP_MATCH below) is SUPPOSED to hold still at its
+// waiting spot while its turn comes up — see battlefield_commands.js's
+// queue handling — which is indistinguishable from "stuck" to the
+// position-history check above once positionHistory fills (30 frames) and
+// the unit is more than the 45px isDummy-proximity threshold from its
+// exact waypoint (easily true with the queue's own +/-24px stagger
+// jitter, or whenever queue rank shifts and recomputes the waypoint).
+// Neither of the two guards above this one covers that role, so a
+// legitimately-queued unit falls straight through into the "UNIT IS
+// STUCK! INITIATE PINBALL BOUNCE!" branch below — which, for every
+// non-defender unit, launches a HARD-CODED south-biased bounce
+// (bounceAngle between 45 and 135 degrees — see "EVERYONE ELSE BOUNCES
+// SOUTH" below) for 5 consecutive frames, with this function's `return
+// true` causing _handleMovement to skip normal movement (and therefore
+// the walk-state/animation flip) entirely on each of those frames.
+//
+// REGRESSION FIX ("ladder climbers stuck at the base, never climbing
+// further"): the first version of this exclusion covered EVERY
+// ladder_carrier/ladder_fanatic unconditionally, including the ACTIVE
+// crew (queuePos null or below the crew cap) who are genuinely walking
+// toward the ladder, not holding in queue. The ladder gap is a single
+// tile column flanked by solid wall tiles on both sides — a real, narrow
+// pinch point — and this rescue mechanism (which forcibly displaces a
+// stuck unit) was the actual thing letting an active-crew unit work its
+// way through that geometry onto tile 9. Excluding them entirely removed
+// their only way through, so they piled up at the base and never
+// transitioned into isClimbing. Fix: only exclude units that are actually
+// QUEUED (queuePos at/beyond LADDER_CREW_CAP, matching the cap used in
+// battlefield_commands.js's ladder_carrier case) — active crew keep the
+// normal stuck-rescue behavior so they can still push through to the
+// ladder tile. Note this rescue still can't bounce them south past the
+// isClimbing/settling guard above once they actually start climbing.
+const LADDER_CREW_CAP_MATCH = 2; // must match LADDER_CREW_CAP in battlefield_commands.js
+const isQueuedAtLadder = (unit.siegeRole === "ladder_carrier" || unit.siegeRole === "ladder_fanatic") &&
+    unit.queuePos != null && unit.queuePos >= LADDER_CREW_CAP_MATCH;
+
+if ( unit.state === "idle" || unit.state === "attacking" || unit.disableAICombat || unit.orderType === "retreat" || unit.orderType === "hold_position" || unit.siegeRole === "treb_crew" || unit.siegeRole === "trebuchet_crew" || unit.siegeRole === "engine_crew" || isQueuedAtLadder) {
     unit.positionHistory = []; // Clear history to prevent memory bloat
     return false; // Abort the pinball logic entirely for this unit
 }
 // UNIT IS STUCK! INITIATE PINBALL BOUNCE!
             let bounceAngle;
+            // BUGFIX (post-breach gate-jam / STUCK-WATCH loop): this branch
+            // never had the isSiegeGateBreached()/siegeRole==="assault_complete"
+            // awareness that every other stuck/clamp system in the codebase
+            // already carries (see siegeEngineLogic.js's GATE-CLAMP exemption
+            // at ~line 95/137, autoAttack.js's needsAssignment filter,
+            // battlefield_commands.js line ~2050). A packed crowd funneling
+            // through the ~80-160px gate gap easily nets <5px of movement
+            // over 30 frames purely from unit-vs-unit jostling, which is
+            // exactly what trips the stuck check just above this block —
+            // it doesn't mean the unit is actually failing to path. The old
+            // unconditional "EVERYONE ELSE BOUNCES SOUTH" then launched a
+            // hard 5-frame bounce straight back toward the siege camp,
+            // directly away from the gate/plaza these units are supposed to
+            // be pushing into, with _handleMovement's `return true` also
+            // skipping normal seek_engage movement for those same frames.
+            // Repeated every time the crowd re-compresses, this is what
+            // produced the STUCK-WATCH oscillation right at the gate x-line:
+            // the "rescue" was actively fighting the direction these units
+            // needed to travel. Same root-cause pattern already called out
+            // in the isBlockedCavalry ladder fix a few lines above this one
+            // ("previously this pushed south ... exactly the kind of
+            // unwanted southward drift being removed everywhere else in
+            // this function") — this just closes the one remaining branch
+            // that still had it.
+            //
+            // Fix: once the gate is breached, an assault_complete player
+            // unit that trips the stuck check bounces NORTH (deeper into
+            // the city, same bearing defenders already use) instead of
+            // south back toward camp — a real nudge that actually helps it
+            // clear the jam in the direction it's trying to go. Every other
+            // case (pre-breach attackers, defenders, non-siege battles) is
+            // completely unchanged.
+            let isPostBreachAssault = typeof inSiegeBattle !== 'undefined' && inSiegeBattle &&
+                unit.side === "player" && unit.siegeRole === "assault_complete" &&
+                typeof isSiegeGateBreached === 'function' && isSiegeGateBreached();
+
             if (typeof inSiegeBattle !== 'undefined' && inSiegeBattle && unit.side === "enemy") {
                 // DEFENDERS BOUNCE NORTH (Between -45 and -135 degrees)
                 bounceAngle = -Math.PI/2 + ((Math.random() - 0.5) * Math.PI/2);
+            } else if (isPostBreachAssault) {
+                // POST-BREACH ATTACKERS ALSO BOUNCE NORTH — same bearing as
+                // defenders, since "forward" for these units is now further
+                // into the city, not back toward the camp.
+                bounceAngle = -Math.PI/2 + ((Math.random() - 0.5) * Math.PI/2);
             } else {
-                // EVERYONE ELSE BOUNCES SOUTH
+                // EVERYONE ELSE (pre-breach attackers, non-siege battles)
+                // BOUNCES SOUTH, unchanged.
                 bounceAngle = (Math.PI / 4) + (Math.random() * (Math.PI / 2));
             }
             let bounceForce = 1.3;

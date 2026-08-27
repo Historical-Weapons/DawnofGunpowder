@@ -1,3 +1,38 @@
+// =============================================================================
+// SESSION CHANGELOG (for fusion with the other diverging Story 3 session)
+// =============================================================================
+//   - CustomLocationsSystem (non-city military points of interest — barracks/
+//     storage/stables/watchtower/garrison/maintenance) reworked so the WORLD
+//     and MECHANICS come from city_system.js, and camp_system.js supplies
+//     only the cosmetics (hero-building sprites, decorations, per-kind
+//     worker rosters). Concretely:
+//       - Interior world resized to city_system.js's actual footprint
+//         (CITY_WORLD_WIDTH/HEIGHT/LOGICAL_HEIGHT) instead of a bespoke
+//         1000x800 camp canvas.
+//       - Collision is now a real tile grid (LE.grid), same technique as
+//         isCityCollision, built from the cosmetic layout — replacing a
+//         single hardcoded bounding box.
+//       - Exit now matches city mode exactly: "P" key or walking off the
+//         south edge. The old dedicated bottom-left "Leave" button is gone.
+//       - Entrance uses the same triggerEpicZoom transition city mode uses.
+//       - The Enter prompt button is centered on the x-axis at the bottom
+//         instead of bottom-left.
+//       - Worker NPCs are no longer static — each patrols a leash radius
+//         around its post using the same grid collision the player uses.
+//       - NPCs are now talkable: a self-contained Talk button/E-key bark
+//         system (_WORKER_BARKS) is the guaranteed-working layer. There is
+//         ALSO a best-effort hook into the real window.cityDialogueSystem /
+//         window.cityCosmeticNPCs (the same objects city_system.js itself
+//         drives) — that file was NOT part of this session's uploads, so
+//         verify field names/behavior line up once it's available.
+//   - Fixed: sandboxmode_update.js's main update() had no branch for
+//     window.inCustomLocationMode, so it fell through to the OVERWORLD
+//     branch every frame underneath this system's own tick — see that
+//     file's own changelog note.
+//   - All of the above is shared engine/mechanics work, not Story-3-specific
+//     narrative — nothing here conflicts with either Story 3 continuation.
+// =============================================================================
+
 // ============================================================================
 // DAWN OF GUNPOWDER — MEDIEVAL ASIAN ENCAMPMENT SYSTEM  v2.0
 // camp_system.js  |  Full rewrite — all bugs fixed, ambush system, expanded camps
@@ -3047,9 +3082,1348 @@ if (document.readyState === "loading") {
     setTimeout(_init, 800);
 }
 
+// ─── SHARED PROP LIBRARY ──────────────────────────────────────────────────────
+// These drawers are generically useful set-dressing (not camp-specific troop/
+// ambush/dialogue logic), so they're exposed here for other location systems
+// to reuse — e.g. custom_locations_system.js's barracks/stables/storage/etc.
+// Additive only: nothing above this line changes behavior.
+window.MilitaryProps = {
+    lerpc,
+    // Tents
+    drawBanditTent:     _drawBanditTent,
+    drawScoutTent:      _drawScoutTent,
+    drawGarrisonTent:   _drawGarrisonTent,
+    drawCommanderTent:  _drawCommanderTent,
+    drawMedicalTent:    _drawMedicalTent,
+    // Fire & light
+    drawFireRing:       _drawFireRing,
+    drawAnimatedFire:   _drawAnimatedFire,
+    drawLanternPole:    _drawLanternPole,
+    // Supplies & furniture
+    drawBarrel:         _drawBarrel,
+    drawCrate:          _drawCrate,
+    drawWeaponRack:     _drawWeaponRack,
+    drawLogSeat:        _drawLogSeat,
+    drawSupplyAwning:   _drawSupplyAwning,
+    drawSupplyWagon:    _drawSupplyWagon,
+    drawCookingStation: _drawCookingStation,
+    drawTrainingDummy:  _drawTrainingDummy,
+    drawWell:           _drawWell,
+    drawBonePile:       _drawBonePile,
+    drawNoticeBoard:    _drawNoticeBoard,
+    drawOfficerTable:   _drawOfficerTable,
+    drawHorseTether:    _drawHorseTether,
+    // Structure
+    drawFlagpole:       _drawFlagpole,
+    drawGuardTower:     _drawGuardTower,
+    drawPalisadePost:   _drawPalisadePost,
+    drawPalisadeWall:   _drawPalisadeWall,
+    // Ground cover / nature
+    drawDirtPatch:      _drawDirtPatch,
+    drawGrassTuft:      _drawGrassTuft,
+    drawStones:         _drawStones,
+    drawShrub:          _drawShrub,
+    drawTree:           _drawCampTree,
+    drawRock:           _drawCampLargeRock,
+};
+
 // ─── GLOBAL ALIASES ───────────────────────────────────────────────────────────
 window.launchCamp       = window.launchCamp;
 window.packUpCamp       = window.packUpCamp;
 window.campApplyBattleOutcome = window.campApplyBattleOutcome;
+
+})(); // end IIFE
+
+
+
+
+
+
+
+
+
+
+
+
+// ============================================================================
+// DAWN OF GUNPOWDER — CUSTOM (NON-CITY) MILITARY LOCATIONS SYSTEM  v1.0
+// custom_locations_system.js
+//
+// Enterable, non-walled military locations for scenario overworld maps:
+// barracks, storage depots, stables, watchtowers, garrison posts, and
+// maintenance yards. Each kind has a distinct exterior silhouette AND a
+// distinct interior layout — a storage depot should never read as "the same
+// building" as a barracks.
+//
+// Distinct from:
+//   • camp_system.js     — player-created, temporary, pitched anywhere on
+//                           open ground. Has troop AI, dialogue, ambushes.
+//   • city interior mode  — full walled-city tile grid (cityDimensions /
+//                           isCityCollision), reached via "Visit Settlement".
+//
+// Architecture deliberately mirrors camp_system.js (self-contained IIFE, its
+// own interior canvas + tick/render, patches window.draw while active) and
+// reuses camp_system's shared prop-drawing library (window.MilitaryProps) so
+// this file isn't reinventing barrels/crates/wells/etc. Load AFTER
+// camp_system.js.
+//
+// PUBLIC API:
+//   window.registerCustomLocation(loc)      loc: {id,x,y,kind,name,faction}
+//   window.clearCustomLocations()           wipe the registry (scenario reset)
+//   window.getCustomLocations()             -> current array
+//   window.drawCustomLocationMarkers(ctx)   per-frame overworld exterior draw
+//                                            (hook from sandboxmode_update.js)
+//   window.updateCustomLocationProximity()  per-frame proximity/UI tick
+//                                            (hook from sandboxmode_update.js)
+//   window.enterCustomLocation(loc)
+//   window.leaveCustomLocation()
+//   window.inCustomLocationMode             (bool)
+//   window.CUSTOM_LOCATION_KINDS            {kind: {label, ...}}
+// ============================================================================
+
+(function () {
+"use strict";
+
+if (window.CustomLocationsSystem) {
+    console.log("[CustomLocationsSystem] already initialized — skipping.");
+    return;
+}
+window.CustomLocationsSystem = { VERSION: "1.0.0" };
+
+// ─── CONSTANTS ───────────────────────────────────────────────────────────────
+// Interior world now matches city_system.js's own footprint (CITY_WORLD_WIDTH /
+// CITY_WORLD_HEIGHT / CITY_LOGICAL_HEIGHT — top-level consts declared in
+// city_system.js, which index.html loads before this file) instead of a small
+// bespoke camp-style canvas. CITY_LOGICAL_HEIGHT is the "real" usable area;
+// the remaining strip down to CITY_WORLD_HEIGHT is the same south exit /
+// deployment runway city mode uses to walk back out onto the overworld — see
+// the south-edge check in _locTick(). Only the WORLD SIZE and exit mechanics
+// are borrowed from city mode here — the interior itself is still dressed
+// with camp_system's own props/hero-buildings per location kind below.
+const LOC_W         = (typeof CITY_WORLD_WIDTH    !== 'undefined') ? CITY_WORLD_WIDTH    : 3200;
+const LOC_H         = (typeof CITY_WORLD_HEIGHT   !== 'undefined') ? CITY_WORLD_HEIGHT   : 4000;
+const LOC_LOGICAL_H = (typeof CITY_LOGICAL_HEIGHT !== 'undefined') ? CITY_LOGICAL_HEIGHT : 3200;
+const LOC_CX        = LOC_W / 2;
+const LOC_CY        = LOC_LOGICAL_H / 2;
+const VIS_RADIUS    = 900;
+const ENTER_RADIUS  = 46;    // overworld px — how close the player must be for the Enter prompt (unchanged)
+
+// ─── LOCATION KIND REGISTRY ───────────────────────────────────────────────────
+// `hero` draws the one big identifying structure (used for BOTH the overworld
+// exterior marker and as the interior's central landmark). `interior` places
+// the surrounding set dressing. `markerR` is the overworld collision/marker
+// footprint radius.
+const LOCATION_KINDS = {
+    barracks: {
+        label: "Barracks",
+        markerR: 34,
+        hero: _drawBarracksHall,
+        interior: _layoutBarracksInterior,
+    },
+    storage: {
+        label: "Storage Depot",
+        markerR: 32,
+        hero: _drawWarehouseBuilding,
+        interior: _layoutStorageInterior,
+    },
+    stables: {
+        label: "Stables",
+        markerR: 30,
+        hero: _drawStableBuilding,
+        interior: _layoutStablesInterior,
+    },
+    watchtower: {
+        label: "Watchtower",
+        markerR: 24,
+        hero: _drawWatchtowerHero,
+        interior: _layoutWatchtowerInterior,
+    },
+    garrison: {
+        label: "Garrison Post",
+        markerR: 36,
+        hero: _drawGarrisonHQ,
+        interior: _layoutGarrisonInterior,
+    },
+    maintenance: {
+        label: "Maintenance Yard",
+        markerR: 30,
+        hero: _drawWorkshopShed,
+        interior: _layoutMaintenanceInterior,
+    },
+};
+window.CUSTOM_LOCATION_KINDS = LOCATION_KINDS;
+
+// ─── GLOBAL STATE ────────────────────────────────────────────────────────────
+window.inCustomLocationMode = false;
+
+let _locations = [];   // live overworld registry: {id,x,y,kind,name,faction}
+
+let LE = {
+    active:      null,   // the location currently entered
+    kind:        null,
+    colors:      { primary: "#8b0000" },
+    bgCanvas:    null,
+    decos:       [],
+    workers:     [],
+    camX: LOC_CX, camY: LOC_CY,
+    savedWorldX: 0, savedWorldY: 0,
+    entering:    false, enterProg: 0,
+    leaving:     false, leaveProg: 0,
+    // NPC talk/interaction state — see _WORKER_BARKS / _talkToNearest below.
+    nearestWorker: null,
+    talkTarget:  null, talkText: "", talkUntil: 0, talkCooldown: {},
+    _dialogueKey: null, // set by _registerCityDialogueNPCs when active
+};
+window._CUSTOM_LOC_ENGINE = LE;
+
+function _logEvent(msg) {
+    if (typeof logEvent === "function") logEvent(msg);
+    else console.log("[CustomLocation]", msg);
+}
+
+function _mp() {
+    // MilitaryProps is provided by camp_system.js. Guard so a load-order
+    // mistake fails loudly in the console instead of silently drawing nothing.
+    if (!window.MilitaryProps) {
+        console.warn("[CustomLocationsSystem] window.MilitaryProps missing — load camp_system.js first.");
+        return null;
+    }
+    return window.MilitaryProps;
+}
+
+function _factionColor(faction) {
+    if (typeof FACTIONS !== "undefined" && faction && FACTIONS[faction]) return FACTIONS[faction].color;
+    return "#8b6535";
+}
+
+// ─── REGISTRY (populated by scenario code / the editor at map-gen time) ──────
+window.registerCustomLocation = function (loc) {
+    if (!loc || typeof loc.x !== "number" || typeof loc.y !== "number") return null;
+    if (!LOCATION_KINDS[loc.kind]) {
+        console.warn("[CustomLocationsSystem] unknown kind:", loc.kind);
+        return null;
+    }
+    const entry = {
+        id:      loc.id || ("loc_" + Math.random().toString(36).slice(2, 9)),
+        x:       loc.x,
+        y:       loc.y,
+        kind:    loc.kind,
+        name:    loc.name || LOCATION_KINDS[loc.kind].label,
+        faction: loc.faction || "Player",
+    };
+    _locations.push(entry);
+    return entry;
+};
+window.clearCustomLocations = function () { _locations = []; };
+window.getCustomLocations   = function () { return _locations; };
+
+// ============================================================================
+// HERO STRUCTURES — the one big landmark building per kind. Drawn both as the
+// overworld exterior marker (small scale, seen from a distance) and as the
+// backdrop inside the interior scene (same function, larger local scale via
+// the interior generator's own coordinate space).
+// ============================================================================
+
+/** Barracks — long timber long-house, ridge roof, row of shuttered windows */
+function _drawBarracksHall(ctx, x, y, col) {
+    ctx.save(); ctx.translate(x, y);
+    ctx.fillStyle = "rgba(0,0,0,0.32)";
+    ctx.beginPath(); ctx.ellipse(3, 5, 46, 14, 0, 0, Math.PI * 2); ctx.fill();
+
+    // Timber walls
+    ctx.fillStyle = "#6b4c30";
+    ctx.fillRect(-42, -18, 84, 26);
+    ctx.strokeStyle = "#3e2a18"; ctx.lineWidth = 1;
+    for (let wx = -36; wx <= 36; wx += 12) { ctx.beginPath(); ctx.moveTo(wx, -18); ctx.lineTo(wx, 8); ctx.stroke(); }
+
+    // Ridge roof
+    ctx.fillStyle = mp_lerpc(col, "#1a1208", 0.45);
+    ctx.beginPath();
+    ctx.moveTo(-48, -18); ctx.lineTo(0, -38); ctx.lineTo(48, -18); ctx.lineTo(42, -12); ctx.lineTo(0, -30); ctx.lineTo(-42, -12);
+    ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = mp_lerpc(col, "#ffca28", 0.35); ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(0, -38); ctx.lineTo(0, -30); ctx.stroke();
+
+    // Shuttered windows
+    ctx.fillStyle = "#2a1a0c";
+    for (let wx = -28; wx <= 28; wx += 18) { ctx.fillRect(wx - 4, -12, 8, 8); }
+    ctx.strokeStyle = "#3e2a18"; ctx.lineWidth = 0.8;
+    for (let wx = -28; wx <= 28; wx += 18) { ctx.strokeRect(wx - 4, -12, 8, 8); }
+
+    // Door
+    ctx.fillStyle = "#2e1c0e"; ctx.fillRect(-6, -4, 12, 12);
+    ctx.strokeStyle = "#4e3520"; ctx.lineWidth = 1; ctx.strokeRect(-6, -4, 12, 12);
+
+    // Faction pennant over the door
+    ctx.strokeStyle = "#3e2a18"; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(0, -30); ctx.lineTo(0, -40); ctx.stroke();
+    ctx.fillStyle = col;
+    ctx.beginPath(); ctx.moveTo(0, -40); ctx.lineTo(11, -37); ctx.lineTo(0, -34); ctx.closePath(); ctx.fill();
+    ctx.restore();
+}
+
+/** Storage depot — squat, thick-walled warehouse with wide double doors */
+function _drawWarehouseBuilding(ctx, x, y, col) {
+    ctx.save(); ctx.translate(x, y);
+    ctx.fillStyle = "rgba(0,0,0,0.32)";
+    ctx.beginPath(); ctx.ellipse(3, 5, 40, 13, 0, 0, Math.PI * 2); ctx.fill();
+
+    // Thick log walls
+    ctx.fillStyle = "#5a4128";
+    ctx.fillRect(-36, -22, 72, 30);
+    ctx.strokeStyle = "rgba(0,0,0,0.2)"; ctx.lineWidth = 1;
+    for (let hy = -20; hy <= 4; hy += 5) { ctx.beginPath(); ctx.moveTo(-36, hy); ctx.lineTo(36, hy); ctx.stroke(); }
+
+    // Low hip roof
+    ctx.fillStyle = mp_lerpc(col, "#1a1208", 0.5);
+    ctx.beginPath();
+    ctx.moveTo(-42, -22); ctx.lineTo(-24, -34); ctx.lineTo(24, -34); ctx.lineTo(42, -22);
+    ctx.lineTo(36, -16); ctx.lineTo(-36, -16); ctx.closePath(); ctx.fill();
+    // Roof vent gable
+    ctx.fillStyle = "#2a1c10";
+    ctx.beginPath(); ctx.moveTo(-6, -34); ctx.lineTo(0, -42); ctx.lineTo(6, -34); ctx.closePath(); ctx.fill();
+
+    // Wide double doors (the "loading" look)
+    ctx.fillStyle = "#2e1c0e"; ctx.fillRect(-14, -14, 28, 22);
+    ctx.strokeStyle = "#4e3520"; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(0, -14); ctx.lineTo(0, 8); ctx.stroke();
+    ctx.strokeRect(-14, -14, 28, 22);
+    // Iron door bands
+    ctx.strokeStyle = "#1f1f1f"; ctx.lineWidth = 1.2;
+    ctx.beginPath(); ctx.moveTo(-14, -6); ctx.lineTo(14, -6); ctx.stroke();
+
+    // Grain sacks piled against the outer wall
+    _drawGrainSackCluster(ctx, -30, 6, "#c9a656");
+    _drawGrainSackCluster(ctx, 30, 6, "#c9a656");
+    ctx.restore();
+}
+
+/** Stables — low open-front wooden building with a hitching rail out front */
+function _drawStableBuilding(ctx, x, y, col) {
+    ctx.save(); ctx.translate(x, y);
+    ctx.fillStyle = "rgba(0,0,0,0.3)";
+    ctx.beginPath(); ctx.ellipse(2, 5, 40, 12, 0, 0, Math.PI * 2); ctx.fill();
+
+    // Walls — lower than barracks, wider
+    ctx.fillStyle = "#6b5236";
+    ctx.fillRect(-38, -16, 76, 22);
+    ctx.strokeStyle = "#3e2a18"; ctx.lineWidth = 1;
+
+    // Open stall bays across the front (the tell-tale "stables" read)
+    ctx.fillStyle = "#241a10";
+    for (let sx = -30; sx <= 30; sx += 15) { ctx.fillRect(sx - 5, -10, 10, 16); }
+    ctx.strokeStyle = "#4e3520"; ctx.lineWidth = 1;
+    for (let sx = -30; sx <= 30; sx += 15) { ctx.strokeRect(sx - 5, -10, 10, 16); }
+    // Stall dividers
+    ctx.strokeStyle = "#3e2a18"; ctx.lineWidth = 2;
+    for (let sx = -22; sx <= 22; sx += 15) { ctx.beginPath(); ctx.moveTo(sx, -10); ctx.lineTo(sx, 6); ctx.stroke(); }
+
+    // Lean shed roof (single slope, not a ridge — reads as "utility building")
+    ctx.fillStyle = mp_lerpc(col, "#1a1208", 0.5);
+    ctx.beginPath();
+    ctx.moveTo(-42, -16); ctx.lineTo(-38, -28); ctx.lineTo(42, -22); ctx.lineTo(42, -16);
+    ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = "rgba(0,0,0,0.2)"; ctx.lineWidth = 0.8;
+    for (let rx = -34; rx <= 38; rx += 8) { ctx.beginPath(); ctx.moveTo(rx, -17); ctx.lineTo(rx + 3, -25); ctx.stroke(); }
+
+    // Hay tufts poking out of stalls
+    ctx.fillStyle = "#c4a020";
+    for (let sx = -30; sx <= 30; sx += 15) {
+        ctx.beginPath(); ctx.ellipse(sx, -9, 4, 2, 0, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.restore();
+}
+
+/** Watchtower — tall stilted platform tower, adapted from camp's guard tower
+ *  but taller and standalone-significant since it's the whole point of entry. */
+function _drawWatchtowerHero(ctx, x, y, col) {
+    ctx.save(); ctx.translate(x, y);
+    ctx.fillStyle = "rgba(0,0,0,0.3)"; ctx.beginPath(); ctx.ellipse(0, 3, 20, 8, 0, 0, Math.PI * 2); ctx.fill();
+
+    // Four stilts
+    ctx.strokeStyle = "#3e2a18"; ctx.lineWidth = 4;
+    [[-14, 0], [14, 0]].forEach(([sx]) => { ctx.beginPath(); ctx.moveTo(sx, 0); ctx.lineTo(sx * 0.6, -50); ctx.stroke(); });
+    ctx.strokeStyle = "#5d3d1a"; ctx.lineWidth = 1.2;
+    ctx.beginPath(); ctx.moveTo(-10, -22); ctx.lineTo(10, -22); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(-13, -38); ctx.lineTo(13, -38); ctx.stroke();
+    // Ladder
+    ctx.strokeStyle = "#6b4c24"; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(-3, 0); ctx.lineTo(-3, -48); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(3, 0); ctx.lineTo(3, -48); ctx.stroke();
+    for (let ry = -4; ry >= -46; ry -= 7) { ctx.beginPath(); ctx.moveTo(-3, ry); ctx.lineTo(3, ry); ctx.stroke(); }
+
+    // Platform
+    ctx.fillStyle = "#6b4c24"; ctx.fillRect(-16, -58, 32, 10);
+    ctx.strokeStyle = "#3e2a0a"; ctx.lineWidth = 1; ctx.strokeRect(-16, -58, 32, 10);
+    // Railing
+    ctx.strokeStyle = "#5d3d1a"; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(-16, -58); ctx.lineTo(-16, -70); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(16, -58); ctx.lineTo(16, -70); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(-16, -70); ctx.lineTo(16, -70); ctx.stroke();
+    // Peaked roof
+    ctx.fillStyle = mp_lerpc(col, "#1a1a1a", 0.45);
+    ctx.beginPath(); ctx.moveTo(-19, -70); ctx.lineTo(0, -86); ctx.lineTo(19, -70); ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = mp_lerpc(col, "#ffca28", 0.4); ctx.lineWidth = 1; ctx.stroke();
+    // Lantern
+    ctx.fillStyle = "rgba(255,200,60,0.85)";
+    ctx.beginPath(); ctx.arc(0, -64, 3.2, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+}
+
+/** Garrison HQ — small fortified headquarters block with a short flanking
+ *  palisade stub, distinct from a barracks by its stone-footed, banner-heavy
+ *  "command post" read rather than a simple billet. */
+function _drawGarrisonHQ(ctx, x, y, col) {
+    ctx.save(); ctx.translate(x, y);
+    ctx.fillStyle = "rgba(0,0,0,0.34)";
+    ctx.beginPath(); ctx.ellipse(3, 6, 44, 14, 0, 0, Math.PI * 2); ctx.fill();
+
+    // Stone footing
+    ctx.fillStyle = "#5a5a52"; ctx.fillRect(-34, -4, 68, 8);
+    // Timber upper walls
+    ctx.fillStyle = "#6b4c30"; ctx.fillRect(-32, -26, 64, 22);
+    ctx.strokeStyle = "#3e2a18"; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(0, -26); ctx.lineTo(0, 4); ctx.stroke();
+
+    // Roof
+    ctx.fillStyle = mp_lerpc(col, "#1a1208", 0.42);
+    ctx.beginPath();
+    ctx.moveTo(-38, -26); ctx.lineTo(0, -44); ctx.lineTo(38, -26); ctx.lineTo(32, -20); ctx.lineTo(0, -36); ctx.lineTo(-32, -20);
+    ctx.closePath(); ctx.fill();
+
+    // Command door with steps
+    ctx.fillStyle = "#2e1c0e"; ctx.fillRect(-8, -14, 16, 14);
+    ctx.strokeStyle = "#4e3520"; ctx.lineWidth = 1; ctx.strokeRect(-8, -14, 16, 14);
+    ctx.fillStyle = "#4a4a42"; ctx.fillRect(-10, 0, 20, 3);
+
+    // Twin banners flanking the entrance
+    [-20, 20].forEach((bx) => {
+        ctx.strokeStyle = "#3e2a18"; ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.moveTo(bx, -4); ctx.lineTo(bx, -40); ctx.stroke();
+        ctx.fillStyle = col;
+        ctx.beginPath(); ctx.moveTo(bx, -40); ctx.lineTo(bx + (bx < 0 ? -10 : 10), -35); ctx.lineTo(bx, -30); ctx.closePath(); ctx.fill();
+    });
+
+    // Short flanking palisade stubs (hints at a fortified compound beyond frame)
+    const mp = _mp();
+    if (mp) {
+        for (let i = 0; i < 4; i++) mp.drawPalisadePost(ctx, -46 - i * 7, -2 - i * 1.5, 26);
+        for (let i = 0; i < 4; i++) mp.drawPalisadePost(ctx, 46 + i * 7, -2 - i * 1.5, 26);
+    }
+    ctx.restore();
+}
+
+/** Maintenance yard — open-sided workshop shed with a forge chimney */
+function _drawWorkshopShed(ctx, x, y, col) {
+    ctx.save(); ctx.translate(x, y);
+    ctx.fillStyle = "rgba(0,0,0,0.3)"; ctx.beginPath(); ctx.ellipse(2, 5, 36, 12, 0, 0, Math.PI * 2); ctx.fill();
+
+    // Open-sided post-and-beam shed (posts, not solid walls — a workshop, not a billet)
+    ctx.strokeStyle = "#4e3518"; ctx.lineWidth = 3;
+    [-30, -10, 10, 30].forEach((px) => { ctx.beginPath(); ctx.moveTo(px, 4); ctx.lineTo(px, -24); ctx.stroke(); });
+    ctx.fillStyle = mp_lerpc(col, "#1a1208", 0.48);
+    ctx.beginPath(); ctx.moveTo(-36, -24); ctx.lineTo(36, -24); ctx.lineTo(30, -34); ctx.lineTo(-30, -34); ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = "rgba(0,0,0,0.2)"; ctx.lineWidth = 0.8;
+    for (let rx = -28; rx <= 28; rx += 8) { ctx.beginPath(); ctx.moveTo(rx, -34); ctx.lineTo(rx - 4, -24); ctx.stroke(); }
+
+    // Forge against the back wall, chimney poking through the roof
+    _drawForge(ctx, 16, -2, true);
+    ctx.restore();
+}
+
+// ── Small helper props used by the hero buildings above ──────────────────────
+function _drawGrainSackCluster(ctx, x, y, col) {
+    ctx.save(); ctx.translate(x, y);
+    [[-4, 0], [4, -2], [0, -6]].forEach(([sx, sy]) => {
+        ctx.fillStyle = col;
+        ctx.beginPath(); ctx.ellipse(sx, sy, 6, 5, 0, 0, Math.PI * 2); ctx.fill();
+        ctx.strokeStyle = "#8a6d2e"; ctx.lineWidth = 0.6; ctx.stroke();
+        ctx.strokeStyle = "#5c4a1a"; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(sx - 2, sy - 4); ctx.lineTo(sx + 2, sy - 4); ctx.stroke();
+    });
+    ctx.restore();
+}
+
+function _drawForge(ctx, x, y, withChimney) {
+    ctx.save(); ctx.translate(x, y);
+    // Stone forge body
+    ctx.fillStyle = "#4a4038"; ctx.fillRect(-10, -14, 20, 16);
+    ctx.strokeStyle = "#2a2420"; ctx.lineWidth = 1; ctx.strokeRect(-10, -14, 20, 16);
+    // Coal glow
+    const t = Date.now() * 0.001;
+    const glow = 0.6 + Math.sin(t * 5) * 0.15;
+    ctx.fillStyle = `rgba(255,${100 + Math.floor(glow * 60)},20,${0.7 + glow * 0.2})`;
+    ctx.beginPath(); ctx.ellipse(0, -4, 6, 3, 0, 0, Math.PI * 2); ctx.fill();
+    // Anvil in front
+    ctx.fillStyle = "#2a2a2a";
+    ctx.beginPath(); ctx.moveTo(-8, 6); ctx.lineTo(8, 6); ctx.lineTo(6, 2); ctx.lineTo(10, 0); ctx.lineTo(-4, 0); ctx.lineTo(-6, 2); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = "#3a3a3a"; ctx.fillRect(-2, -1, 4, 4);
+    if (withChimney) {
+        ctx.fillStyle = "#3a332c"; ctx.fillRect(4, -34, 7, 22);
+        // Smoke
+        ctx.strokeStyle = "rgba(150,150,150,0.35)"; ctx.lineWidth = 2;
+        for (let i = 0; i < 3; i++) {
+            const sy = -34 - ((t * 14 + i * 10) % 26);
+            ctx.beginPath(); ctx.moveTo(7.5, sy + 8); ctx.quadraticCurveTo(9 + i, sy + 4, 7, sy); ctx.stroke();
+        }
+    }
+    ctx.restore();
+}
+
+function _drawHayBale(ctx, x, y) {
+    ctx.save(); ctx.translate(x, y);
+    ctx.fillStyle = "rgba(0,0,0,0.25)"; ctx.beginPath(); ctx.ellipse(1, 3, 10, 4, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#c9a832";
+    ctx.beginPath(); ctx.ellipse(0, -2, 9, 7, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = "#8a6d1a"; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(-9, -2); ctx.lineTo(9, -2); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(-6, -8); ctx.lineTo(-6, 4); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(6, -8); ctx.lineTo(6, 4); ctx.stroke();
+    ctx.restore();
+}
+
+function _drawPaddockFence(ctx, x1, y1, x2, y2) {
+    ctx.save();
+    ctx.strokeStyle = "#5d4028"; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(x1, y1 - 8); ctx.lineTo(x2, y2 - 8); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x1, y1 - 2); ctx.lineTo(x2, y2 - 2); ctx.stroke();
+    const segs = Math.max(2, Math.round(Math.hypot(x2 - x1, y2 - y1) / 24));
+    for (let i = 0; i <= segs; i++) {
+        const px = x1 + (x2 - x1) * (i / segs), py = y1 + (y2 - y1) * (i / segs);
+        ctx.strokeStyle = "#4e3520"; ctx.lineWidth = 2.5;
+        ctx.beginPath(); ctx.moveTo(px, py - 12); ctx.lineTo(px, py + 2); ctx.stroke();
+    }
+    ctx.restore();
+}
+
+function _drawToolRack(ctx, x, y) {
+    ctx.save(); ctx.translate(x, y);
+    ctx.strokeStyle = "#4e3518"; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(-12, -20); ctx.lineTo(12, -20); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(-12, -20); ctx.lineTo(-12, 0); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(12, -20); ctx.lineTo(12, 0); ctx.stroke();
+    const tools = [
+        { x: -8, col: "#9e9e9e", h: 16 }, // hammer-ish
+        { x: -2, col: "#7a5a2a", h: 14 }, // handle
+        { x: 4,  col: "#9e9e9e", h: 18 }, // saw-ish
+        { x: 9,  col: "#5a5a52", h: 12 },
+    ];
+    tools.forEach((tl) => {
+        ctx.strokeStyle = "#6b4c24"; ctx.lineWidth = 1.2;
+        ctx.beginPath(); ctx.moveTo(tl.x, -20); ctx.lineTo(tl.x, -20 + tl.h); ctx.stroke();
+        ctx.fillStyle = tl.col; ctx.beginPath(); ctx.arc(tl.x, -20 + tl.h, 1.6, 0, Math.PI * 2); ctx.fill();
+    });
+    ctx.restore();
+}
+
+function _drawWoodpile(ctx, x, y) {
+    ctx.save(); ctx.translate(x, y);
+    ctx.fillStyle = "rgba(0,0,0,0.25)"; ctx.beginPath(); ctx.ellipse(1, 3, 12, 4, 0, 0, Math.PI * 2); ctx.fill();
+    for (let row = 0; row < 3; row++) {
+        for (let i = -2; i <= 2; i++) {
+            ctx.fillStyle = row % 2 === 0 ? "#6b4c28" : "#5a3f20";
+            ctx.beginPath(); ctx.ellipse(i * 4, -row * 4, 3, 3, 0, 0, Math.PI * 2); ctx.fill();
+            ctx.strokeStyle = "#3e2a18"; ctx.lineWidth = 0.5; ctx.stroke();
+        }
+    }
+    ctx.restore();
+}
+
+// mp_lerpc — local wrapper so hero-drawing code above (defined before _mp() is
+// necessarily useful at parse time) always has a safe color-blend fallback.
+function mp_lerpc(a, b, t) {
+    const mp = _mp();
+    if (mp && mp.lerpc) return mp.lerpc(a, b, t);
+    return a || b || "#888";
+}
+
+// ============================================================================
+// INTERIOR LAYOUTS — surrounding set-dressing per kind. Each populates
+// LE.decos (static, baked into the background canvas) and LE.workers
+// (idle standing figures, drawn live).
+// ============================================================================
+
+function _layoutBarracksInterior(col) {
+    LE.decos = [];
+    LE.decos.push({ x: LOC_CX, y: LOC_CY - 40, kind: "hero" });
+    // Drill yard dummies + racks flanking the yard
+    LE.decos.push({ x: LOC_CX - 90, y: LOC_CY + 60, kind: "dummy" });
+    LE.decos.push({ x: LOC_CX - 60, y: LOC_CY + 70, kind: "dummy" });
+    LE.decos.push({ x: LOC_CX + 90, y: LOC_CY + 40, kind: "weapon" });
+    LE.decos.push({ x: LOC_CX + 120, y: LOC_CY + 50, kind: "weapon" });
+    LE.decos.push({ x: LOC_CX - 140, y: LOC_CY - 20, kind: "fire" });
+    for (let i = 0; i < 4; i++) LE.decos.push({ x: LOC_CX - 150 + i * 20, y: LOC_CY - 60, kind: "log" });
+    LE.decos.push({ x: LOC_CX + 150, y: LOC_CY - 60, kind: "flagpole", tall: true });
+    LE.decos.push({ x: LOC_CX - 170, y: LOC_CY + 90, kind: "well" });
+    LE.decos.push({ x: LOC_CX + 40, y: LOC_CY + 110, kind: "noticeboard" });
+
+    LE.workers = [
+        { x: LOC_CX - 80, y: LOC_CY + 55, role: "spearman", anim: Math.random() * 60 },
+        { x: LOC_CX - 55, y: LOC_CY + 68, role: "sword_shield", anim: Math.random() * 60 },
+        { x: LOC_CX + 30, y: LOC_CY - 10, role: "peasant", anim: Math.random() * 60 },
+    ];
+}
+
+function _layoutStorageInterior(col) {
+    LE.decos = [];
+    LE.decos.push({ x: LOC_CX, y: LOC_CY - 30, kind: "hero" });
+    // Dense stacked rows — the "warehouse aisle" feel
+    for (let row = -1; row <= 1; row++) {
+        for (let i = 0; i < 4; i++) {
+            LE.decos.push({ x: LOC_CX - 160 + i * 34, y: LOC_CY + 60 + row * 46, kind: (i % 2 === 0) ? "barrel" : "crate" });
+        }
+    }
+    for (let i = 0; i < 3; i++) LE.decos.push({ x: LOC_CX + 110, y: LOC_CY + 40 + i * 30, kind: "crate" });
+    LE.decos.push({ x: LOC_CX - 60, y: LOC_CY + 130, kind: "table" });
+    LE.decos.push({ x: LOC_CX + 160, y: LOC_CY - 30, kind: "flagpole", tall: false });
+    LE.decos.push({ x: LOC_CX - 170, y: LOC_CY - 40, kind: "noticeboard" });
+
+    LE.workers = [
+        { x: LOC_CX - 60, y: LOC_CY + 120, role: "peasant", anim: Math.random() * 60 },
+        { x: LOC_CX + 40, y: LOC_CY + 60, role: "peasant", anim: Math.random() * 60 },
+    ];
+}
+
+function _layoutStablesInterior(col) {
+    LE.decos = [];
+    LE.decos.push({ x: LOC_CX, y: LOC_CY - 20, kind: "hero" });
+    LE.decos.push({ x: LOC_CX - 130, y: LOC_CY + 70, kind: "horse" });
+    LE.decos.push({ x: LOC_CX + 20, y: LOC_CY + 90, kind: "horse" });
+    LE.decos.push({ x: LOC_CX + 150, y: LOC_CY + 60, kind: "horse" });
+    for (let i = 0; i < 5; i++) LE.decos.push({ x: LOC_CX - 170 + i * 22, y: LOC_CY + 40, kind: "hay" });
+    LE.decos.push({ x: LOC_CX - 20, y: LOC_CY + 130, kind: "well" });
+    LE.decos.push({ x: LOC_CX + 150, y: LOC_CY - 20, kind: "crate" });
+    LE.decos.push({ x: LOC_CX - 180, y: LOC_CY - 40, kind: "fence-h" }); // paddock rail
+    LE.decos.push({ x: LOC_CX + 180, y: LOC_CY - 40, kind: "fence-h" });
+
+    LE.workers = [
+        { x: LOC_CX - 100, y: LOC_CY + 60, role: "peasant", anim: Math.random() * 60 },
+    ];
+}
+
+function _layoutWatchtowerInterior(col) {
+    LE.decos = [];
+    LE.decos.push({ x: LOC_CX, y: LOC_CY - 10, kind: "hero" });
+    LE.decos.push({ x: LOC_CX - 60, y: LOC_CY + 70, kind: "weapon" });
+    LE.decos.push({ x: LOC_CX + 70, y: LOC_CY + 60, kind: "fire" });
+    LE.decos.push({ x: LOC_CX - 90, y: LOC_CY + 30, kind: "log" });
+    LE.decos.push({ x: LOC_CX + 90, y: LOC_CY + 30, kind: "log" });
+    LE.decos.push({ x: LOC_CX, y: LOC_CY + 110, kind: "noticeboard" });
+
+    LE.workers = [
+        { x: LOC_CX - 40, y: LOC_CY + 55, role: "archer", anim: Math.random() * 60 },
+    ];
+}
+
+function _layoutGarrisonInterior(col) {
+    LE.decos = [];
+    LE.decos.push({ x: LOC_CX, y: LOC_CY - 30, kind: "hero" });
+    LE.decos.push({ x: LOC_CX - 130, y: LOC_CY + 60, kind: "garrisontent" });
+    LE.decos.push({ x: LOC_CX + 130, y: LOC_CY + 60, kind: "garrisontent" });
+    LE.decos.push({ x: LOC_CX - 100, y: LOC_CY + 130, kind: "dummy" });
+    LE.decos.push({ x: LOC_CX + 100, y: LOC_CY + 130, kind: "dummy" });
+    LE.decos.push({ x: LOC_CX, y: LOC_CY + 70, kind: "fire" });
+    for (let i = 0; i < 6; i++) {
+        const a = (i / 6) * Math.PI * 2;
+        LE.decos.push({ x: LOC_CX + Math.cos(a) * 32, y: LOC_CY + 70 + Math.sin(a) * 20, kind: "log" });
+    }
+    LE.decos.push({ x: LOC_CX - 180, y: LOC_CY - 20, kind: "well" });
+    LE.decos.push({ x: LOC_CX + 180, y: LOC_CY - 20, kind: "weapon" });
+
+    LE.workers = [
+        { x: LOC_CX - 110, y: LOC_CY + 50, role: "spearman", anim: Math.random() * 60 },
+        { x: LOC_CX + 110, y: LOC_CY + 50, role: "crossbow", anim: Math.random() * 60 },
+        { x: LOC_CX, y: LOC_CY + 55, role: "sword_shield", anim: Math.random() * 60 },
+    ];
+}
+
+function _layoutMaintenanceInterior(col) {
+    LE.decos = [];
+    LE.decos.push({ x: LOC_CX, y: LOC_CY - 20, kind: "hero" });
+    LE.decos.push({ x: LOC_CX - 100, y: LOC_CY + 60, kind: "woodpile" });
+    LE.decos.push({ x: LOC_CX - 60, y: LOC_CY + 80, kind: "woodpile" });
+    LE.decos.push({ x: LOC_CX + 90, y: LOC_CY + 50, kind: "toolrack" });
+    LE.decos.push({ x: LOC_CX + 130, y: LOC_CY + 70, kind: "wagon" });
+    LE.decos.push({ x: LOC_CX - 150, y: LOC_CY - 10, kind: "crate" });
+    LE.decos.push({ x: LOC_CX - 130, y: LOC_CY - 10, kind: "barrel" });
+
+    LE.workers = [
+        { x: LOC_CX + 6, y: LOC_CY + 10, role: "peasant", anim: Math.random() * 60 },
+    ];
+}
+
+// ── deco dispatcher used by the background builder ────────────────────────────
+function _drawDeco(ctx, d, col, kindMeta) {
+    const mp = _mp();
+    if (!mp) return;
+    switch (d.kind) {
+        case "hero":        kindMeta.hero(ctx, d.x, d.y, col); break;
+        case "barrel":       mp.drawBarrel(ctx, d.x, d.y); break;
+        case "crate":        mp.drawCrate(ctx, d.x, d.y); break;
+        case "weapon":       mp.drawWeaponRack(ctx, d.x, d.y, col); break;
+        case "log":          mp.drawLogSeat(ctx, d.x, d.y); break;
+        case "well":         mp.drawWell(ctx, d.x, d.y); break;
+        case "dummy":        mp.drawTrainingDummy(ctx, d.x, d.y); break;
+        case "horse":        mp.drawHorseTether(ctx, d.x, d.y); break;
+        case "wagon":        mp.drawSupplyWagon(ctx, d.x, d.y, col); break;
+        case "noticeboard":  mp.drawNoticeBoard(ctx, d.x, d.y); break;
+        case "table":        mp.drawOfficerTable(ctx, d.x, d.y, col); break;
+        case "garrisontent": mp.drawGarrisonTent(ctx, d.x, d.y, col); break;
+        case "flagpole":     mp.drawFlagpole(ctx, d.x, d.y, col, !!d.tall); break;
+        case "hay":          _drawHayBale(ctx, d.x, d.y); break;
+        case "fence-h":      _drawPaddockFence(ctx, d.x - 40, d.y, d.x + 40, d.y); break;
+        case "toolrack":     _drawToolRack(ctx, d.x, d.y); break;
+        case "woodpile":     _drawWoodpile(ctx, d.x, d.y); break;
+        // "fire" is intentionally skipped here — drawn live every frame (see _locRender)
+    }
+}
+
+// ============================================================================
+// BACKGROUND CANVAS BUILD — bakes ground + static props once per entry,
+// exactly like camp_system.js's _buildBgCanvas.
+// ============================================================================
+function _buildInteriorBg(kindKey, col) {
+    const meta = LOCATION_KINDS[kindKey];
+    const bg = document.createElement("canvas");
+    bg.width = LOC_W; bg.height = LOC_H;
+    const c = bg.getContext("2d");
+    const mp = _mp();
+
+    // Ground
+    const grad = c.createRadialGradient(LOC_CX, LOC_CY, 0, LOC_CX, LOC_CY, LOC_W * 0.75);
+    const ground = "#6b7a4a";
+    grad.addColorStop(0, mp ? mp.lerpc(ground, "#2a1a05", 0.15) : ground);
+    grad.addColorStop(0.5, ground);
+    grad.addColorStop(1, mp ? mp.lerpc(ground, "#1a1a0a", 0.2) : ground);
+    c.fillStyle = grad; c.fillRect(0, 0, LOC_W, LOC_H);
+
+    if (mp) {
+        // Density bumped up from the old 1000×800 camp canvas to keep the
+        // ground from reading as empty now that the world is city-sized.
+        for (let i = 0; i < 280; i++) mp.drawDirtPatch(c, Math.random() * LOC_W, Math.random() * LOC_LOGICAL_H, 4 + Math.random() * 14, ground);
+        for (let i = 0; i < 360; i++) mp.drawGrassTuft(c, Math.random() * LOC_W, Math.random() * LOC_LOGICAL_H, ground);
+        for (let i = 0; i < 70; i++) mp.drawStones(c, Math.random() * LOC_W, Math.random() * LOC_LOGICAL_H);
+        // Perimeter trees for a "this is a real place in the world" frame
+        for (let i = 0; i < 28; i++) {
+            const a = Math.random() * Math.PI * 2, r = LOC_W * 0.46 + Math.random() * 60;
+            const px = LOC_CX + Math.cos(a) * r, py = LOC_CY + Math.sin(a) * r * 0.55;
+            if (px > 10 && px < LOC_W - 10 && py > 10 && py < LOC_H - 10) {
+                mp.drawTree(c, px, py, "#2e4a1f", 0.8 + Math.random() * 0.5);
+            }
+        }
+    }
+
+    // Worn dirt yard around the hero building
+    const yardGrad = c.createRadialGradient(LOC_CX, LOC_CY + 40, 0, LOC_CX, LOC_CY + 40, 240);
+    yardGrad.addColorStop(0, "rgba(0,0,0,0.22)");
+    yardGrad.addColorStop(1, "rgba(0,0,0,0)");
+    c.fillStyle = yardGrad; c.beginPath(); c.arc(LOC_CX, LOC_CY + 40, 240, 0, Math.PI * 2); c.fill();
+
+    // Static decos (fire rings only — flames drawn live)
+    LE.decos.forEach((d) => {
+        if (d.kind === "fire" && mp) mp.drawFireRing(c, d.x, d.y);
+    });
+
+    // Everything else, sorted by Y for correct overlap
+    [...LE.decos].sort((a, b) => a.y - b.y).forEach((d) => _drawDeco(c, d, col, meta));
+
+    return bg;
+}
+
+// ─── COLLISION ────────────────────────────────────────────────────────────────
+// Tile-grid collision — the SAME technique city_system.js's isCityCollision
+// uses (a blocked/walkable tile grid built once, then looked up per-move),
+// rather than a single hardcoded bounding box. camp_system.js's job is only
+// to decide WHICH tiles are blocked (from the cosmetic layout — the hero
+// building's footprint) and how they look; the lookup mechanism itself
+// mirrors city mode's. See _buildLocationGrid().
+const LOC_TILE = (typeof CITY_TILE_SIZE !== 'undefined') ? CITY_TILE_SIZE : 8;
+
+function _buildLocationGrid() {
+    const cols = Math.ceil(LOC_W / LOC_TILE);
+    const rows = Math.ceil(LOC_H / LOC_TILE);
+    const grid = new Uint8Array(cols * rows); // 0 = walkable, 1 = blocked
+    const marginTiles = Math.ceil(24 / LOC_TILE);
+
+    // Border — left/right/top only. The south border is deliberately left
+    // walkable: it's the exit runway (mirrors city mode's south-edge walk-off
+    // exit — see _locTick), not a wall.
+    for (let gy = 0; gy < rows; gy++) {
+        for (let gx = 0; gx < cols; gx++) {
+            if (gx < marginTiles || gx >= cols - marginTiles || gy < marginTiles) {
+                grid[gy * cols + gx] = 1;
+            }
+        }
+    }
+
+    // Hero building footprint (the one cosmetic structure every kind places)
+    const heroD = LE.decos.find((d) => d.kind === "hero");
+    if (heroD) {
+        const x0 = Math.max(0, Math.floor((heroD.x - 44) / LOC_TILE));
+        const x1 = Math.min(cols - 1, Math.floor((heroD.x + 44) / LOC_TILE));
+        const y0 = Math.max(0, Math.floor((heroD.y - 26) / LOC_TILE));
+        const y1 = Math.min(rows - 1, Math.floor((heroD.y + 26) / LOC_TILE));
+        for (let gy = y0; gy <= y1; gy++) {
+            for (let gx = x0; gx <= x1; gx++) grid[gy * cols + gx] = 1;
+        }
+    }
+
+    LE.grid = grid; LE.gridCols = cols; LE.gridRows = rows;
+}
+
+function _locGridBlocked(px, py) {
+    if (!LE.grid) return false;
+    const gx = Math.floor(px / LOC_TILE), gy = Math.floor(py / LOC_TILE);
+    if (gx < 0 || gy < 0 || gx >= LE.gridCols || gy >= LE.gridRows) return true;
+    return LE.grid[gy * LE.gridCols + gx] === 1;
+}
+
+function _locCollision(nx, ny) {
+    return _locGridBlocked(nx, ny);
+}
+
+// ─── WORKER AI — alive, wandering NPCs ─────────────────────────────────────────
+// Each worker patrols a small leash radius around the spot the interior
+// layout placed them (their "post"), pausing between walks. Movement checks
+// LE.grid via _locGridBlocked — the same collision check the player uses —
+// so they respect the hero building's footprint and the location bounds
+// exactly like a city's cosmetic NPCs respect isCityCollision.
+function _initWorkerAI() {
+    LE.workers.forEach((w) => {
+        w.homeX = w.x; w.homeY = w.y;
+        w.state = "idle";
+        w.pauseUntil = 0;
+        w.leash = 90;
+        w.speed = 0.5 + Math.random() * 0.4;
+        w.moving = false;
+        w.dir = 1;
+    });
+}
+
+function _locFindWanderTarget(w) {
+    for (let attempt = 0; attempt < 6; attempt++) {
+        const ang  = Math.random() * Math.PI * 2;
+        const dist = 20 + Math.random() * w.leash;
+        const tx = w.homeX + Math.cos(ang) * dist;
+        const ty = w.homeY + Math.sin(ang) * dist;
+        if (!_locGridBlocked(tx, ty)) return { tx, ty };
+    }
+    return { tx: w.homeX, ty: w.homeY };
+}
+
+function _locTickWorkers() {
+    const now = (typeof performance !== "undefined") ? performance.now() : Date.now();
+    LE.workers.forEach((w) => {
+        if (w.state === "idle") {
+            w.moving = false;
+            if (now >= w.pauseUntil) {
+                const t = _locFindWanderTarget(w);
+                w.tx = t.tx; w.ty = t.ty;
+                w.state = "walking";
+            }
+        } else {
+            const dx = w.tx - w.x, dy = w.ty - w.y;
+            const dist = Math.hypot(dx, dy);
+            if (dist < 3) {
+                w.state = "idle";
+                w.moving = false;
+                w.pauseUntil = now + 1500 + Math.random() * 3000;
+            } else {
+                const step = Math.min(w.speed, dist);
+                const nx = w.x + (dx / dist) * step;
+                const ny = w.y + (dy / dist) * step;
+                if (!_locGridBlocked(nx, ny)) {
+                    w.x = nx; w.y = ny;
+                    w.dir = dx > 0 ? 1 : -1;
+                    w.moving = true;
+                } else {
+                    // Blocked mid-walk — give up gracefully rather than
+                    // shove through the wall.
+                    w.state = "idle";
+                    w.moving = false;
+                    w.pauseUntil = now + 800 + Math.random() * 1500;
+                }
+            }
+        }
+        w.anim += w.moving ? 1 : 0.25;
+    });
+}
+
+// ─── NPC TALK / DIALOGUE ────────────────────────────────────────────────────
+// Two layers, in order of preference:
+//   1. The REAL city dialogue system (cityDialogueSystem / cityCosmeticNPCs),
+//      the same one city_system.js drives — see the guarded hook in
+//      _locTick()/_locRender() below. That system's actual implementation is
+//      NOT part of this file (it lives elsewhere in the project and wasn't
+//      included in what was uploaded this session), so this hook is
+//      best-effort: it registers each worker into window.cityCosmeticNPCs
+//      under a synthetic per-location faction key and calls
+//      tryAutoCityContact/cityDialogueUpdate/cityDialogueRender exactly the
+//      way city_system.js does. IF cityDialogueSystem's real NPC objects
+//      need fields beyond what's set here (x/y/role/name/faction), or if it
+//      expects `role` to be one of its own movement-behavior enum values
+//      rather than a troop-type like "spearman", this layer may no-op rather
+//      than error — that's intentional (guarded) but means it should be
+//      verified once this is fused with whatever session/file actually
+//      defines cityDialogueSystem.
+//   2. A small self-contained fallback (_talkToNearest/_WORKER_BARKS below)
+//      that ALWAYS works regardless of #1 — walk up to a worker, tap Talk
+//      (or press E), get a short flavor line. This is the guaranteed layer.
+const _WORKER_BARKS = {
+    spearman:     ["Feet together, spear straight — sergeant's words, not mine.",
+                   "Drills every morning. My arms hate this posting.",
+                   "Quiet week. I'll take it."],
+    sword_shield: ["Shield's heavier than it looks. You get used to it.",
+                   "Edge's dull. Needs a stone. Everything needs a stone out here."],
+    archer:       ["Wind's tricky up here. Takes a season to read it right.",
+                   "String's damp again. Second time this week.",
+                   "Can see clean to the tree line from up top. Nothing moving today."],
+    crossbow:     ["Loads slower than a bow, hits harder. Trade-off.",
+                   "Cleaned this twice today. Sand gets into everything."],
+    peasant:      ["Just keeping the place standing. Someone has to.",
+                   "Pay's late again. Pay's always late.",
+                   "Long way from home. Not much choice in it, though."],
+};
+
+function _pickBark(role) {
+    const lines = _WORKER_BARKS[role] || _WORKER_BARKS.peasant;
+    // Avoid repeating the same line twice in a row for this worker.
+    const last = LE.talkCooldown[role];
+    let idx = Math.floor(Math.random() * lines.length);
+    if (lines.length > 1 && idx === last) idx = (idx + 1) % lines.length;
+    LE.talkCooldown[role] = idx;
+    return lines[idx];
+}
+
+const TALK_RADIUS = 46;
+
+function _findNearestWorker(px, py, maxDist) {
+    let best = null, bestDist = maxDist;
+    LE.workers.forEach((w) => {
+        const d = Math.hypot(w.x - px, w.y - py);
+        if (d <= bestDist) { best = w; bestDist = d; }
+    });
+    return best;
+}
+
+function _talkToNearest() {
+    if (!LE.nearestWorker) return;
+    const w = LE.nearestWorker;
+    LE.talkTarget = w;
+    LE.talkText = _pickBark(w.role);
+    LE.talkUntil = ((typeof performance !== "undefined") ? performance.now() : Date.now()) + 3500;
+}
+
+// Best-effort real-system hook (layer #1 above). Registers this location's
+// workers into the same window.cityCosmeticNPCs registry city_system.js's
+// own pedestrians live in, under a synthetic key so it can never collide
+// with a real faction's roster. If cityDialogueSystem/cityCosmeticNPCs
+// aren't loaded, both functions are no-ops.
+function _registerCityDialogueNPCs() {
+    if (typeof cityCosmeticNPCs === "undefined") return;
+    LE._dialogueKey = "__customLocation_" + (LE.kind || "unknown") + "_" + Date.now();
+    cityCosmeticNPCs[LE._dialogueKey] = LE.workers.map((w) => ({
+        x: w.x, y: w.y, role: w.role, name: w.role, faction: LE._dialogueKey,
+        dialogueLines: _WORKER_BARKS[w.role] || _WORKER_BARKS.peasant,
+        isKid: false, isParent: false,
+    }));
+}
+function _unregisterCityDialogueNPCs() {
+    if (typeof cityCosmeticNPCs === "undefined" || !LE._dialogueKey) return;
+    delete cityCosmeticNPCs[LE._dialogueKey];
+    LE._dialogueKey = null;
+}
+
+
+function _drawWorkers(ctx) {
+    LE.workers.forEach((w) => {
+        if (typeof drawInfantryUnit === "function") {
+            drawInfantryUnit(ctx, w.x, w.y, !!w.moving, w.anim, LE.colors.primary, w.role,
+                false, "player", "", false, 100, 0, w, 0);
+        } else {
+            ctx.save(); ctx.translate(w.x, w.y);
+            ctx.fillStyle = LE.colors.primary || "#8b0000";
+            ctx.beginPath(); ctx.arc(0, -12, 3.5, 0, Math.PI * 2); ctx.fill();
+            ctx.fillRect(-3, -9, 6, 9);
+            ctx.restore();
+        }
+    });
+}
+
+// ─── PLAYER RENDER (simple — no combat pose surgery needed here) ─────────────
+function _drawLocPlayer(ctx) {
+    if (typeof player === "undefined") return;
+    const col = (typeof FACTIONS !== "undefined" && player.faction && FACTIONS[player.faction])
+        ? FACTIONS[player.faction].color : "#d32f2f";
+    if (typeof drawInfantryUnit === "function") {
+        drawInfantryUnit(ctx, player.x, player.y, !!player.isMoving, player.anim || 0,
+            col, "unarmed", false, "player", "Commander", false, 0, 0, player, 0);
+    }
+    ctx.save();
+    ctx.font = "bold 9px Georgia"; ctx.textAlign = "center";
+    ctx.fillStyle = "#ffca28";
+    ctx.fillText("YOU", player.x, player.y - 30);
+    ctx.restore();
+}
+
+// ─── TICK ─────────────────────────────────────────────────────────────────────
+function _locTick() {
+    if (typeof player === "undefined") return;
+
+    if (!LE.entering && !LE.leaving) {
+        // ── EXIT — identical controls to city mode: the "P"/return key, or
+        // walking south off the edge into the exit runway. Replaces the old
+        // dedicated bottom-left "🚪 LEAVE" button — there is no longer a
+        // custom exit button, just the same return control city mode uses.
+        if (typeof keys !== "undefined" && keys["p"]) {
+            keys["p"] = false;
+            window.leaveCustomLocation();
+            return;
+        }
+
+        const speed = 2.5;
+        let dx = 0, dy = 0;
+        if (typeof keys !== "undefined") {
+            if (keys["w"] || keys["arrowup"])    dy -= speed;
+            if (keys["s"] || keys["arrowdown"])  dy += speed;
+            if (keys["a"] || keys["arrowleft"])  dx -= speed;
+            if (keys["d"] || keys["arrowright"]) dx += speed;
+        }
+        if (dx || dy) {
+            const nx = player.x + dx, ny = player.y + dy;
+            // Mirrors city_system.js's enterCity: crossing into the south
+            // runway leaves immediately instead of colliding with anything.
+            if (ny >= LOC_H - 5) { window.leaveCustomLocation(); return; }
+            if (!_locCollision(nx, player.y)) player.x = nx;
+            if (!_locCollision(player.x, ny)) player.y = ny;
+            if (dx !== 0) player.direction = dx > 0 ? 1 : -1;
+            player.isMoving = true;
+            player.anim = (player.anim || 0) + 1;
+        } else {
+            player.isMoving = false;
+        }
+
+        // Workers keep patrolling their post even while the player stands
+        // still — this is what makes the place feel inhabited rather than
+        // a diorama.
+        _locTickWorkers();
+
+        // NPC talk — self-contained layer (always works): find whoever's in
+        // range, show/hide the Talk prompt, handle the "E" shortcut.
+        LE.nearestWorker = _findNearestWorker(player.x, player.y, TALK_RADIUS);
+        _updateTalkPrompt();
+        if (typeof keys !== "undefined" && keys["e"] && LE.nearestWorker) {
+            keys["e"] = false;
+            _talkToNearest();
+        }
+
+        // Real city dialogue system — best-effort layer, see the comment
+        // above _WORKER_BARKS. No-ops safely if that global isn't loaded.
+        if (typeof cityDialogueSystem !== "undefined" && LE._dialogueKey) {
+            if (typeof cityDialogueSystem.tryAutoCityContact === "function") {
+                cityDialogueSystem.tryAutoCityContact(player, LE._dialogueKey, { radius: 22 });
+            }
+            if (typeof cityDialogueUpdate === "function") cityDialogueUpdate();
+        }
+    }
+
+    LE.camX += (player.x - LE.camX) * 0.12;
+    LE.camY += (player.y - LE.camY) * 0.12;
+
+    if (LE.entering) {
+        LE.enterProg = Math.min(100, LE.enterProg + 4);
+        if (LE.enterProg >= 100) LE.entering = false;
+    }
+    if (LE.leaving) {
+        LE.leaveProg = Math.min(100, LE.leaveProg + 4);
+        if (LE.leaveProg >= 100) _finishLeave();
+    }
+}
+
+// ─── RENDER ───────────────────────────────────────────────────────────────────
+function _locRender() {
+    const canvas = document.getElementById("gameCanvas");
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    const cw = canvas.width, ch = canvas.height;
+    const mp = _mp();
+
+    const camX = Math.max(cw / 2, Math.min(LE.camX, LOC_W - cw / 2));
+    const camY = Math.max(ch / 2, Math.min(LE.camY, LOC_H - ch / 2));
+    const offX = cw / 2 - camX, offY = ch / 2 - camY;
+
+    // Sky/backdrop — simple daylight gradient (these are working locations, not dusk camps)
+    const sky = ctx.createLinearGradient(0, 0, 0, ch);
+    sky.addColorStop(0, "#a9c9dd"); sky.addColorStop(1, "#dcd0ab");
+    ctx.fillStyle = sky; ctx.fillRect(0, 0, cw, ch);
+
+    ctx.save();
+    ctx.translate(offX, offY);
+
+    if (LE.bgCanvas) ctx.drawImage(LE.bgCanvas, 0, 0);
+
+    // Live fire flames (fire rings themselves are baked; flames animate)
+    if (mp) LE.decos.forEach((d) => { if (d.kind === "fire") mp.drawAnimatedFire(ctx, d.x, d.y); });
+
+    _drawWorkers(ctx);
+    _drawLocPlayer(ctx);
+
+    // Self-contained talk bubble — the guaranteed-to-work layer. Drawn in
+    // world space (same transform as the workers above) so it tracks the
+    // speaking NPC as they wander.
+    const _now = (typeof performance !== "undefined") ? performance.now() : Date.now();
+    if (LE.talkTarget && _now < LE.talkUntil) {
+        const t = LE.talkTarget;
+        ctx.save();
+        ctx.font = "9px Georgia"; ctx.textAlign = "center";
+        const bw = Math.min(180, 24 + ctx.measureText(LE.talkText).width);
+        ctx.fillStyle = "rgba(20,14,8,0.85)";
+        ctx.fillRect(t.x - bw / 2, t.y - 54, bw, 22);
+        ctx.fillStyle = "#f5e8c8";
+        // Simple word-wrap-free fit — bubble width above already sized to text.
+        ctx.fillText(LE.talkText, t.x, t.y - 39, bw - 8);
+        ctx.restore();
+    }
+
+    // Real city dialogue system render — best-effort, see _WORKER_BARKS note.
+    if (typeof cityDialogueSystem !== "undefined" && LE._dialogueKey && typeof cityDialogueRender === "function") {
+        cityDialogueRender(ctx);
+    }
+
+    ctx.restore();
+
+    // Vignette
+    const vg = ctx.createRadialGradient(cw / 2, ch / 2, Math.min(cw, ch) * 0.25, cw / 2, ch / 2, Math.max(cw, ch) * 0.85);
+    vg.addColorStop(0, "rgba(0,0,0,0)"); vg.addColorStop(1, "rgba(0,0,0,0.4)");
+    ctx.fillStyle = vg; ctx.fillRect(0, 0, cw, ch);
+
+    // Label badge
+    ctx.save();
+    const label = (LE.active && LE.active.name) || (LOCATION_KINDS[LE.kind] && LOCATION_KINDS[LE.kind].label) || "Location";
+    ctx.fillStyle = "rgba(0,0,0,0.75)";
+    const bw = Math.max(90, Math.floor(cw * 0.1));
+    ctx.fillRect(5, 5, bw, 22);
+    ctx.fillStyle = "#ffca28"; ctx.font = "bold 9px Georgia"; ctx.textAlign = "left";
+    ctx.fillText(label, 9, 18);
+    ctx.restore();
+
+    // Leave hint — same "P / ↩️" return control convention used everywhere
+    // else in the game (city mode, battle mode), since there's no dedicated
+    // leave button here anymore.
+    ctx.save();
+    ctx.font = "bold 9px Georgia"; ctx.textAlign = "center";
+    ctx.fillStyle = "#000"; ctx.globalAlpha = 0.5;
+    ctx.fillText("Press [P] or ↩️ to return to the Overworld.", cw / 2 + 1, ch - 15);
+    ctx.globalAlpha = 1; ctx.fillStyle = "#f5e8c8";
+    ctx.fillText("Press [P] or ↩️ to return to the Overworld.", cw / 2, ch - 16);
+    ctx.restore();
+
+    // Enter/leave fade
+    if (LE.entering || LE.leaving) {
+        const prog = LE.entering ? LE.enterProg : LE.leaveProg;
+        const alpha = LE.entering ? (1 - prog / 100) : (prog / 100);
+        ctx.save();
+        ctx.globalAlpha = Math.max(0, Math.min(1, alpha));
+        ctx.fillStyle = "#000"; ctx.fillRect(0, 0, cw, ch);
+        ctx.restore();
+    }
+}
+
+// ─── ENTER / LEAVE ────────────────────────────────────────────────────────────
+window.enterCustomLocation = function (loc) {
+    if (window.inCustomLocationMode) return;
+    if (typeof window.inCampMode !== "undefined" && window.inCampMode) return;
+    if (typeof inBattleMode !== "undefined" && inBattleMode) return;
+    if (typeof inCityMode !== "undefined" && inCityMode) return;
+    if (typeof player === "undefined") return;
+    const meta = LOCATION_KINDS[loc.kind];
+    if (!meta) return;
+
+    LE.active = loc;
+    LE.kind   = loc.kind;
+    LE.colors = { primary: _factionColor(loc.faction) };
+    LE.decos  = [];
+    LE.workers = [];
+    LE.entering = true; LE.enterProg = 0;
+    LE.leaving  = false; LE.leaveProg = 0;
+
+    meta.interior(LE.colors.primary);
+    _buildLocationGrid();
+    _initWorkerAI();
+    _registerCityDialogueNPCs();
+    LE.bgCanvas = _buildInteriorBg(loc.kind, LE.colors.primary);
+
+    LE.savedWorldX = player.x;
+    LE.savedWorldY = player.y;
+    player.x = LOC_CX;
+    player.y = LOC_CY + 140;
+    player.isMoving = false;
+    LE.camX = player.x; LE.camY = player.y;
+
+    _hideEnterPrompt();
+
+    // Same entrance transition city mode uses — 0.3x → 1.2x zoom over
+    // 1.2s — so a location entrance actually feels like a city entrance.
+    if (typeof triggerEpicZoom === "function") {
+        triggerEpicZoom(0.3, 1.2, 1200);
+    }
+
+    window.inCustomLocationMode = true;
+    _logEvent(`Entered ${loc.name} (${meta.label}).`);
+};
+
+window.leaveCustomLocation = function () {
+    if (!window.inCustomLocationMode || LE.leaving) return;
+    LE.leaving = true; LE.leaveProg = 0;
+};
+
+function _finishLeave() {
+    window.inCustomLocationMode = false;
+    LE.leaving = false;
+    if (typeof player !== "undefined") {
+        player.x = LE.savedWorldX;
+        player.y = LE.savedWorldY;
+    }
+    LE.active = null; LE.kind = null;
+    LE.nearestWorker = null; LE.talkTarget = null; LE.talkText = ""; LE.talkUntil = 0;
+    _hideTalkPrompt();
+    _unregisterCityDialogueNPCs();
+    _logEvent("Left the location.");
+}
+
+// ─── OVERWORLD EXTERIOR MARKERS (per-frame, called from sandboxmode_update.js) ─
+window.drawCustomLocationMarkers = function (ctx) {
+    const mp = _mp();
+    if (!mp) return;
+    _locations.forEach((loc) => {
+        const meta = LOCATION_KINDS[loc.kind];
+        if (!meta) return;
+        const col = _factionColor(loc.faction);
+        meta.hero(ctx, loc.x, loc.y, col);
+        // Small floating label — matches the story3 gate / tower label convention
+        ctx.save();
+        ctx.font = "bold 8px Georgia"; ctx.textAlign = "center";
+        ctx.fillStyle = "#000"; ctx.globalAlpha = 0.5;
+        ctx.fillText(loc.name, loc.x + 1, loc.y - meta.markerR - 7);
+        ctx.globalAlpha = 1; ctx.fillStyle = "#f5e8c8";
+        ctx.fillText(loc.name, loc.x, loc.y - meta.markerR - 8);
+        ctx.restore();
+    });
+};
+
+// ─── OVERWORLD PROXIMITY + ENTER PROMPT (per-frame, called from sandboxmode_update.js) ─
+let _nearestLoc = null;
+
+function _findLocationNear(px, py) {
+    let best = null, bestD = Infinity;
+    _locations.forEach((loc) => {
+        const meta = LOCATION_KINDS[loc.kind];
+        if (!meta) return;
+        const d = Math.hypot(px - loc.x, py - loc.y);
+        const r = meta.markerR + ENTER_RADIUS;
+        if (d < r && d < bestD) { bestD = d; best = loc; }
+    });
+    return best;
+}
+
+window.updateCustomLocationProximity = function () {
+    if (window.inCustomLocationMode) return;
+    if (typeof player === "undefined") return;
+    if (typeof window.inCampMode !== "undefined" && window.inCampMode) { _hideEnterPrompt(); return; }
+    if (typeof inBattleMode !== "undefined" && inBattleMode) { _hideEnterPrompt(); return; }
+    if (typeof inCityMode !== "undefined" && inCityMode) { _hideEnterPrompt(); return; }
+
+    const found = _findLocationNear(player.x, player.y);
+    if (found !== _nearestLoc) {
+        _nearestLoc = found;
+        if (found) _showEnterPrompt(found); else _hideEnterPrompt();
+    }
+};
+
+// ─── UI ───────────────────────────────────────────────────────────────────────
+// NOTE: there is deliberately no dedicated "leave" button here anymore.
+// Exit uses the same return control as city mode — the "P" key, or walking
+// off the south edge — see _locTick(). Nothing else to build for that.
+function _buildLocationUI() {
+    if (!document.getElementById("cl-enter-wrapper")) {
+        const wrap = document.createElement("div");
+        wrap.id = "cl-enter-wrapper";
+        // Centered on the x-axis, flush to the bottom — matches where the
+        // rest of the game's primary bottom action button sits.
+        wrap.style.cssText = "position:fixed;bottom:24px;left:50%;transform:translateX(-50%);z-index:15;display:none;flex-direction:column;align-items:center;gap:6px;pointer-events:auto;";
+        const btn = document.createElement("button");
+        btn.id = "cl-enter-btn";
+        btn.className = "menu-btn";
+        btn.style.cssText = "min-height:48px;min-width:150px;font-size:1rem;padding:10px 18px;touch-action:manipulation;";
+        btn.onclick = () => { if (_nearestLoc) window.enterCustomLocation(_nearestLoc); };
+        wrap.appendChild(btn);
+        document.body.appendChild(wrap);
+    }
+    // Talk prompt — only relevant once inside a location, so it sits at the
+    // same bottom-center spot the Enter button uses (the two are never
+    // shown at the same time: Enter only shows in the overworld approach,
+    // Talk only shows once inCustomLocationMode is true).
+    if (!document.getElementById("cl-talk-wrapper")) {
+        const wrap = document.createElement("div");
+        wrap.id = "cl-talk-wrapper";
+        wrap.style.cssText = "position:fixed;bottom:24px;left:50%;transform:translateX(-50%);z-index:15;display:none;flex-direction:column;align-items:center;gap:6px;pointer-events:auto;";
+        const btn = document.createElement("button");
+        btn.id = "cl-talk-btn";
+        btn.className = "menu-btn";
+        btn.style.cssText = "min-height:48px;min-width:150px;font-size:1rem;padding:10px 18px;touch-action:manipulation;";
+        btn.innerHTML = "💬 Talk";
+        btn.onclick = () => _talkToNearest();
+        wrap.appendChild(btn);
+        document.body.appendChild(wrap);
+    }
+}
+function _showEnterPrompt(loc) {
+    const wrap = document.getElementById("cl-enter-wrapper");
+    const btn  = document.getElementById("cl-enter-btn");
+    if (!wrap || !btn) return;
+    const meta = LOCATION_KINDS[loc.kind];
+    btn.innerHTML = "🚪 Enter " + (meta ? meta.label : loc.name);
+    wrap.style.display = "flex";
+}
+function _hideEnterPrompt() {
+    const wrap = document.getElementById("cl-enter-wrapper");
+    if (wrap) wrap.style.display = "none";
+}
+function _updateTalkPrompt() {
+    const wrap = document.getElementById("cl-talk-wrapper");
+    if (!wrap) return;
+    wrap.style.display = LE.nearestWorker ? "flex" : "none";
+}
+function _hideTalkPrompt() {
+    const wrap = document.getElementById("cl-talk-wrapper");
+    if (wrap) wrap.style.display = "none";
+}
+
+// ─── DRAW FUNCTION PATCH ──────────────────────────────────────────────────────
+function _patchDraw() {
+    if (typeof window.draw !== "function") { setTimeout(_patchDraw, 150); return; }
+    const _origDraw = window.draw;
+    window.draw = function () {
+        if (window.inCustomLocationMode) {
+            _locTick();
+            _locRender();
+            requestAnimationFrame(() => { if (typeof update === "function") update(); draw(); });
+        } else {
+            _origDraw.apply(this, arguments);
+        }
+    };
+}
+
+// ─── INIT ─────────────────────────────────────────────────────────────────────
+function _init() {
+    _buildLocationUI();
+    _patchDraw();
+    console.log("[CustomLocationsSystem] Initialized — " + Object.keys(LOCATION_KINDS).length + " location kinds loaded.");
+}
+if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", () => setTimeout(_init, 850));
+} else {
+    setTimeout(_init, 850);
+}
 
 })(); // end IIFE

@@ -33,9 +33,19 @@ function _bptQL() {
     if (tier === "MAX")                      return 3;
     if (tier === "HIGH")                     return 2;
     if (tier === "MED" || tier === "MEDIUM") return 1;
-    if (!window._SETTINGS_IS_MOBILE)         return 2;   // desktop default = HIGH
-    const mq = (typeof window.mobileBattleQuality === "number") ? window.mobileBattleQuality : 0;
-    return mq >= 100 ? 2 : mq >= 50 ? 1 : 0;
+    if (tier === "LOW")                      return 0;
+    // CUSTOM (or not yet initialised) — approximate from the live numeric
+    // value using the same 40/80 tier-bucket edges GRAPHICS_QUALITY_TIERS
+    // uses everywhere else (settings_ui.js). Reads whichever global this
+    // device actually uses instead of assuming desktop is always high-tier —
+    // that assumption held while desktop was locked to MAX, but desktop can
+    // land on any tier (and any CUSTOM value) now. Caps at 2 (never 3): the
+    // priciest MAX-only extras are reserved for players who land on MAX by
+    // name, not inferred from a hand-tuned value.
+    const mq = window._SETTINGS_IS_MOBILE
+        ? ((typeof window.mobileBattleQuality === "number") ? window.mobileBattleQuality : 0)
+        : ((typeof window.desktopBattleQuality === "number") ? window.desktopBattleQuality : 80);
+    return mq >= 80 ? 2 : mq >= 40 ? 1 : 0;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -85,10 +95,19 @@ function _bRidgeFbm(x, y, oct) {
 //   overworld tile = 12 px; battle tile = 8 px but camera 8-30× closer,
 //   so the same physical ridge should repeat every ~8-15 battle tiles.
 // ═══════════════════════════════════════════════════════════════════════════════
-function _bElev(nx, ny, cosA, sinA, SX, SY, o1, o2, o3, warpAmp, freq) {
-    // Domain warp — same as story2 _s2QilianMask warping
-    const wx = nx + (_bFbm(nx*freq*0.6+SX,    ny*freq*0.6+SY,    3) - 0.5) * warpAmp;
-    const wy = ny + (_bFbm(nx*freq*0.6+SX+17, ny*freq*0.6+SY+23, 3) - 0.5) * warpAmp;
+function _bElev(nx, ny, cosA, sinA, SX, SY, o1, o2, o3, warpAmp, freq, warpOct) {
+    // Domain warp — same as story2 _s2QilianMask warping.
+    // PERF (v4.1): warpOct is now a parameter (was hardcoded 3) so
+    // _bShadingPass (HIGH/MAX) can request 2 octaves instead of 3 -- octave 3
+    // contributes at most ~14% of the warp signal's total amplitude (each
+    // octave in _bFbm halves in weight), at double the frequency, so this
+    // trims a small high-frequency wobble on top of the warp rather than
+    // changing its overall shape. Defaults to 3 so the _bLuminancePass call
+    // site below (MED tier, a separate/cheaper codepath already) is
+    // completely unaffected.
+    const wOct = warpOct || 3;
+    const wx = nx + (_bFbm(nx*freq*0.6+SX,    ny*freq*0.6+SY,    wOct) - 0.5) * warpAmp;
+    const wy = ny + (_bFbm(nx*freq*0.6+SX+17, ny*freq*0.6+SY+23, wOct) - 0.5) * warpAmp;
     // Rotate to dominant ridge strike (story2 uses 0.560 rad ≈ 32°)
     const u = wx*cosA - wy*sinA;
     const v = wx*sinA + wy*cosA;
@@ -252,14 +271,33 @@ function _bCfg(t) {
 //          MAX-tier generation in the several-second range once chunked
 //          (see _wrapLaunchFn / generateBattlefieldChunked), which is a
 //          reasonable "detail" tier load, not a "40x" tier load.
-function _bSubN(ql){ return ql>=3 ? 4 : ql>=2 ? 2 : 1; }
+// Sub-cell resolution for the shading/water/beach passes, by tier. History
+// of how this settled, since the reasoning matters if it needs revisiting:
+//   - Originally MAX=4, HIGH=2 (16 vs 4 sub-cells/tile).
+//   - MAX dropped to 3, then to 2 (matching HIGH) chasing MAX's load time
+//     down from ~15.7s to ~4s on a 300x450 map. Checked before each cut:
+//     no exact-duplicate sample requests exist anywhere in this pass to
+//     memoize for a free win (verified directly), and the noise field's
+//     finest ridge wavelength is only ~2 tiles, so a coarser interpolated
+//     lattice would visibly smear detail rather than save time for free --
+//     these cuts are genuine quality/speed trade-offs, not bug fixes.
+//   - HIGH then also came down, from 2 to 1 (matching MED's shading
+//     resolution), to bring HIGH's load time from ~3.95s down to ~1.3s.
+// MAX and HIGH are NOT tied together — each was cut independently when
+// asked for, and either could diverge again later. Both still keep
+// whatever else distinguishes their tier unconditionally (MAX's extra water
+// micro-texture pass and specular glints, HIGH's own ql>=2 branches) --
+// only the shading/water/beach sub-cell count changed.
+function _bSubN(ql){ return ql>=3 ? 2 : 1; }
 
 function _bShadingPass(ctx, cfg, seed, cols, rows, ts, grid, ql, colStart, colEnd) {
     const ang  = cfg.ang * Math.PI / 180;
     const cosA = Math.cos(ang), sinA = Math.sin(ang);
     const SX = seed*0.137, SY = seed*0.091;
-    // MAX gets one extra octave on the primary ridge field
-    const o1 = cfg.o1 + (ql>=3 ? 1 : 0);
+    // PERF (v4.1): MAX's extra ridge octave removed -- combined with the
+    // subN cut above and the warp-octave cut in _bElev, gets total MAX
+    // shading cost to >2x faster while each individual change stays small.
+    const o1 = cfg.o1;
     const o2 = cfg.o2, o3 = cfg.o3;
     const subN = _bSubN(ql);
     const subTs = ts / subN;
@@ -287,12 +325,14 @@ function _bShadingPass(ctx, cfg, seed, cols, rows, ts, grid, ql, colStart, colEn
                 for(let sv=0; sv<subN; sv++){
                     const ny = (j + (sv+0.5)/subN) / rows;
 
-                    // 5-sample elevation (verbatim story2 pattern)
-                    const eC = _bElev(nx,    ny,    cosA,sinA,SX,SY,o1,o2,o3,cfg.wa,cfg.freq);
-                    const eL = _bElev(nx-dN, ny,    cosA,sinA,SX,SY,o1,o2,o3,cfg.wa,cfg.freq);
-                    const eR = _bElev(nx+dN, ny,    cosA,sinA,SX,SY,o1,o2,o3,cfg.wa,cfg.freq);
-                    const eU = _bElev(nx,    ny-dN, cosA,sinA,SX,SY,o1,o2,o3,cfg.wa,cfg.freq);
-                    const eD = _bElev(nx,    ny+dN, cosA,sinA,SX,SY,o1,o2,o3,cfg.wa,cfg.freq);
+                    // 5-sample elevation (verbatim story2 pattern). warpOct=2
+                    // (was hardcoded 3 inside _bElev) -- see _bElev's own
+                    // comment for why this is safe at HIGH/MAX.
+                    const eC = _bElev(nx,    ny,    cosA,sinA,SX,SY,o1,o2,o3,cfg.wa,cfg.freq,2);
+                    const eL = _bElev(nx-dN, ny,    cosA,sinA,SX,SY,o1,o2,o3,cfg.wa,cfg.freq,2);
+                    const eR = _bElev(nx+dN, ny,    cosA,sinA,SX,SY,o1,o2,o3,cfg.wa,cfg.freq,2);
+                    const eU = _bElev(nx,    ny-dN, cosA,sinA,SX,SY,o1,o2,o3,cfg.wa,cfg.freq,2);
+                    const eD = _bElev(nx,    ny+dN, cosA,sinA,SX,SY,o1,o2,o3,cfg.wa,cfg.freq,2);
 
                     const gx = eR-eL, gy = eD-eU;
                     // story2 shading formula verbatim: light from NW (-0.7071, -0.7071)

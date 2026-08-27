@@ -40,6 +40,17 @@
                 cost: u.cost || 0
             };
 
+            // DISPLAY-ONLY OVERRIDE: the Cannon uses WEIGHT_CLASSES.CAV in
+            // troop_system.js for its actual push/mass/collision physics
+            // (it needs a cavalry-sized footprint), but that tier is what
+            // weightMap above turns into the literal text "Cavalry" for the
+            // unit guide's "Weight" stat row — describing it as a mounted
+            // unit it isn't. This only touches the displayed label; u.weightTier
+            // itself (and therefore the physics) is untouched.
+            if (u.name === "Cannon") {
+                baseStats.weightClass = "Artillery";
+            }
+
             // 2. Only add these keys if it's a ranged unit
             // Gunpowder/Archers get these; Spearmen/Swordmen do NOT
             if (u.isRanged) {
@@ -64,7 +75,7 @@
         displayRange = Math.floor(displayRange / 3);
     }
 	
-	if (u.name === "Camel Cannon") {   // <-- change to your unit name
+	if (u.name === "Cannon") {   // <-- change to your unit name
         displayRange = Math.floor(displayRange / 2);
     }
 	
@@ -75,6 +86,12 @@
                 name: u.name,
                 desc: u.desc || "Unit Description.",
                 mounted: u.isLarge,
+                // Category label for the guide's list subtitle — separate
+                // from `mounted` because `mounted`/`renderMode` still need
+                // to say "cavalry" internally for portrait rendering
+                // (Cannon draws via the camel_cannon cavalry-mode path),
+                // even though it should read as "Artillery" to the player.
+                category: u.name === "Cannon" ? "Artillery" : (u.isLarge ? "Mounted" : "Foot"),
                 renderMode: u.isLarge ? "cavalry" : "infantry",
                 renderType: "peasant", 
                 stats: baseStats // <--- FIX: We use the variable we just built!

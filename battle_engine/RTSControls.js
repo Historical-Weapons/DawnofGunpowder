@@ -47,6 +47,7 @@
       }
       .mc3-surv-ally { color: #8bc34a; }
       .mc3-surv-foe  { color: #ff5252; }
+      .mc3-surv-day  { color: #f5d76e; display: none; }
 	  
       #mc3 {
         position: fixed;
@@ -181,9 +182,41 @@
         font-size: clamp(0.62rem, 1.7vw, 0.73rem);
         gap: 2px;
         border-radius: 5px;
+        overflow: hidden;
+        box-sizing: border-box;
       }
       .mc3-tray-btn .ticon { font-size: clamp(1rem, 3vw, 1.3rem); line-height: 1; }
-      .mc3-tray-btn .tlbl  { font-size: clamp(0.48rem, 1.2vw, 0.58rem); opacity: 0.85; }
+      .mc3-tray-btn .tlbl  {
+        font-size: clamp(0.34rem, 0.95vw, 0.44rem);
+        opacity: 0.85;
+        width: 100%;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        text-align: center;
+        padding: 0 1px;
+      }
+      /* Active-formation highlight — which shape the current blue-arrow
+         drag preview/commit is remembering, per direct request. Toggled
+         by _syncFormationUI() (added elsewhere in this file), cleared the
+         instant the selection no longer shares a single remembered style
+         (deselect, reselect, or a fresh drag with no formation memory). */
+      .mc3-tray-btn.mc3-formation-active {
+        outline: 2px solid #ffd700;
+        outline-offset: -2px;
+        box-shadow: 0 0 6px rgba(255, 215, 0, 0.7);
+      }
+
+      /* Depth button while BOX/square is the active formation — stays
+         visible (per direct request, it must never disappear) but reads as
+         inert: square blobs units by count alone and never consults this
+         value, so the click handler no-ops and this communicates that at a
+         glance instead of the button looking clickable but silently doing
+         nothing. */
+      .mc3-tray-btn.mc3-depth-disabled {
+        opacity: 0.45;
+        cursor: not-allowed;
+      }
 
       /* ── TOAST notification ───────────────────────────────────────────── */
       #mc3-toast {
@@ -595,6 +628,39 @@
         box-shadow: inset 0 0 10px rgba(245,215,110,0.08);
       }
 
+      /* ── FORMATION DRAG arrow-grid overlay (Total War style) ───────────── */
+      #mc3-formline {
+        position: fixed;
+        left: 0; top: 0;
+        width: 100vw;
+        height: 100vh;
+        pointer-events: none;
+        z-index: 9591;
+        display: none;
+      }
+
+      /* ── FLOATING AI-TACTIC EMOJI (above each tagged unit's head) ─────── */
+      /* Sits below the selbox/tray/HUD layers but above the game canvas —
+         this is a battlefield overlay, not a UI chrome element, so it must
+         never intercept touches (pointer-events:none throughout). See
+         AIEmoji in Section 7b below for the per-frame position/glyph logic. */
+      #mc3-ai-emoji-layer {
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+        z-index: 9580;
+        overflow: hidden;
+      }
+      .mc3-ai-emoji {
+        position: absolute;
+        left: 0;
+        top: 0;
+        line-height: 1;
+        will-change: transform;
+        text-shadow: 0 1px 3px rgba(0,0,0,0.85), 0 0 6px rgba(0,0,0,0.55);
+        user-select: none;
+      }
+
       /* ── HELP OVERLAY ────────────────────────────────────────────────── */
       #mc3-help-overlay {
         position: fixed;
@@ -750,10 +816,27 @@
     playerUnits() {
       const e = this.env();
       if (!e || !Array.isArray(e.units)) return [];
+      // BUG FIX (audit pass, direct request): this used to also exclude
+      // disableAICombat units. battlefield_commands.js's own equivalent
+      // filter (its keydown handler's local `playerUnits`, and drag-box
+      // selection) had that exact exclusion deliberately REMOVED already —
+      // documented there as the fix for "units select nothing at the start
+      // of a siege battle," since customsiegebattle.js's launch routine
+      // sets disableAICombat=true on every player unit at siege start,
+      // lifted only once a unit is actually selected (lazyTakeManualControl
+      // clears it). That fix was never mirrored here, so this file's own
+      // selection path — Cmd.selectGroup(), which is what the 🎯 dropdown
+      // calls — still silently selected nothing at all at the start of any
+      // siege, the identical bug surviving through the one path that
+      // wasn't patched. canSelectUnitNow(u) (called by selectGroup itself)
+      // already re-checks per-unit eligibility properly; excluding
+      // disableAICombat units from the candidate list a second time here
+      // was redundant even when it worked, and wrong the one time it
+      // mattered (before any unit had been manually selected yet, when
+      // nothing had cleared the flag).
       return e.units.filter(u =>
         u.side === 'player' &&
         !u.isCommander &&
-        !u.disableAICombat &&
         u.hp > 0
       );
     },
@@ -824,23 +907,832 @@
       this._audio('ui_click');
     },
 
-    // ── Q — charge / seek & engage ──────────────────────────────────────
+    // ── Q — advance / simple seek & engage ───────────────────────────────
+    // Deliberately the "dumb" command-tab version: walk to the nearest
+    // enemy and fight, nothing more. The separate 🧠 Charge AI TACTIC
+    // (aiTacticGroup === 'melee_charge', see the block below) is the
+    // advanced one with its own aggressive ranged-closing override — this
+    // button must never trigger that. Clearing aiTacticGroup here (not
+    // just setting orderType) is what guarantees it: without this, a unit
+    // still tagged from an earlier 🧠 Charge command would have that
+    // tactic's own per-frame logic silently take back over.
     charge() {
       const sel = G.selected();
       if (!sel.length) { _showToast('Select units first.'); return; }
+      this._clearAiTacticSilent(sel);
+      // AUDIT CORRECTION ("go back to RTS controls/battlefield commands and
+      // double check for issues... units behaving as intended without
+      // glitches" — direct request): a previous pass here called
+      // calculateFormationOffsets(sel, 'square', ...) before releasing the
+      // charge, on the claim that units would "start the advance already
+      // bunched into square." Traced the actual data flow this session and
+      // that claim was WRONG — seek_engage movement (processTacticalOrders'
+      // seek_engage branch in battlefield_commands.js, and _handleMovement
+      // in ai_categories.js) steers every unit straight at unit.target.x/y;
+      // formationOffsetX/Y is never read anywhere on that path (only
+      // hold_position/follow/move_to_point consume it, all confirmed by
+      // grep across every file). So the offsets got written and then simply
+      // sat on the unit object, unused — no visual bunching ever happened,
+      // it was dead code dressed up as a feature. Removed rather than kept
+      // "just in case," since a wrong comment claiming a nonexistent effect
+      // is worse than no comment. ADVANCE stays exactly what its own
+      // seek_engage doc comment already says it should be: a genuinely dumb
+      // banzai charge, no formation, straight at the nearest/smart-picked
+      // target — "square" for this button only ever meant "don't leave the
+      // acceleration ramp half-wound," handled by currentSpeedMult below,
+      // which IS real (getRampedSpeed in ai_categories.js reads it).
       sel.forEach(u => {
         u.hasOrders    = true;
         u.orderType    = 'seek_engage';
         u.orderTargetPoint = null;
         u.formationTimer   = 120;
         u.reactionDelay    = Math.floor(Math.random() * 61) + 3;
+        // Max possible speed per direct request — this doesn't boost a
+        // unit above its own stats.speed (no artificial buff, per direct
+        // request), it only clears a mounted unit's acceleration ramp
+        // (see ai_categories.js's updateSpeedRamp/getRampedSpeed) so a
+        // horse/elephant that was previously idle or mid-decelerate
+        // starts the charge already at its own real top speed instead of
+        // spending the first second or two ramping up from a standstill —
+        // infantry are untouched, getRampedSpeed() already no-ops for them.
+        if (typeof u.currentSpeedMult === 'number') u.currentSpeedMult = 1;
       });
       if (typeof startLazyGeneral === 'function') startLazyGeneral();
       this._revertRobot(); // real order issued — robot reverts to manual
       this._audio('charge');
     },
 
-    // ── E — stop / hold position ─────────────────────────────────────────
+    // ══════════════════════════════════════════════════════════════════════
+    // ★ AI TACTIC GROUPS ★
+    //   Clicking a tactic button on a selection tags every selected unit
+    //   with unit.aiTacticGroup = 'skirmish' | 'stand_ground' | 'melee_charge'
+    //   | 'auto' | 'shield' (undefined/null = no tactic assigned — a unit
+    //   that's never been touched by this feature, distinct from 'auto').
+    //
+    //   THREE SEPARATE STATES (do not conflate — see direct request):
+    //     1. Selected state    — u.selected. Purely "is the player looking
+    //        at/about to command this unit right now." Never implies a tactic.
+    //     2. AI assignment state — u.aiTacticGroup / u.aiTacticNumber. Set
+    //        ONLY by setAiTactic() below, persists across selection changes,
+    //        and is what actually drives behavior + the floating emoji.
+    //     3. Auto-Attack global state — W.MC3TacticalAI.isAutoRunning()
+    //        (autoAttack.js). Whether the shared 🤖 tactical engine is live.
+    //
+    //   Each tactic drives behavior differently:
+    //     - stand_ground (HOLD) → 2+ units assemble into one of four
+    //       formations — square, circle, line, or loose — chosen by a
+    //       weighted read of the selection's own composition (melee cav ->
+    //       square, horse archers -> circle, infantry -> line) plus the
+    //       enemy's ranged ratio (-> loose); see _pickHoldFormationStyle's
+    //       own comment for the exact weighting. Laid out via
+    //       calculateFormationOffsets (same function the manual FORM tray's
+    //       CIRCLE/BOX buttons use) around their own centroid, with the
+    //       centroid nudged off water first — see _landHoldCentroid), then
+    //       lock into hold_position once they arrive — see
+    //       ai_categories.js's "AI TACTIC: HOLD — FORMATION LOCK-IN". A lone
+    //       unit just holds on the spot. Formation king: while still
+    //       marching to its slot a unit can still auto-defend if attacked
+    //       (per direct request — the emergency self-defense override in
+    //       battlefield_commands.js, now a per-unit 20%-of-range/50px-floor
+    //       radius rather than a flat 100px, still applies during the
+    //       march), but it never breaks formation to chase. Once locked into
+    //       hold_position, the unit NEVER charges (walks toward a target to
+    //       close distance) and NEVER retreats — it only fights whatever is
+    //       already within its real weapon reach and stands perfectly still
+    //       otherwise (see ai_categories.js's hold_position branch, search
+    //       "NEVER CHARGE, NEVER RETREAT").
+    //     - melee_charge (CHARGE) → orderType 'seek_engage', self-sustaining.
+    //       Ranged units get an aggressive override in ai_categories.js
+    //       (search "AI TACTIC: CHARGE") that closes to ~20% (1/5th) of their
+    //       own range instead of the normal 80-95% engagement band — melee/
+    //       cavalry units just fight aggressively, which plain seek_engage
+    //       already does. Deliberately a "stupid banzai charge at the
+    //       closest unit" per direct request — no isolation logic, no
+    //       water-avoidance, nothing smart. This is the one tactic that
+    //       stays completely dumb on purpose.
+    //     - skirmish (SKIRM) → orderType 'seek_engage' too, but behavior
+    //       splits by unit type:
+    //         • MELEE skirmish units pick targets by strict isolation —
+    //           counts same-side allies within 200px of each CANDIDATE
+    //           enemy and always attacks whichever enemy has the fewest
+    //           (ties broken by distance) — see battlefield_commands.js's
+    //           "AI TACTIC: SKIRMISH ISOLATION TARGETING". This overrides
+    //           normal smart-target selection entirely for melee/skirmish;
+    //           it does NOT change movement — an isolation-picked target is
+    //           still engaged via plain seek_engage, no kiting.
+    //         • RANGED/gunpowder skirmish units keep distance instead —
+    //           ai_categories.js's kiting override (search "AI TACTIC:
+    //           SKIRMISH KITING") makes them retreat the instant an enemy
+    //           closes inside ~55% of their range, with water-avoidance on
+    //           real naval maps (tries alternate retreat angles to stay on
+    //           deck; river water does NOT trigger this — see
+    //           _isOnAnyDeck's own comment in ai_categories.js).
+    //     - auto (ADAPT) → deliberately does NOT get its own aggressive/
+    //       evasive/formation posture ("do not make Adapt overly aggressive,
+    //       overly evasive, or formation-focused" per direct request).
+    //       Instead it just clears _lazyManual and hands the unit to the
+    //       SAME shared tactical engine the 🤖 Auto-Attack button drives
+    //       (autoAttack.js's triggerTacticalAssault/getLivePlayers loop),
+    //       starting that engine on demand via
+    //       W.MC3TacticalAI.ensureAdaptRunning() if it isn't already
+    //       running. This is exactly why the Auto-Attack button is "a
+    //       convenience feature for players who don't want to manually
+    //       select every unit and assign Adapt" — pressing 🤖 is just Adapt
+    //       applied to the whole non-customized army at once.
+    //     - shield (SHIELD) → cautious formation advance, 2+ units only (a
+    //       lone unit has nothing to screen it, falls back to plain HOLD-
+    //       style hold_position — see setAiTactic). Layout: shield-bearing
+    //       melee up front, non-shield melee + gunpowder second row behind
+    //       them, ranged third row behind that, cavalry held on the flanks
+    //       (level with the line, NOT screening ahead — per direct request
+    //       "they hold, only hammer and anvil once units are engaged").
+    //       The whole formation advances together in small steps, slightly
+    //       slower than a normal march (matching shield-unit pace), driven
+    //       by a repeating interval (search "_shieldTick") that re-issues
+    //       move_to_point orders toward the enemy each tick while the
+    //       formation still holds shape — NOT a one-shot move order. Once
+    //       ~30% of the front shield line is actually in combat
+    //       (unit.state === "attacking"), cavalry is released from the
+    //       flank to seek_engage (the hammer-and-anvil commit). Any
+    //       individual unit that's already in range of a target locks into
+    //       the same strict hold_position NEVER-CHARGE/NEVER-RETREAT
+    //       discipline as HOLD the instant it's engaged — the formation
+    //       advances as a body, but an engaged unit doesn't lunge forward
+    //       out of line to chase. Formation centroid is nudged off water
+    //       first, same as HOLD (_landHoldCentroid).
+    //
+    //   unit.aiTacticNumber (an incrementing id, one per Cmd.setAiTactic()
+    //   call/selection) is internal bookkeeping only, never displayed.
+    //
+    //   DISPLAY: no card badge anymore. The assigned tactic instead floats
+    //   as an emoji directly above the unit's head on the battlefield canvas
+    //   — see the AIEmoji overlay below (Section 7b) — tracking the unit,
+    //   staying visible while unselected, and disappearing the instant the
+    //   tactic is cancelled or the unit dies. Skirm 🤾, Hold ✋, Charge ⚔️,
+    //   Adapt 🧠, Shield 🛡️, no tactic assigned = no emoji at all.
+    //
+    //   CANCELLATION — an AI assignment persists through selection changes
+    //   and only stops on one of these 4 triggers (never on mere
+    //   deselection — see lazyReleaseManualControl's aiTacticGroup guard in
+    //   battlefield_commands.js):
+    //     1. Select the units + press CANCEL (cancelAiTactic below).
+    //     2. NOT the Auto-Attack toggle (🤖 or 🛑) — per direct request
+    //        ("disabling autoattack makes all optional ai disabled"),
+    //        fireAuto/toggleManual in autoAttack.js now explicitly SKIP any
+    //        unit whose aiTacticGroup is set to something other than
+    //        'auto', so a Shield/Hold/Skirm/Charge assignment survives the
+    //        robot button being pressed OR released untouched — those
+    //        tactics run their own dedicated logic independent of the
+    //        shared engine and were never the robot's to claim or stop.
+    //        (This file previously documented the OPPOSITE — that toggling
+    //        🤖/🛑 reset every assignment — which was never actually
+    //        implemented and was the root cause of tactic-tagged units
+    //        getting fought over by two controllers at once.)
+    //     3. The unit dies (falls out of G.playerUnits()/allPlayerUnits()'s
+    //        hp>0 filter — the emoji overlay and behavior overrides simply
+    //        stop seeing it, no separate death-hook needed). SHIELD's own
+    //        _shieldTick interval additionally self-clears when its whole
+    //        group is dead/dispersed/battle-ended — see its own comment.
+    //     4. The battle ends (leave_battle_roster.js sweeps aiTacticGroup on
+    //        battle exit; a fresh battle spawns fresh unit objects anyway).
+    // ══════════════════════════════════════════════════════════════════════
+    _aiTacticCounter: 0,
+    _aiTacticLabel: { skirmish: 'SKIRM', stand_ground: 'HOLD', melee_charge: 'CHARGE', auto: 'ADAPT', shield: 'SHIELD' },
+    // Also used by AIEmoji (Section 7b) to pick which glyph floats above a
+    // tagged unit's head — kept in sync with the tray buttons below by hand
+    // since both are short, static lookup tables.
+    _aiTacticEmoji: { skirmish: '🤾', stand_ground: '✋', melee_charge: '⚔️', auto: '🧠', shield: '🛡️' },
+
+    // Picks a defensive shape for a Hold-tagged GROUP (2+ units), reading
+    // the actual battlefield situation rather than always defaulting to one
+    // shape. Per direct request, four shapes now exist, each with its own
+    // trigger read off the SELECTED units themselves (not the enemy — "at
+    // least for the units selected"), except LOOSE which is deliberately an
+    // enemy read (spreading out is a response to what the ENEMY can do to a
+    // clustered group, not to what's in the selection):
+    //   - more melee cavalry selected  -> more likely SQUARE
+    //   - more horse archers selected  -> more likely CIRCLE
+    //   - more infantry selected       -> more likely LINE
+    //   - enemy is ranged-heavy        -> more likely LOOSE (spreads the
+    //     group out so one volley/AoE can't collapse it — see LOOSE's own
+    //     comment in calculateFormationOffsets)
+    // "more chance of" per direct request means a weighted lottery, not a
+    // hard cutoff — a selection that's mostly infantry still has SOME
+    // chance of forming a circle or square, it's just the underdog. Role-
+    // based (getTacticalRole) rather than pure string matching, with a
+    // regex fallback only for the rare case that helper isn't loaded yet,
+    // matching the convention already used by _bucketForShield.
+    _pickHoldFormationStyle(sel) {
+      if (!sel.length) return 'circle';
+      let meleeCav = 0, rangedCav = 0, infantryCount = 0;
+      sel.forEach(u => {
+        const role = (typeof getTacticalRole === 'function') ? getTacticalRole(u) : null;
+        const txt  = ((u.stats?.role || '') + ' ' + (u.unitType || '')).toLowerCase();
+        const isCav = role === 'CAVALRY' || /(cav|horse|lancer|mounted|camel|eleph|keshig)/.test(txt);
+        const isRangedMount = /(horse.?archer|mounted.?gunner|keshig|zamburak)/.test(txt) ||
+          (isCav && !!(u.stats && u.stats.isRanged));
+        if (isCav && isRangedMount) rangedCav++;
+        else if (isCav) meleeCav++;
+        else if (role !== 'RANGED' && role !== 'GUNPOWDER' && !(u.stats && u.stats.isRanged)) infantryCount++;
+      });
+
+      const e = G.env();
+      const enemies = (e && Array.isArray(e.units)) ? e.units.filter(u => u.side === 'enemy' && u.hp > 0) : [];
+      let enemyRangedCount = 0;
+      enemies.forEach(u => { if (u.stats && u.stats.isRanged) enemyRangedCount++; });
+      const enemyRangedRatio = enemies.length ? (enemyRangedCount / enemies.length) : 0;
+
+      // BASE keeps every shape reachable even at zero dominance; CIRCLE gets
+      // a much higher base per direct request ("hold ai command prioritize
+      // to form a circle") — it's the priority/default pick for HOLD unless
+      // another shape's own composition signal (heavy melee cav -> square,
+      // heavy infantry -> line, enemy ranged-heavy -> loose) is strong
+      // enough to genuinely overcome that lead. Still a weighted lottery,
+      // not a hard cutoff, matching the existing "more chance of" design —
+      // an all-melee-cav selection can still tip SQUARE ahead of circle.
+      const BASE = 0.15;
+      const CIRCLE_PRIORITY_BASE = 0.65;
+      const weights = {
+        square: BASE + (meleeCav / sel.length),
+        circle: CIRCLE_PRIORITY_BASE + (rangedCav / sel.length),
+        line:   BASE + (infantryCount / sel.length),
+        loose:  BASE + enemyRangedRatio,
+      };
+      const total = weights.square + weights.circle + weights.line + weights.loose;
+      let roll = Math.random() * total;
+      const order = ['square', 'circle', 'line', 'loose'];
+      for (let i = 0; i < order.length; i++) {
+        roll -= weights[order[i]];
+        if (roll <= 0) return order[i];
+      }
+      return 'circle'; // fallback, should be unreachable
+    },
+
+    // Nudges a Hold formation's centroid off water before
+    // calculateFormationOffsets runs, per direct request ("hold command
+    // forming circles also try to avoid jumping to water"). Moves the WHOLE
+    // centroid together rather than checking each unit's individual slot —
+    // shifting per-slot would distort the circle/square shape itself,
+    // whereas nudging the shared center keeps the formation intact and just
+    // relocates where it forms. Naval-only (river water deliberately does
+    // NOT count here — see _isOnAnyDeck's own comment in ai_categories.js,
+    // "river water is more a land battle" per direct clarification — so on
+    // a river map this is a no-op and the formation forms wherever the
+    // centroid actually is). Searches outward in a ring of candidate points
+    // and returns the first dry one; if genuinely nothing dry is found
+    // nearby (e.g. a tiny island), falls back to the original centroid
+    // rather than searching forever.
+    _landHoldCentroid(cx, cy) {
+      const _wet = (x, y) => typeof _isOnAnyDeck === 'function' && !_isOnAnyDeck(x, y);
+      if (!_wet(cx, cy)) return { x: cx, y: cy };
+      const radii = [40, 80, 120, 180, 260, 360];
+      for (let r = 0; r < radii.length; r++) {
+        const steps = 12;
+        for (let i = 0; i < steps; i++) {
+          const ang = (i / steps) * Math.PI * 2;
+          const tx = cx + Math.cos(ang) * radii[r];
+          const ty = cy + Math.sin(ang) * radii[r];
+          if (!_wet(tx, ty)) return { x: tx, y: ty };
+        }
+      }
+      return { x: cx, y: cy }; // nothing dry nearby — best effort, don't hang
+    },
+
+    // Sorts a Shield-tagged selection into the four formation roles, per
+    // direct request: "melee shields at front, non shield and gunpowder
+    // behind, ranged behind and cav at flanks". Mirrors the hasShield
+    // convention already used elsewhere (battle_enhancements.js) rather than
+    // inventing a new detection method.
+    //
+    // FIX ("if no shield infantry or few, make melee infantry form the
+    // front line"): previously non-shield melee ALWAYS sat in row 2 no
+    // matter how few (or zero) shield-bearers were in the group — a group
+    // with 1 shield unit and 8 plain swordsmen still put only that 1 unit
+    // up front, which doesn't read as a real front line at all. Now: if
+    // shields are fewer than the plain-melee count (covers the zero-shield
+    // case too), enough plain melee are promoted into the front row to
+    // bring it up to roughly half of shields+plainMelee combined — shields
+    // still anchor the front (pushed to the array front so they occupy the
+    // center after layoutRow's centered spacing), plain melee fill out the
+    // rest of the line, and only genuine leftover plain melee still forms
+    // row 2 behind them.
+    _bucketForShield(units) {
+      const b = { shields: [], secondRow: [], ranged: [], cavalry: [] };
+      const plainMelee = [];
+      units.forEach(u => {
+        const role = (typeof getTacticalRole === 'function') ? getTacticalRole(u) : null;
+        const txt  = ((u.stats?.role || '') + ' ' + (u.unitType || '')).toLowerCase();
+        const isCav = role === 'CAVALRY' || /(cav|horse|lancer|mounted|camel|eleph|keshig)/.test(txt);
+        const hasShield = !!(u.stats && (u.stats.hasShield === true || u.stats.shieldBlockChance > 0));
+        if (isCav) { b.cavalry.push(u); return; }
+        if (hasShield) { b.shields.push(u); return; }
+        if (u.stats && u.stats.isRanged) { b.ranged.push(u); return; } // covers gunpowder too — no separate row for it, "non shield and gunpowder behind" groups gunpowder with second row, but a gunpowder unit that's actually ranged reads more naturally as the ranged row here; kept simple/single-condition since the spec's own wording ("non shield and gunpowder behind, ranged behind") is genuinely ambiguous about a unit that's both — resolved as: non-ranged non-shield melee -> second row, anything that shoots (archer OR gunpowder) -> ranged row.
+        plainMelee.push(u); // non-shield melee (no ranged flag at all)
+      });
+      if (plainMelee.length > b.shields.length) {
+        const frontTarget = Math.ceil((b.shields.length + plainMelee.length) / 2);
+        const promoteCount = Math.max(0, frontTarget - b.shields.length);
+        b.shields = b.shields.concat(plainMelee.splice(0, promoteCount));
+      }
+      b.secondRow = plainMelee; // whatever's left after any promotion above
+      return b;
+    },
+
+    // Lays out formationOffsetX/Y for a Shield formation: shields (and any
+    // promoted plain melee, see _bucketForShield) front row, second row
+    // (leftover non-shield melee) directly behind them, ranged row behind
+    // that, cavalry held level with the front row on both flanks (NOT
+    // screening ahead — per direct request "they hold, only hammer and
+    // anvil once units are engaged"). frontDir is a unit vector pointing
+    // toward the enemy. Does not issue orders itself — _shieldTick does
+    // that every interval so the same offsets can be re-centered on an
+    // advancing point.
+    //
+    // FIX ("way tighter formation"): COL/ROW cut roughly in half (42→22,
+    // 55→30) — a real shield wall reads as a tight, shoulder-to-shoulder
+    // line, not units spread out with visible gaps between them.
+    _buildShieldFormationOffsets(sel, frontDir) {
+      const b = this._bucketForShield(sel);
+      const side = { x: -frontDir.y, y: frontDir.x };
+      const COL = 22, ROW = 30;
+
+      const layoutRow = (group, rowIdx) => {
+        group.forEach((u, i) => {
+          const colOff = (i - (group.length - 1) / 2) * COL;
+          u.formationOffsetX = side.x * colOff + (-frontDir.x) * ROW * rowIdx;
+          u.formationOffsetY = side.y * colOff + (-frontDir.y) * ROW * rowIdx;
+        });
+      };
+      layoutRow(b.shields,   0);
+      layoutRow(b.secondRow, 1);
+      layoutRow(b.ranged,    2);
+
+      // Cavalry: both flanks, level with the front row (rowIdx 0 depth) —
+      // NOT ahead of it. Half on each side, spaced outward from the edge of
+      // the shield line so they don't overlap the infantry's column spread.
+      const frontHalfWidth = ((b.shields.length - 1) / 2) * COL + 20;
+      b.cavalry.forEach((u, i) => {
+        const flip  = (i % 2 === 0) ? 1 : -1;
+        const depth = Math.floor(i / 2) * 26;
+        const colOff = flip * (frontHalfWidth + depth);
+        u.formationOffsetX = side.x * colOff;
+        u.formationOffsetY = side.y * colOff;
+      });
+      return b;
+    },
+
+    // Clamps a point to window.__playerDeployZone during pre-deploy, per
+    // direct request after a reported bug: "chance some units can exit out
+    // of the deployment zone particularly in shield formation." Mirrors the
+    // exact rectangle-clamp shape battlefield_logic.js's own per-frame
+    // PRE-DEPLOY POSITION CLAMP already uses for unit.x/unit.y (same
+    // z.minX/maxX/minY/maxY fields) — this just applies that same rectangle
+    // to a formation TARGET point before it's ever assigned as
+    // orderTargetPoint, rather than relying solely on the per-frame position
+    // clamp to catch it after the fact. Per direct confirmation: position-
+    // only clamp is enough — formation can end up lopsided against the zone
+    // edge rather than reshaping to fit, no reshaping logic needed. Outside
+    // pre-deploy (window.__preDeploymentActive false, i.e. the battle is
+    // actually live) this is always a no-op — Shield formations should
+    // freely advance across the whole map once the battle has started.
+    // Naval zones are skipped too (z.type === 'naval' uses ship-relative
+    // bounds the existing commander clamp already handles differently; a
+    // land-formation rectangle clamp doesn't apply the same way to a deck).
+    _clampToDeployZone(x, y) {
+      if (!window.__preDeploymentActive || !window.__playerDeployZone) return { x, y };
+      const z = window.__playerDeployZone;
+      if (z.type === 'naval') return { x, y };
+      return {
+        x: Math.max(z.minX, Math.min(z.maxX, x)),
+        y: Math.max(z.minY, Math.min(z.maxY, y)),
+      };
+    },
+
+    // Repeating driver for an advancing Shield formation. Per direct
+    // request this must be an ongoing tick (not a one-shot move order) that
+    // keeps nudging the formation toward the enemy while it holds shape.
+    // Keyed by groupNum (Cmd.setAiTactic's aiTacticNumber for this
+    // selection) rather than per-unit, since the whole group shares one
+    // advancing centroid. Stored on Cmd._shieldIntervals so a second
+    // Shield tag (new groupNum) doesn't collide with an existing one, and
+    // so cancellation can find and clear the right interval.
+    //
+    // FIX ("advancing shouldn't be so intervaled, instead more natural,
+    // just slower speed"): was a 700ms tick advancing the centroid 6px each
+    // time and reissuing move_to_point — visibly stepped/jerky since
+    // _handleMovement would catch up to the new target then sit idle for
+    // most of the 700ms gap. Now ticks every 90ms (close to a real per-frame
+    // cadence) advancing a much smaller 0.75px per tick — same net speed
+    // ballpark (0.75px/90ms ≈ 8.3px/sec vs the old 6px/700ms ≈ 8.6px/sec,
+    // deliberately close so "slower than march" didn't change, just the
+    // GRANULARITY of the steps) but now fine-grained enough to read as
+    // continuous creeping motion rather than a stutter-step.
+    //
+    // FIX ("the shield logic just goes back and forth while moving forward
+    // slightly... looks like ur dancing back and forth"): a DIFFERENT bug
+    // from the smoothing fix above, and from the SKIRM poke-and-run flicker
+    // fixed the same turn as that one — this is lateral wobble baked into
+    // the LAYOUT math, not a retreat/approach flip. frontDir used to be
+    // recomputed from scratch every single 90ms tick, snapped directly to
+    // (enemy centroid - cx,cy). Since advancing even 0.75px shifts the
+    // enemy centroid's relative angle from the new cx,cy by a tiny amount,
+    // frontDir (and therefore `side`, and therefore EVERY unit's
+    // formationOffsetX/Y — the whole row/flank layout rotates around
+    // frontDir) micro-rotated every tick. Individual units chasing a
+    // constantly, subtly re-angled target slot every 90ms — even though the
+    // slot's overall position IS creeping forward — reads exactly like
+    // side-to-side dancing layered on top of the forward creep. Fixed with
+    // two changes: (1) frontDir now updates via a slow lerp
+    // (FRONT_DIR_LERP = 0.04 per tick) toward the freshly computed enemy
+    // heading instead of snapping straight to it — the heading still
+    // tracks a genuinely moving enemy mass over time, it just can't
+    // micro-flutter tick to tick anymore. (2) a unit's orderTargetPoint is
+    // now only reissued when it's actually moved more than
+    // MIN_RETARGET_DIST (3px) from what that unit was already given — a
+    // fresh order every tick for a target that's essentially unchanged was
+    // itself adding move_to_point churn on top of the layout wobble.
+    //
+    // FIX ("shield formation keeps moving back and forth... looks like
+    // its dancing" — reported again after the frontDir-lerp/retarget-
+    // threshold fix above reduced it but didn't eliminate it): the root
+    // cause was continuous retargeting itself. Even smoothed and
+    // throttled to "only when the slot moves >3px", a unit's order was
+    // still being re-evaluated every single 90ms tick, so it could never
+    // settle into one clean, uninterrupted walk — it was always somewhere
+    // between "just got nudged" and "about to get nudged again", which
+    // reads as dancing no matter how small each individual nudge is. Per
+    // direct request, replaced the continuous per-tick creep with a
+    // discrete per-unit MOVE/PAUSE cycle (MOVE_MIN_MS/MOVE_MAX_MS/
+    // PAUSE_MIN_MS/PAUSE_MAX_MS below): each unit snapshots its target
+    // slot exactly ONCE, right as its own move phase begins, and that
+    // order is left completely alone — no re-centering, no distance
+    // checks — until the unit either arrives, gets engaged, or its move
+    // phase times out and it switches to a full stop (hold_position) for
+    // a pause phase. Nothing is touching the order mid-walk anymore, so
+    // there's nothing left to dance around. Durations are randomized per
+    // unit, per phase (re-rolled on every flip) so units desync from each
+    // other within a few cycles instead of pulsing in lockstep — reads as
+    // a body of soldiers rather than one machine, per direct request
+    // ("each interval is slightly random to be human"). This also means a
+    // slower unit's movement windows are no longer partly wasted on
+    // corrective wobble — every bit of its MOVE phase is now real
+    // progress toward its slot, which is what actually lets it close the
+    // gap on faster units over a few cycles ("allows slow units to catch
+    // up"). PAUSE is always a full stop at the unit's current position —
+    // same NEVER-CHARGE/NEVER-RETREAT discipline used everywhere else in
+    // this function, never a backward order. Formation tightness (COL/
+    // ROW in _buildShieldFormationOffsets) and shield-front bucketing
+    // (_bucketForShield) are unrelated to this bug and untouched here.
+    _shieldIntervals: {},
+    _startShieldTick(groupNum, initialCx, initialCy, initialFrontDir) {
+      if (this._shieldIntervals[groupNum]) clearInterval(this._shieldIntervals[groupNum]);
+      let cx = initialCx, cy = initialCy;
+      let frontDir = initialFrontDir;
+      let cavRelease = false; // hammer-and-anvil commit latch — one-way once tripped
+      const ADVANCE_STEP     = 0.75; // px per tick — see comment above for the math matching the old pace
+      const TICK_MS           = 90;  // cadence for the shared centroid/frontDir tracking below — NOT the per-unit move/pause cadence, see FIX comment above
+      const FRONT_DIR_LERP    = 0.04; // how fast frontDir chases the freshly computed enemy heading — low on purpose, see FIX comment above
+      // Per-unit MOVE/PAUSE cycle — see FIX comment above. "Slightly
+      // random" per direct request, so kept to a modest spread rather
+      // than wide variance; re-rolled independently for every unit on
+      // every phase flip.
+      const MOVE_MIN_MS  = 2500, MOVE_MAX_MS  = 3500; // ~3s of walking per burst
+      const PAUSE_MIN_MS = 1000, PAUSE_MAX_MS = 2500; // "a few random seconds" break
+      const _rndMs = (lo, hi) => lo + Math.random() * (hi - lo);
+
+      this._shieldIntervals[groupNum] = setInterval(() => {
+        if (!G.isBattle()) { clearInterval(this._shieldIntervals[groupNum]); delete this._shieldIntervals[groupNum]; return; }
+        const e = G.env();
+        if (!e || !Array.isArray(e.units)) return;
+        const group = e.units.filter(u => u.hp > 0 && u.aiTacticGroup === 'shield' && u.aiTacticNumber === groupNum);
+        if (!group.length) { clearInterval(this._shieldIntervals[groupNum]); delete this._shieldIntervals[groupNum]; return; }
+
+        // SIEGE PRIORITY: per direct request, "during a siege all this ai
+        // logic is secondary to operating siege equipment." A unit assigned
+        // a live siege role (ladder_carrier/ram_pusher/trebuchet_crew, same
+        // set battlefield_commands.js's isCommittedSiegeCrew already
+        // exempts from other overrides) sits out of the Shield formation
+        // entirely for as long as that role is active — it keeps doing its
+        // siege job untouched, and simply isn't included in this tick's
+        // formation layout/advance/order-issuing, exactly as if it had
+        // temporarily left the group. It resumes being driven by Shield the
+        // next tick after its siegeRole clears (e.g. the ladder's up, the
+        // ram's through), since group is rebuilt fresh from live
+        // aiTacticGroup/aiTacticNumber every tick rather than snapshotted.
+        const committedSiegeRoles = ['ladder_carrier', 'ram_pusher', 'trebuchet_crew'];
+        const activeGroup = group.filter(u => committedSiegeRoles.indexOf(u.siegeRole) === -1);
+        if (!activeGroup.length) return; // whole group is currently on siege duty — nothing to advance this tick
+
+        const enemies = e.units.filter(u => u.side === 'enemy' && u.hp > 0);
+        if (enemies.length) {
+          const ecx = enemies.reduce((s, u) => s + u.x, 0) / enemies.length;
+          const ecy = enemies.reduce((s, u) => s + u.y, 0) / enemies.length;
+          const dx = ecx - cx, dy = ecy - cy;
+          const mag = Math.hypot(dx, dy) || 1;
+          const targetDir = { x: dx / mag, y: dy / mag };
+          // Slow lerp toward the freshly computed heading instead of
+          // snapping straight to it — see FIX comment above. Re-normalize
+          // after blending so frontDir stays a true unit vector (a lerp
+          // between two unit vectors isn't itself unit length).
+          let blendedX = frontDir.x + (targetDir.x - frontDir.x) * FRONT_DIR_LERP;
+          let blendedY = frontDir.y + (targetDir.y - frontDir.y) * FRONT_DIR_LERP;
+          const blendedMag = Math.hypot(blendedX, blendedY) || 1;
+          frontDir = { x: blendedX / blendedMag, y: blendedY / blendedMag };
+        }
+
+        const b = this._bucketForShield(activeGroup);
+        // Engagement check FIRST — an already-engaged shield unit must not
+        // get its offset re-centered out from under it (that would yank it
+        // off whatever it's fighting). Only advance units that are not yet
+        // locked into combat.
+        const shieldsEngaged = b.shields.filter(u => u.state === 'attacking').length;
+        const engagedFrac = b.shields.length ? (shieldsEngaged / b.shields.length) : 0;
+        if (!cavRelease && engagedFrac >= 0.30) cavRelease = true; // one-way latch, per direct request "~30%"
+
+        // Advance the shared centroid only while the front line isn't yet
+        // meaningfully engaged — once real contact is made the formation
+        // has arrived, it shouldn't keep marching through its own melee.
+        if (engagedFrac < 0.30) {
+          const landed = this._landHoldCentroid(cx + frontDir.x * ADVANCE_STEP, cy + frontDir.y * ADVANCE_STEP);
+          const clamped = this._clampToDeployZone(landed.x, landed.y);
+          cx = clamped.x; cy = clamped.y;
+        }
+
+        this._buildShieldFormationOffsets(activeGroup, frontDir);
+
+        activeGroup.forEach(u => {
+          const isCav = b.cavalry.indexOf(u) !== -1;
+          if (isCav && cavRelease) {
+            // Hammer-and-anvil commit — released once, never re-leashed
+            // even if engagedFrac later drops (a unit dying shouldn't yank
+            // committed cavalry back to the flank mid-charge).
+            if (u.aiTacticGroup === 'shield') { // only reassign once, on the tick it actually flips
+              u.aiTacticGroup = undefined;
+              u.aiTacticNumber = undefined;
+              u._lazyManual = true;
+              u.orderType = 'seek_engage';
+              u.orderTargetPoint = null;
+              u.hasOrders = true;
+            }
+            return;
+          }
+          const dist = u.target ? Math.hypot(u.x - u.target.x, u.y - u.target.y) : Infinity;
+          const inOwnRange = u.target && u.target.hp > 0 && dist <= (u.stats.range || 30);
+          if (inOwnRange) {
+            // Already fighting something within real reach — lock in place,
+            // same NEVER-CHARGE/NEVER-RETREAT discipline as HOLD. Does not
+            // touch formationOffsetX/Y (already updated above so the slot
+            // is ready the instant the unit disengages).
+            u._lazyManual = true;
+            u.orderType = 'hold_position';
+            u.orderTargetPoint = null;
+          } else {
+            u._lazyManual = true;
+
+            // Per-unit MOVE/PAUSE clock — see FIX comment above
+            // _shieldIntervals. Lazily initialized the first tick a unit
+            // lands in this branch (fresh join, or just disengaged).
+            if (!u._shieldPhase) {
+              u._shieldPhase   = 'move';
+              u._shieldPhaseMs = _rndMs(MOVE_MIN_MS, MOVE_MAX_MS);
+            }
+            u._shieldPhaseMs -= TICK_MS;
+            let justFlipped = false;
+            if (u._shieldPhaseMs <= 0) {
+              justFlipped = true;
+              u._shieldPhase   = (u._shieldPhase === 'move') ? 'pause' : 'move';
+              u._shieldPhaseMs = (u._shieldPhase === 'move')
+                ? _rndMs(MOVE_MIN_MS, MOVE_MAX_MS)
+                : _rndMs(PAUSE_MIN_MS, PAUSE_MAX_MS);
+            }
+
+            if (u._shieldPhase === 'move') {
+              // Snapshot the slot ONCE, right as this move phase starts,
+              // then leave it alone for the rest of the phase — this is
+              // the actual fix. Nothing re-nudges the order mid-walk, so
+              // the unit gets one clean, uninterrupted line to its target
+              // instead of a slot that keeps drifting under its feet.
+              if (justFlipped || u.orderType !== 'move_to_point') {
+                u.orderTargetPoint = this._clampToDeployZone(cx + (u.formationOffsetX || 0), cy + (u.formationOffsetY || 0));
+                u.orderType = 'move_to_point';
+                u.formationTimer = 60;
+              }
+            } else {
+              // PAUSE — full stop. Same NEVER-CHARGE/NEVER-RETREAT
+              // discipline as the engaged branch above: only ever holds
+              // the unit at its current spot, never sends it backward.
+              // Gives slower units in the group a window where the front
+              // isn't pulling further ahead of them.
+              if (u.orderType !== 'hold_position') {
+                u.orderType = 'hold_position';
+                u.orderTargetPoint = null;
+              }
+            }
+            u.target = (u.target && u.target.isDummy) ? u.target : null;
+          }
+          u.hasOrders = true;
+        });
+      }, TICK_MS);
+    },
+
+    setAiTactic(tacticName) {
+      const sel = G.selected();
+      if (!sel.length) { _showToast('Select units first.'); return; }
+      this._aiTacticCounter = (this._aiTacticCounter || 0) + 1;
+      const groupNum = this._aiTacticCounter;
+
+      // Tag every selected unit with its persistent AI assignment FIRST —
+      // this is the "AI assignment state" (see the state-logic block
+      // above); it's intentionally independent of u.selected, and it's
+      // what the floating battlefield emoji and the ai_categories.js
+      // behavior overrides key off, so it must exist before any of the
+      // tactic-specific branches below run.
+      sel.forEach(u => {
+        u.aiTacticGroup  = tacticName;   // 'skirmish' | 'stand_ground' | 'melee_charge' | 'auto'
+        u.aiTacticNumber = groupNum;     // internal bookkeeping only, never displayed
+        u.hasOrders      = true;
+        u._formationLocked = false; // any explicit AI tactic command cancels a pending formation-drag lock
+      });
+
+      if (tacticName === 'stand_ground') {
+        // HOLD — formation king. 2+ units assemble into a ring/square
+        // around their own centroid instead of each unit just planting
+        // wherever it happened to be standing; a lone unit has nothing to
+        // form up with, so it just holds on the spot as before.
+        if (sel.length > 1 && typeof calculateFormationOffsets === 'function') {
+          const rawCx = sel.reduce((s, u) => s + u.x, 0) / sel.length;
+          const rawCy = sel.reduce((s, u) => s + u.y, 0) / sel.length;
+          // Nudge off water before laying out the circle/square — see
+          // _landHoldCentroid's own comment for why the whole center moves
+          // together instead of checking each unit's slot individually.
+          const landed = this._landHoldCentroid(rawCx, rawCy);
+          const cx = landed.x, cy = landed.y;
+          const style = this._pickHoldFormationStyle(sel);
+          calculateFormationOffsets(sel, style, { x: cx, y: cy });
+          sel.forEach(u => {
+            u._lazyManual      = true; // explicit — don't rely on selection having already set this
+            u.orderType        = 'move_to_point';
+            u.orderTargetPoint = { x: cx + (u.formationOffsetX || 0), y: cy + (u.formationOffsetY || 0) };
+            u.formationTimer   = 180;
+            u.reactionDelay    = Math.floor(Math.random() * 15) + 5;
+            u.target           = (u.target && u.target.isDummy) ? u.target : null;
+          });
+          // ai_categories.js's "AI TACTIC: HOLD — FORMATION LOCK-IN" block
+          // takes it from here: converts each unit to hold_position the
+          // instant it arrives at its slot (or its formationTimer expires).
+        } else {
+          sel.forEach(u => {
+            u._lazyManual      = true;
+            u.orderType        = 'hold_position';
+            u.orderTargetPoint = null;
+            u.target           = (u.target && u.target.isDummy) ? u.target : null;
+          });
+        }
+      } else if (tacticName === 'auto') {
+        // ADAPT — hands the unit back to the shared autoAttack.js tactical
+        // engine rather than giving it its own posture. Clearing
+        // _lazyManual is what actually re-admits it to that engine's
+        // getLivePlayers() filter; ensureAdaptRunning() starts the engine
+        // if the player hasn't already pressed 🤖, without touching any
+        // other unit's own state.
+        sel.forEach(u => { u._lazyManual = false; });
+        if (W.MC3TacticalAI && typeof W.MC3TacticalAI.ensureAdaptRunning === 'function') {
+          W.MC3TacticalAI.ensureAdaptRunning();
+        }
+      } else if (tacticName === 'shield') {
+        // SHIELD — cautious formation advance. A lone unit has nothing to
+        // screen it and no line to hold, so it falls back to plain HOLD-
+        // style hold_position rather than trying to run a one-unit
+        // "formation."
+        if (sel.length > 1) {
+          const rawCx = sel.reduce((s, u) => s + u.x, 0) / sel.length;
+          const rawCy = sel.reduce((s, u) => s + u.y, 0) / sel.length;
+          const landedWater = this._landHoldCentroid(rawCx, rawCy);
+          // FIX (deploy-zone escape bug): clamp the initial centroid too,
+          // not just each tick's advance — see _clampToDeployZone's own
+          // comment. A no-op once the battle is actually live.
+          const landed = this._clampToDeployZone(landedWater.x, landedWater.y);
+          const e = G.env();
+          const enemies = (e && Array.isArray(e.units)) ? e.units.filter(u => u.side === 'enemy' && u.hp > 0) : [];
+          let frontDir = { x: 0, y: 1 };
+          if (enemies.length) {
+            const ecx = enemies.reduce((s, u) => s + u.x, 0) / enemies.length;
+            const ecy = enemies.reduce((s, u) => s + u.y, 0) / enemies.length;
+            const dx = ecx - landed.x, dy = ecy - landed.y;
+            const mag = Math.hypot(dx, dy) || 1;
+            frontDir = { x: dx / mag, y: dy / mag };
+          }
+          this._buildShieldFormationOffsets(sel, frontDir);
+          sel.forEach(u => {
+            u._lazyManual      = true;
+            u.orderType        = 'move_to_point';
+            const tgt = this._clampToDeployZone(landed.x + (u.formationOffsetX || 0), landed.y + (u.formationOffsetY || 0));
+            u.orderTargetPoint = tgt;
+            u.formationTimer   = 60;
+            u.reactionDelay    = Math.floor(Math.random() * 15) + 5;
+            u.target           = (u.target && u.target.isDummy) ? u.target : null;
+          });
+          this._startShieldTick(groupNum, landed.x, landed.y, frontDir);
+        } else {
+          sel.forEach(u => {
+            u._lazyManual      = true;
+            u.orderType        = 'hold_position';
+            u.orderTargetPoint = null;
+            u.target           = (u.target && u.target.isDummy) ? u.target : null;
+          });
+        }
+      } else {
+        // skirmish, melee_charge — both start from seek_engage, which
+        // self-sustaining re-acquires a live target every frame on its
+        // own. The actual behavioral split (Charge's aggressive 20%-range
+        // closing override for ranged units, Skirm's earlier/eager kiting
+        // retreat) happens per-frame in ai_categories.js.
+        sel.forEach(u => {
+          u._lazyManual      = true; // explicit — don't rely on selection having already set this
+          u.orderType        = 'seek_engage';
+          u.orderTargetPoint = null;
+          u.formationTimer   = 120;
+          u.reactionDelay    = Math.floor(Math.random() * 61) + 3;
+        });
+      }
+
+      this._revertRobot();
+      const lbl = this._aiTacticLabel[tacticName] || tacticName.toUpperCase();
+      _showToast(sel.length + ' unit' + (sel.length === 1 ? '' : 's') + ' set to ' + lbl);
+      this._audio('ui_click');
+    },
+    cancelAiTactic() {
+      const sel = G.selected();
+      if (!sel.length) { _showToast('Select units first.'); return; }
+      // Stop any Shield formation interval(s) this selection belonged to
+      // immediately, rather than waiting up to one TICK_MS for _shieldTick's
+      // own self-check (group.length === 0) to notice and clear itself —
+      // harmless either way, just tidier to cut it the instant Cancel is
+      // pressed.
+      const shieldGroupNums = new Set(
+        sel.filter(u => u.aiTacticGroup === 'shield').map(u => u.aiTacticNumber)
+      );
+      shieldGroupNums.forEach(gn => {
+        if (this._shieldIntervals[gn]) {
+          clearInterval(this._shieldIntervals[gn]);
+          delete this._shieldIntervals[gn];
+        }
+      });
+      sel.forEach(u => {
+        u.aiTacticGroup    = undefined;
+        u.aiTacticNumber   = undefined;
+        // Full reset to a never-touched unit's default state — hands the
+        // unit back to whatever passive control applies (the auto-attack
+        // engine if it's running, otherwise nothing) exactly like a fresh
+        // unit that's never been selected.
+        u._lazyManual      = false;
+        u._formationLocked = false; // cancel-AI also cancels a mid-march formation lock
+        u.orderType        = 'hold_position';
+        u.orderTargetPoint = null;
+        u.hasOrders        = true;
+      });
+      _showToast('AI tactic cleared for selection.');
+      this._audio('ui_click');
+    },
+
+    // Same tactic-clearing core as cancelAiTactic() above (stop any Shield
+    // interval, wipe aiTacticGroup/aiTacticNumber) but with none of its UI
+    // side effects (no toast, no sound) and no opinion on order/_lazyManual/
+    // _formationLocked — those are the caller's business. Takes a raw unit
+    // array instead of reading G.selected(), since callers outside this
+    // file (battlefield_commands.js's executeBoxFormationMove) are acting
+    // on a unit list they already have in hand, not the live selection.
+    //
+    // Exists so a plain Total War-style drag-waypoint command always fully
+    // supersedes whatever brain-emoji tactic (skirmish/stand_ground/
+    // melee_charge/shield/auto) a unit was previously tagged with, instead
+    // of only pausing it for the march (via _formationLocked) and letting
+    // it quietly resume the instant the unit arrives — and so
+    // lazyReleaseManualControl's aiTacticGroup guard doesn't keep the unit
+    // opted out of autoAttack.js forever after a later deselect.
+    _clearAiTacticSilent(units) {
+      const list = units || [];
+      const shieldGroupNums = new Set(
+        list.filter(u => u.aiTacticGroup === 'shield').map(u => u.aiTacticNumber)
+      );
+      shieldGroupNums.forEach(gn => {
+        if (this._shieldIntervals[gn]) {
+          clearInterval(this._shieldIntervals[gn]);
+          delete this._shieldIntervals[gn];
+        }
+      });
+      list.forEach(u => {
+        u.aiTacticGroup  = undefined;
+        u.aiTacticNumber = undefined;
+      });
+    },
+
+
+    // ── E — stop / hold position ──────────────────────────────────────────
+    // Audited against the old north/south assumption per direct request:
+    // this is already fully position-agnostic (hold_position + zeroed
+    // velocity + cleared target/destination, no hardcoded edge or
+    // direction anywhere in it) — no change needed here.
     stop() {
       this._stopLazy();
       const sel = G.selected();
@@ -851,6 +1743,7 @@
         u.orderTargetPoint = null;
         u.target       = null;
         u.formationTimer   = 0;
+        u._formationLocked = false; // player interrupted a formation march — cancel AI's ignore
         u.vx = 0;
         u.vy = 0;
         u.reactionDelay = Math.floor(Math.random() * 61) + 3;
@@ -866,24 +1759,74 @@
       this._audio('ui_click');
     },
 
-    // ── R — retreat to south edge ────────────────────────────────────────
+    // ── R — retreat to the nearest battlefield edge ──────────────────────
+    // FIX: used to always target the south edge (maxH), built back when
+    // the player was always the south side and the enemy always north.
+    // Spawn sides are randomized now (see calculateFormationOffsets' own
+    // face-the-enemy fix), so retreat instead picks whichever of the four
+    // map edges is closest to THIS unit's current position — a unit near
+    // the east edge retreats east, not blindly south.
     retreat() {
       this._stopLazy();
       const sel = G.selected();
       if (!sel.length) { _showToast('Select units first.'); return; }
+      const maxW = (typeof BATTLE_WORLD_WIDTH  !== 'undefined') ? BATTLE_WORLD_WIDTH  : 2400;
       const maxH = (typeof BATTLE_WORLD_HEIGHT !== 'undefined') ? BATTLE_WORLD_HEIGHT : 3600;
       sel.forEach(u => {
         u.hasOrders    = true;
         u.orderType    = 'retreat';
-        u.orderTargetPoint = this._safe(u.x, maxH - 50 - Math.random() * 20);
+        const distN = u.y, distS = maxH - u.y, distW = u.x, distE = maxW - u.x;
+        const nearest = Math.min(distN, distS, distW, distE);
+        let tx = u.x, ty = u.y;
+        if (nearest === distS)      ty = maxH - 50 - Math.random() * 20;
+        else if (nearest === distN) ty = 50 + Math.random() * 20;
+        else if (nearest === distE) tx = maxW - 50 - Math.random() * 20;
+        else                        tx = 50 + Math.random() * 20;
+        u.orderTargetPoint = this._safe(tx, ty);
         u.formationTimer   = 240;
         u.reactionDelay    = Math.floor(Math.random() * 61) + 3;
+        // FIX ("ADVANCE/STOP/RETREAT/FOLLOW should always default tight
+        // formation/square and max possible speed AI" — direct request):
+        // RETREAT deliberately does NOT call calculateFormationOffsets —
+        // each unit already picks its OWN nearest edge independently (see
+        // the FIX comment above this function), so a mixed selection can
+        // legitimately have some units fleeing north and others south at
+        // the same time. Forcing one shared formation shape across the
+        // whole selection would fight that — units fleeing toward opposite
+        // edges have no sensible common "square" to belong to. What square
+        // means here instead: no spacing/offset is ever added on top of
+        // each unit's own flee point (retreat already didn't add any,
+        // which is exactly a tight, unspread cluster per unit — this just
+        // makes it explicit) and assignedFormationStyle is tagged 'square'
+        // directly so the formation tray/depth-lock UI reads correctly if
+        // the player checks it mid-retreat, same as every other order type
+        // that touches this field.
+        u.assignedFormationStyle = 'square';
+        // Max possible speed, same reasoning as ADVANCE/FOLLOW below —
+        // clears a mounted unit's acceleration ramp so it flees at its own
+        // real top speed immediately rather than spending the first
+        // second or two ramping up; no artificial boost above stats.speed,
+        // infantry untouched (getRampedSpeed already no-ops for them).
+        if (typeof u.currentSpeedMult === 'number') u.currentSpeedMult = 1;
       });
       this._revertRobot(); // real order issued — robot reverts to manual
       this._audio('ui_click');
     },
 
     // ── F — follow commander in current formation ────────────────────────
+    // Audited against the old north/south assumption per direct request:
+    // this already tracks the commander's LIVE position every frame
+    // (orderType 'follow' is re-read fresh each tick, not a one-time
+    // point) and calculateFormationOffsets' own face-the-enemy fix already
+    // makes the formation orient toward wherever the enemy currently is —
+    // no hardcoded side anywhere in this path. No change needed here.
+    //
+    // FIX ("ADVANCE/STOP/RETREAT/FOLLOW should always default tight
+    // formation/square and max possible speed AI" — direct request): this
+    // used to read window.currentFormationStyle (falling back to 'line')
+    // — whatever shape the player last picked from the FORM tray, or
+    // nothing at all. FOLLOW now always forces 'square' regardless of
+    // that global, same as the other three command-bar orders.
     follow() {
       this._stopLazy();
       const sel = G.selected();
@@ -896,11 +1839,12 @@
         u.orderTargetPoint = null;
         u.formationTimer   = 240;
         u.reactionDelay    = Math.floor(Math.random() * 22);
+        // Max possible speed — see ADVANCE's identical comment for the
+        // full reasoning (clears mount accel ramp only, no stat boost).
+        if (typeof u.currentSpeedMult === 'number') u.currentSpeedMult = 1;
       });
-      const style = (typeof currentFormationStyle !== 'undefined')
-        ? currentFormationStyle : 'line';
       if (typeof calculateFormationOffsets === 'function') {
-        calculateFormationOffsets(sel, style, cmd);
+        calculateFormationOffsets(sel, 'square', cmd);
       }
       this._revertRobot(); // real order issued — robot reverts to manual
       this._audio('ui_click');
@@ -923,15 +1867,55 @@
       // Persist so the triple-tap gesture can replay it
       W._mc3LastFormation = style;
 
+      // Formation buttons put units in place and STOP — a "form up here"
+      // command, not an advance order. Two things are needed for that to
+      // actually hold once the unit arrives, and this handler was missing
+      // both of them (which is why units were seen forming up and then
+      // immediately charging the enemy):
+      //  1. Opt out of autoAttack.js's own tactical engine — same
+      //     lazyTakeManualControl the keyboard Z/X/V/C/B path already
+      //     calls (see battlefield_commands.js). Without this, that
+      //     engine keeps driving the unit's combat behavior in parallel
+      //     with the move order below and can send it charging the
+      //     moment it notices an enemy in range.
+      //  2. Clear any leftover brain-emoji AI tactic (SKIRM/HOLD/CHARGE/
+      //     ADAPT/SHIELD) from an earlier command. ai_categories.js keys
+      //     its own per-frame behavior off aiTacticGroup, so an old
+      //     CHARGE tag would otherwise resume driving the unit at the
+      //     enemy the instant this one-time move order completes.
+      if (typeof window.lazyTakeManualControl === 'function') {
+        window.lazyTakeManualControl(sel);
+      }
+      this._clearAiTacticSilent(sel);
+
       if (typeof calculateFormationOffsets === 'function') {
         calculateFormationOffsets(sel, style, { x: cx, y: cy });
       }
+      // FIX: this button handler was a separate, never-updated copy of the
+      // keyboard Z/X/V/C/B logic — it still used orderType='follow', which
+      // re-derives each unit's target every tick as commander.x/y + offset
+      // instead of the selection's own centroid (cx/cy computed above).
+      // That's why every shape except CIRCLE looked broken from this button:
+      // circle's offsets are small and roughly symmetric, so tethering to
+      // the commander still LOOKED like a rough ring; tight/standard/line's
+      // directional, role-sorted offsets only look right anchored to the
+      // selection's own centroid, so they came out scattered/wrong. Keyboard
+      // presses already got this fix (see battlefield_commands.js) — mirror
+      // it here: one-time move_to_point to cx/cy + offset, no ongoing follow.
       sel.forEach(u => {
         u.hasOrders    = true;
-        u.orderType    = 'follow';
-        u.orderTargetPoint = null;
+        u.orderType    = 'move_to_point';
+        u.orderTargetPoint = {
+          x: cx + (u.formationOffsetX || 0),
+          y: cy + (u.formationOffsetY || 0)
+        };
         u.formationTimer   = 240;
         u.reactionDelay    = Math.floor(Math.random() * 15) + 5;
+        // Mirror the keyboard path: remember what shape this unit now holds
+        // so a later drag-to-form (see executeBoxFormationMove in
+        // battlefield_commands.js) can detect and preserve/redraw it
+        // instead of resetting to the ignore-type default grid.
+        u.assignedFormationStyle = style;
       });
       this._revertRobot(); // real formation command issued — robot reverts to manual
       this._audio('ui_click');
@@ -1094,12 +2078,13 @@
       D.body.appendChild(t);
     }
 
-    // Backdrop — closes any open tray / popup on outside tap
+    // Backdrop — closes Help / the unit-stats popup on outside tap. Trays
+    // (cmd/form/tactic/select) deliberately do NOT close from this anymore
+    // — see _toggleTray's own comment for why — so this list is shorter
+    // than it used to be on purpose, not an oversight.
     const bd = _mkEl('div', 'mc3-backdrop');
     root.appendChild(bd);
     bd.addEventListener('pointerdown', () => {
-      _closeTray('cmd');
-      _closeTray('form');
       UnitCards.closePopup();
       Help.close();
       bd.classList.remove('act');
@@ -1110,6 +2095,7 @@
     survHud.innerHTML = `
       <div class="mc3-surv-row mc3-surv-ally">🙂 <span id="mc3-ally-count">0</span></div>
       <div class="mc3-surv-row mc3-surv-foe">😠 <span id="mc3-foe-count">0</span></div>
+      <div class="mc3-surv-row mc3-surv-day" id="mc3-day-row">🗓 Day <span id="mc3-day-count">1</span></div>
     `;
     root.appendChild(survHud);
 	
@@ -1134,10 +2120,24 @@
     const sb = _mkEl('div', 'mc3-selbox');
     root.appendChild(sb);
 
+    // Formation-drag arrow-grid overlay (Total War style), replaces the
+    // rectangle for the "units selected → forming up" case. SVG so each
+    // per-unit arrow can rotate to the drag angle — a CSS-box border can't
+    // express a facing direction the way an SVG line/marker can.
+    const fl = D.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    fl.id = 'mc3-formline';
+    root.appendChild(fl);
+
     // Drag-ghost card (floating card that follows the dragging finger)
     const dg = _mkEl('div', 'mc3-drag-card');
     dg.id = 'mc3-drag-card';
     root.appendChild(dg);
+
+    // Floating AI-tactic emoji layer (battlefield overlay, not chrome — see
+    // AIEmoji in Section 7b). Lives directly on root like mc3-selbox above,
+    // not nested inside any tray/HUD element that might get hidden/z-clipped.
+    const aiLayer = _mkEl('div', 'mc3-ai-emoji-layer');
+    root.appendChild(aiLayer);
   }
 
   function _mkEl(tag, id, cls) {
@@ -1177,6 +2177,76 @@
     return b;
   }
 
+  // Formation-tray highlight + Depth-state sync (called from the tick loop,
+  // throttled — see the call site below). Reads the shared formation style
+  // the exact same way battlefield_commands.js's own executeBoxFormationMove
+  // /preview code does (_getSharedDragFormationStyle — a unit-count===0 or
+  // mixed-style selection yields "dragGrid", meaning no formation is
+  // "active"), so this can never disagree with what the blue-arrow
+  // preview/commit actually does. Two effects, always applied together from
+  // the same single style read:
+  //   1. Yellow outline (.mc3-formation-active) on whichever of the 5
+  //      formation buttons matches (including BOX/square now) — none
+  //      highlighted for "dragGrid".
+  //   2. Depth button's STATE (never its visibility — see the button's own
+  //      comment for the full "why it used to vanish" history):
+  //        - dragGrid / tight / standard / line -> full 1-4 range, enabled.
+  //        - circle -> enabled but clamped to 1-2; if a stale 3 or 4 was
+  //          left over from a previous dragGrid session, snap it down to 2
+  //          the moment circle becomes active rather than showing a value
+  //          the click handler's own 1<->2 cycle could never have produced.
+  //        - square -> disabled, label shows no number ("blob to each
+  //          other," not a depth-driven shape).
+  //      activeStyle is stashed on the button's dataset so the click
+  //      handler (which only fires on a user tap, not every tick) knows
+  //      which of the three behaviors to apply without recomputing the
+  //      shared style itself.
+  function _syncFormationUI() {
+    const depthBtn = D.getElementById('mc3-depth-btn');
+    if (!depthBtn) return; // not in battle / bar not built yet
+    let style = 'dragGrid';
+    if (typeof G !== 'undefined' && typeof G.selected === 'function' &&
+        typeof _getSharedDragFormationStyle === 'function') {
+      const sel = G.selected();
+      if (sel && sel.length > 0) style = _getSharedDragFormationStyle(sel);
+    }
+    ['tight', 'standard', 'line', 'circle', 'square'].forEach(s => {
+      const btn = D.getElementById('mc3-formbtn-' + s);
+      if (btn) btn.classList.toggle('mc3-formation-active', s === style);
+    });
+
+    depthBtn.dataset.activeStyle = style;
+    const lbl = D.getElementById('mc3-depth-lbl');
+    if (style === 'square') {
+      depthBtn.classList.add('mc3-depth-disabled');
+      if (lbl) lbl.textContent = 'DEPTH —';
+    } else {
+      depthBtn.classList.remove('mc3-depth-disabled');
+      // BUG FIX (audit pass, direct request): this used to WRITE
+      // window._mc3FormationDepth down to 2 right here, every 350ms,
+      // whenever the currently-viewed selection happened to be circle and
+      // the stored value was >2 — a silent background mutation triggered
+      // purely by which selection the player happened to be looking at,
+      // not by any click. Re-traced every consumer of this value (grep
+      // across both files): _mc3FormationDepth is read in exactly ONE
+      // place, dragGrid's row-count calc in calculateFormationOffsets —
+      // it's "what depth the next plain drag will use," not a saved
+      // preference belonging to any particular formation or selection, so
+      // this was never actually destroying meaningful per-formation state.
+      // Still wrong to mutate it from a passive sync tick though — every
+      // other write to this value in the file happens on a real user
+      // click, and a background tick silently changing what the NEXT
+      // plain drag will do, just because the player glanced at an
+      // unrelated circle selection, is a surprising side effect with no
+      // visible cause. Fixed by only clamping what's DISPLAYED while
+      // circle is active; the actual 1<->2 write for circle happens only
+      // in the depth button's own click handler below, on a real click.
+      const displayDepth = (style === 'circle' && window._mc3FormationDepth > 2)
+        ? 2 : window._mc3FormationDepth;
+      if (lbl) lbl.textContent = `DEPTH ${displayDepth}`;
+    }
+  }
+
   // ── Header bar ─────────────────────────────────────────────────────────────
 function _buildHeader() {
     const bar = _mkEl('div', 'mc3-hbar');
@@ -1208,7 +2278,18 @@ function _buildHeader() {
       () => _toggleTray('form')
     ));
 
-    // 7) Group 5
+    // 6b) AI Tactics — opens the SKIRM/HOLD/CHARGE/ADAPT/CANCEL tray (see
+    // the ★ AI TACTIC GROUPS ★ comment block above Cmd.setAiTactic for the
+    // full behavior breakdown). Mirrors the formation button exactly.
+    row.appendChild(_mkBtn(
+      '<span class="ticon" style="font-size: clamp(1.4rem, 4.5vw, 1.8rem); line-height: 1; margin: 0;">🧠</span>',
+      'mc3-tactic-toggle', 'mc3-toggle-btn',
+      () => _toggleTray('tactic')
+    ));
+
+    // 7) Group 5 — SELECT ALL. Kept standalone per direct request ("except
+    // select all formation") — everything else (1–4) collapses into the
+    // dropdown below instead of sitting in the main row as 4 separate icons.
     row.appendChild(_mkBtn(
       `<span style="font-size: clamp(1.1rem, 3.8vw, 1.5rem); line-height: 1;">👥</span>`,
       'mc3-g5',
@@ -1216,18 +2297,39 @@ function _buildHeader() {
       () => Cmd.selectGroup(5)
     ));
 
-    // 8–11) Groups 1–4
-    const gIcons = ['🪓', '🏹', '🐎', '🔥'];
-    for (let i = 1; i <= 4; i++) {
-      row.appendChild(_mkBtn(
-        `<span style="font-size: clamp(1.1rem, 3.8vw, 1.5rem); line-height: 1;">${gIcons[i - 1]}</span>`,
-        `mc3-g${i}`,
-        'mc3-gbtn',
-        () => Cmd.selectGroup(i)
-      ));
-    }
+    // 8) Individual-selection dropdown — REWORKED per direct request: groups
+    // 1–4 (Infantry/Ranged/Cavalry/Gunpowder) used to each get their own
+    // button in the main row; that's 4 icons of clutter for something used
+    // less often than SELECT ALL. Collapsed into one 🎯 toggle that opens a
+    // tray (mc3-select-tray, styled/behaved exactly like the formation tray)
+    // listing the same 4 types. Each option still just calls
+    // Cmd.selectGroup(i) — same selection logic as before (all FRIENDLY
+    // units of that type on the field), completely unchanged.
+    row.appendChild(_mkBtn(
+      '<span class="ticon" style="font-size: clamp(1.4rem, 4.5vw, 1.8rem); line-height: 1; margin: 0;">🖱️</span>',
+      'mc3-select-toggle', 'mc3-toggle-btn',
+      () => _toggleTray('select')
+    ));
 
-    // 12) Stack-mode toggle button
+    // 9) Hover-panel toggle — beside the unit-card-toggle (🪪) per direct
+    // request. Click-toggles window.__hoverButtonHeld (a latch, unlike
+    // spacebar's held-down semantics) and mirrors it into
+    // window.__hoverPanelActive, the single flag unit-hover-tooltip.js reads.
+    // Kept independent of the spacebar path — releasing Space never turns
+    // this back off, and clicking this again never affects Space.
+    if (typeof window.__hoverButtonHeld !== 'boolean') window.__hoverButtonHeld = false;
+    row.appendChild(_mkBtn(
+      '<span class="ticon" style="font-size: clamp(1.4rem, 4.5vw, 1.8rem); line-height: 1; margin: 0;">🔎</span>',
+      'mc3-hover-toggle', 'mc3-toggle-btn',
+      () => {
+        window.__hoverButtonHeld = !window.__hoverButtonHeld;
+        window.__hoverPanelActive = window.__hoverButtonHeld;
+        D.getElementById('mc3-hover-toggle')?.classList.toggle('tray-open', window.__hoverButtonHeld);
+        Cmd._audio('ui_click');
+      }
+    ));
+
+    // 10) Stack-mode toggle button
     row.appendChild(_mkBtn(
       '<span class="ticon" style="font-size: clamp(1.4rem, 4.5vw, 1.8rem); line-height: 1; margin: 0;">🪪</span>',
       'mc3-stack-btn', 'mc3-toggle-btn',
@@ -1239,7 +2341,7 @@ function _buildHeader() {
     // ── CMD tray ─────────────────────────────────────────────────────────
     const ct = _mkEl('div', 'mc3-cmd-tray', 'mc3-tray');
     [
-      { icon: '⚔️', lbl: 'CHARGE',  fn: () => Cmd.charge()  },
+      { icon: '🏃', lbl: 'ADVANCE', fn: () => Cmd.charge()  },
       { icon: '⛔',  lbl: 'STOP',    fn: () => Cmd.stop()    },
       { icon: '🏳️', lbl: 'RETREAT', fn: () => Cmd.retreat() },
       { icon: '👫',  lbl: 'FOLLOW',  fn: () => Cmd.follow()  },
@@ -1251,21 +2353,116 @@ function _buildHeader() {
     });
     bar.appendChild(ct);
 
-    // ── Formation tray ───────────────────────────────────────────────────
+// ── Formation tray ──────────────────────────────────────────────────
+    // Tight/Standard/Loose/Circle/BOX. BOX ('square' style internally) is
+    // back as its own button per direct request — it was dropped from the
+    // tray in an earlier pass but calculateFormationOffsets' "square" case
+    // was left fully intact the whole time (still reachable via HOLD's
+    // auto-style cycling), so restoring the button needed no engine work,
+    // just wiring it back in with its original label.
     const ft = _mkEl('div', 'mc3-form-tray', 'mc3-tray');
     [
-      { icon: '🛡️', lbl: 'SHIELD',   style: 'tight' },
+      { icon: '🧱', lbl: 'TIGHT',    style: 'tight' },
       { icon: '═',   lbl: 'STANDARD', style: 'standard' },
-      { icon: '➖',   lbl: 'LINE',     style: 'line' },
+      { icon: '↔️', lbl: 'LOOSE',    style: 'line' },
       { icon: '⭕',   lbl: 'CIRCLE',   style: 'circle' },
-      { icon: '🔲',   lbl: 'BOX',      style: 'square' },
+      { icon: '⬜',   lbl: 'BOX',     style: 'square' },
     ].forEach(f => {
       ft.appendChild(_mkBtn(
         `<span class="ticon">${f.icon}</span><span class="tlbl">${f.lbl}</span>`,
-        null, 'mc3-tray-btn', () => Cmd.formation(f.style)
+        'mc3-formbtn-' + f.style, 'mc3-tray-btn', () => Cmd.formation(f.style)
       ));
     });
+    // Drag-formation DEPTH toggle — cycles rows deep for the Total War-style
+    // per-unit arrow-grid drag (executeBoxFormationMove / calculateFormation
+    // Offsets' "dragGrid" case in battlefield_commands.js).
+    // REWORKED per direct request — this used to vanish entirely (display:
+    // none) whenever a named formation was active, which also silently hid
+    // BOX along with it (the bug report: "formation depth button is gone").
+    // Now it NEVER disappears. Instead _syncFormationUI (below) puts it in
+    // one of three states depending on the currently active named style:
+    //   - No named style active (plain drag) or TIGHT/STANDARD/LOOSE active:
+    //     full range, cycles 1→2→3→4→1 same as always. These three don't
+    //     read window._mc3FormationDepth in calculateFormationOffsets
+    //     either way — the toggle only really drives the plain drag grid —
+    //     but per direct request ("the other formations still have 1234")
+    //     it stays fully live/clickable for them regardless.
+    //   - CIRCLE active: range clamped to 1↔2 only (cycles 1→2→1→2...).
+    //     Circle's own layout math still doesn't read this value, so this
+    //     is a UI-level lock as specified ("merely locks the formation
+    //     depth to be 1 or 2") — it keeps the toggle meaningful/consistent
+    //     if the player then drags, rather than letting it silently hold a
+    //     3 or 4 that doesn't correspond to anything circle does.
+    //   - BOX/square active: shown disabled, no number — "a button to ask
+    //     units to blob to each other," per direct request. Square's own
+    //     case computes its own sideSize from unit count alone and was
+    //     never driven by depth even before this rework.
+    if (typeof window._mc3FormationDepth !== 'number') window._mc3FormationDepth = 2;
+    const depthBtn = _mkBtn(
+      `<span class="ticon">📏</span><span class="tlbl" id="mc3-depth-lbl">DEPTH ${window._mc3FormationDepth}</span>`,
+      'mc3-depth-btn', 'mc3-tray-btn',
+      () => {
+        const activeStyle = D.getElementById('mc3-depth-btn')?.dataset.activeStyle || 'dragGrid';
+        if (activeStyle === 'square') { Cmd._audio('ui_click'); return; } // disabled — no-op
+        if (activeStyle === 'circle') {
+          window._mc3FormationDepth = (window._mc3FormationDepth === 1) ? 2 : 1; // 1↔2 only
+        } else {
+          window._mc3FormationDepth = (window._mc3FormationDepth % 4) + 1; // 1→2→3→4→1
+        }
+        const lbl = D.getElementById('mc3-depth-lbl');
+        if (lbl) lbl.textContent = `DEPTH ${window._mc3FormationDepth}`;
+        Cmd._audio('ui_click');
+      }
+    );
+    ft.appendChild(depthBtn);
     bar.appendChild(ft);
+
+    // ── AI Tactics tray (see Cmd.setAiTactic's ★ AI TACTIC GROUPS ★ comment
+    // block above for the full behavior breakdown) ─────────────────────────
+    // FIX: this used to read SKIRM/STAND GROUND/MELEE CHARGE/GENERAL with
+    // tactic:'general' for the last one — 'general' matched nothing in
+    // Cmd._aiTacticLabel or ai_categories.js's aiTacticGroup checks (both
+    // key off 'auto'), so pressing that button silently tagged units with a
+    // value nothing else recognized. Relabeled to match the rest of the
+    // codebase and the ADAPT terminology used throughout.
+    const tt = _mkEl('div', 'mc3-tactic-tray', 'mc3-tray');
+    [
+      { icon: '🤾', lbl: 'SKIRM',        tactic: 'skirmish' },
+      { icon: '✋', lbl: 'HOLD', tactic: 'stand_ground' },
+      { icon: '⚔️', lbl: 'CHARGE', tactic: 'melee_charge' },
+      { icon: '🧠', lbl: 'ADAPT',      tactic: 'auto' },
+      { icon: '🛡️', lbl: 'SHIELD',      tactic: 'shield' },
+      { icon: '🚫', lbl: 'CANCEL',       tactic: null },
+    ].forEach(t => {
+      tt.appendChild(_mkBtn(
+        `<span class="ticon">${t.icon}</span><span class="tlbl">${t.lbl}</span>`,
+        null, 'mc3-tray-btn',
+        () => t.tactic ? Cmd.setAiTactic(t.tactic) : Cmd.cancelAiTactic()
+      ));
+    });
+    bar.appendChild(tt);
+
+    // ── Individual-selection tray (Infantry/Ranged/Cavalry/Gunpowder) ─────
+    // Replaces the old 4 standalone group buttons (🪓🏹🐎🔥) that used to
+    // sit in the main row per direct request — same Cmd.selectGroup(n) call,
+    // same behavior (selects every FRIENDLY unit of that type on the field),
+    // just tucked behind the 🎯 dropdown so the main row is less cluttered.
+    // SELECT ALL (group 5, 👥) deliberately stays OUT of this tray and keeps
+    // its own main-row button, per direct request.
+    const st = _mkEl('div', 'mc3-select-tray', 'mc3-tray');
+    [
+      { icon: '🪓', lbl: 'INFANTRY', num: 1 },
+      { icon: '🏹', lbl: 'RANGED',   num: 2 },
+      { icon: '🐎', lbl: 'CAVALRY',  num: 3 },
+      { icon: '🔥', lbl: 'GUNPOWDER', num: 4 },
+    ].forEach(g => {
+      st.appendChild(_mkBtn(
+        `<span class="ticon">${g.icon}</span><span class="tlbl">${g.lbl}</span>`,
+        `mc3-g${g.num}`, 'mc3-tray-btn',
+        () => Cmd.selectGroup(g.num)
+      ));
+    });
+    bar.appendChild(st);
 
     return bar;
 }
@@ -1371,16 +2568,14 @@ function _buildHeader() {
         heading: 'Header Buttons',
         rows: [
           ['↩️',           'Exit the battle when possible, or leave a city.'],
-          ['1  ⚔️',       'Select all infantry.'],
-          ['2  🏹',       'Select all ranged non-gunpowder units.'],
-          ['3  🐎',       'Select all cavalry and beasts.'],
-          ['4  🔥',       'Select all gunpowder and artillery units.'],
-          ['5  👥',     'Select every controllable unit.'],
+          ['👥',     'Select every controllable unit.'],
+          ['🎯',       'Open a dropdown to select all friendly units of one type: Infantry, Ranged, Cavalry, or Gunpowder.'],
 		  ['🏯 / ⚓', 'AI mode for Siege and Naval battles.'],
  		  ['🤖 / 🛑', 'AI toggle for Land battles.'],
-       
           ['🚩',       'Open the Formations tray. Requires 2 or more units selected.'],
           ['🥁',      'Open the Commands tray.'],
+          ['🧠',      'Open the AI Tactics tray — assigns a standing behavior instead of a one-shot order.'],
+          ['🔎',       'Toggle the unit hover-stats panel on/off. While on (or while holding Space), hovering a unit on the battlefield shows its live stats.'],
           ['🪪', 'Cycle through the three unit-card display modes. See Unit Cards section below.'],
           ['?',           'Toggle this help screen. The game is NOT paused.'],
         ],
@@ -1388,20 +2583,40 @@ function _buildHeader() {
       {
         heading: 'Formations Tray',
         rows: [
-          ['SHIELD',  'Tight defensive wall — shields and infantry packed close. Best with heavy-armour front line.'],
-          ['STANDARD',     'Standard balanced formation — roles separated into sensible positions.'],
-          ['LINE',    'Long battle line — maximises the frontage to prevent flanking.'],
-          ['CIRCLE',  'Circular orb formation — all-round defence in open terrain.'],
-          ['BOX',     'Square blob — spread, all-round coverage with room for cavalry inside.'],
+          ['TIGHT',    'Tight defensive wall — shields and infantry packed close. Best with heavy-armour front line.'],
+          ['STANDARD', 'Standard balanced formation — roles separated into sensible positions.'],
+          ['LOOSE',    'Spread-out battle line — maximises frontage to prevent flanking.'],
+          ['CIRCLE',   'Circular orb formation — all-round defence in open terrain.'],
+          ['BOX',      'Square blob — units group by count alone, no rows/depth. Room for cavalry inside.'],
+          ['📏 DEPTH', 'Rows for a plain drag-formation move (no named shape picked). Cycles 1-4. Locked to 1-2 while CIRCLE is active, disabled while BOX is active — neither shape uses row depth.'],
         ],
       },
       {
         heading: 'Commands Tray',
         rows: [
-          ['CHARGE',  'Selected units seek and engage the nearest enemy until ordered otherwise.'],
-          ['STOP',    'Selected units immediately stop and defend their current position.'],
-          ['RETREAT', 'Selected units fall back to the south edge of the battlefield.'],
-          ['FOLLOW',  'Selected units follow the commander and re-form in the last used formation.'],
+          ['ADVANCE', 'Selected units immediately seek and engage the nearest enemy — a single push, no formation, no re-evaluation after it starts.'],
+          ['STOP',    'Selected units immediately halt in place. Not an AI posture — they\u2019ll still fight back in melee self-defence range or if an enemy closes to point-blank, but they won\u2019t chase.'],
+          ['RETREAT', 'Each selected unit falls back toward whichever battlefield edge is nearest to it — a mixed selection can flee in different directions at once.'],
+          ['FOLLOW',  'Selected units form up on the commander in a square and stay with them as they move.'],
+        ],
+      },
+      {
+        heading: 'AI Tactics Tray',
+        rows: [
+          ['SKIRM',   'Ranged units keep their distance and kite; melee units target whichever enemy is most isolated from support, instead of just the nearest.'],
+          ['HOLD',    'Units form up around their own position and hold it, fighting anything that comes into range without chasing.'],
+          ['CHARGE',  'A standing aggressive posture. Ranged units close to point-blank range instead of kiting at a distance; melee units fight as normal.'],
+          ['ADAPT',   'Hands the unit back to the automatic tactical AI (same engine as the 🤖 toggle) to pick its own behavior.'],
+          ['SHIELD',  'Cautious formation advance — units close ranks and move together toward the enemy instead of rushing individually.'],
+          ['CANCEL',  'Clears any AI tactic tag from the selection, returning units to plain manual control.'],
+        ],
+      },
+      {
+        heading: '⌨️ Keyboard Shortcuts (desktop)',
+        rows: [
+          ['1 – 4',   'Select all Infantry / Ranged / Cavalry & Beasts / Gunpowder — the same groups as the 🎯 dropdown, keyboard-only (no on-screen button for these).'],
+          ['5',       'Select every controllable unit — same as the 👥 button.'],
+          ['Z / X / V / C / B', 'Form the current selection into TIGHT / STANDARD / LOOSE / CIRCLE / BOX in place — same shapes as the Formations tray buttons, keyboard-only. Requires 2+ units selected.'],
         ],
       },
       {
@@ -1417,6 +2632,7 @@ rows: [
   ['Hold + drag',  'If units are selected, a blue move box appears and moves them to that box.'],
   ['Hold + drag',  'If no unit is selected, a yellow box appears for box-selecting units on the map.'],
   ['Pinch in/out', 'Zoom the battle camera. Works on any part of the map.'],
+  ['Space (hold)', 'While held (desktop only), hovering a unit shows its live stats — same panel as the 🔎 toggle.'],
 
         ],
       },
@@ -1474,35 +2690,59 @@ rows: [
   }
 
   // ── Tray helpers ──────────────────────────────────────────────────────────
+  // Lookup table instead of the old cmd/form/tactic ternary chain — extended
+  // to include 'select' (the new Infantry/Ranged/Cavalry/Gunpowder dropdown)
+  // without hardcoding a 4th special case through every branch.
+  const _TRAY_IDS = {
+    cmd:    { tray: 'mc3-cmd-tray',    toggle: 'mc3-cmd-toggle' },
+    form:   { tray: 'mc3-form-tray',   toggle: 'mc3-form-toggle' },
+    tactic: { tray: 'mc3-tactic-tray', toggle: 'mc3-tactic-toggle' },
+    select: { tray: 'mc3-select-tray', toggle: 'mc3-select-toggle' },
+  };
+
+  // REWORKED per direct request: trays used to add/remove the shared
+  // backdrop's 'act' class, which made the backdrop intercept-and-close on
+  // ANY tap on the bare battlefield — "just clicking the main battle screen
+  // does NOT keep them disappear[ing]" was the exact complaint. Trays no
+  // longer touch the backdrop at all. They only ever close two ways now:
+  //   1. The SAME toggle button that opened them is clicked again (the
+  //      `was` check below already does this — unchanged).
+  //   2. A DIFFERENT toggle button is clicked, which opens its own tray —
+  //      the "close everything, then open the new one" loop below already
+  //      does this too — unchanged.
+  // A plain tap on the battlefield now passes straight through to the
+  // canvas (unit selection, move orders, etc.) exactly like it would with
+  // no tray open at all, since the backdrop is never made pointer-events:
+  // auto for tray state anymore. The backdrop still exists and still works
+  // exactly as before for Help and the unit-stats popup — see Help.open/
+  // close and UnitCards.showPopup/closePopup — those are deliberately NOT
+  // "secondary tables" and keep their outside-tap-to-dismiss behavior.
   function _toggleTray(name) {
-    const ct   = D.getElementById('mc3-cmd-tray');
-    const ft   = D.getElementById('mc3-form-tray');
-    const bd   = D.getElementById('mc3-backdrop');
-    const tray = (name === 'cmd') ? ct : ft;
+    const entry = _TRAY_IDS[name];
+    if (!entry) return;
+    const tray = D.getElementById(entry.tray);
+    if (!tray) return;
     const was  = tray.classList.contains('open');
 
-    ct.classList.remove('open');
-    ft.classList.remove('open');
-    D.getElementById('mc3-cmd-toggle')?.classList.remove('tray-open');
-    D.getElementById('mc3-form-toggle')?.classList.remove('tray-open');
+    Object.values(_TRAY_IDS).forEach(({ tray: trayId, toggle: toggleId }) => {
+      D.getElementById(trayId)?.classList.remove('open');
+      D.getElementById(toggleId)?.classList.remove('tray-open');
+    });
 
     if (!was) {
       tray.classList.add('open');
-      D.getElementById(name === 'cmd' ? 'mc3-cmd-toggle' : 'mc3-form-toggle')
-        ?.classList.add('tray-open');
-      bd.classList.add('act');
+      D.getElementById(entry.toggle)?.classList.add('tray-open');
       _openTray = name;
     } else {
-      if (!Help._open) bd.classList.remove('act');
       _openTray = null;
     }
   }
 
   function _closeTray(name) {
-    D.getElementById(name === 'cmd' ? 'mc3-cmd-tray' : 'mc3-form-tray')
-      ?.classList.remove('open');
-    D.getElementById(name === 'cmd' ? 'mc3-cmd-toggle' : 'mc3-form-toggle')
-      ?.classList.remove('tray-open');
+    const entry = _TRAY_IDS[name];
+    if (!entry) return;
+    D.getElementById(entry.tray)?.classList.remove('open');
+    D.getElementById(entry.toggle)?.classList.remove('tray-open');
     if (_openTray === name) _openTray = null;
   }
 
@@ -1522,7 +2762,10 @@ rows: [
       this._open = false;
       D.getElementById('mc3-help-overlay')?.classList.remove('vis');
       D.getElementById('mc3-help-btn')?.classList.remove('tray-open');
-      if (!_openTray) D.getElementById('mc3-backdrop')?.classList.remove('act');
+      // No longer needs to check _openTray — trays haven't touched the
+      // backdrop's 'act' state since the rework above, so Help is the only
+      // remaining thing (besides the unit popup) that can be holding it on.
+      D.getElementById('mc3-backdrop')?.classList.remove('act');
     },
   };
 
@@ -1614,6 +2857,18 @@ let foes = window.__IS_CUSTOM_BATTLE__ ? 1 : 0;
           if (allyEl) allyEl.textContent = allies;
           if (foeEl) foeEl.textContent = foes;
         }
+
+        // Day counter — Survival Mode only, hidden for every other battle type.
+        const dayRow = D.getElementById('mc3-day-row');
+        if (dayRow) {
+          if (window.__IS_SURVIVAL_BATTLE__) {
+            dayRow.style.display = 'flex';
+            const dayEl = D.getElementById('mc3-day-count');
+            if (dayEl) dayEl.textContent = window.__survivalDay || 1;
+          } else {
+            dayRow.style.display = 'none';
+          }
+        }
       }
 
       // --- YOUR ORIGINAL JOYSTICK CODE BELOW ---
@@ -1687,16 +2942,18 @@ let foes = window.__IS_CUSTOM_BATTLE__ ? 1 : 0;
       const isCommander = Boolean(u.isCommander || ["PLAYER", "Commander", "General"].includes(unitKey));
       
       let visType = "peasant";
-      if (role === 'CAVALRY' || role === 'MOUNTED_GUNNER') {
-        visType = unitKey === "War Elephant" ? "elephant" : (unitKey.includes("Camel") ? "camel" : "cavalry");
-      } else if (role === 'HORSE_ARCHER') visType = "horse_archer";
+if (role === 'CAVALRY' && !unitKey.toLowerCase().includes('cannon')) {
+  visType = unitKey === "War Elephant" ? "elephant" : (unitKey.includes("Camel") ? "camel" : "cavalry");
+}
+	  
+	  else if (role === 'HORSE_ARCHER') visType = "horse_archer";
       else if (role === 'PIKE' || unitKey.includes("Glaive")) visType = "spearman";
       else if (role === 'SHIELD') visType = "sword_shield";
       else if (role === 'TWO_HANDED') visType = "two_handed";
       else if (role === 'CROSSBOW') visType = "crossbow";
       else if (role === 'FIRELANCE') visType = "firelance";
       else if (role === 'ARCHER') visType = "archer";
-      else if (role === 'THROWING') visType = "throwing";
+else if (role === 'GUNNER' || unitKey.toLowerCase().includes('cannon')) visType = "gun"; // 
       else if (role === 'GUNNER') visType = "gun";
       else if (role === 'BOMB') visType = "bomb";
       else if (role === 'ROCKET') visType = "rocket";
@@ -1743,6 +3000,12 @@ let foes = window.__IS_CUSTOM_BATTLE__ ? 1 : 0;
         (u.unitType    || '') + ' ' +
         (u.stats?.name || '')
       ).toLowerCase();
+      // Cannon's role is ROLES.MOUNTED_GUNNER ("mounted_gunner") and is unique
+      // to that unit. Must be checked BEFORE the cav/mount pattern below —
+      // "mounted_gunner" contains "mount" and was false-matching cavalry
+      // first, which is why the Cannon card showed a horse rider.
+      if (s.match(/mounted_gunner/))
+		  return '🎆';
       if (s.match(/(cav|horse|lancer|mount|keshig)/)) 
 		  return '🏇';
 	  if (s.match(/eleph/)) 
@@ -1753,7 +3016,7 @@ let foes = window.__IS_CUSTOM_BATTLE__ ? 1 : 0;
 		  return '⛵';
       if (s.match(/(archer|bow|crossbow)/))                         
 		  return '🏹';
-      if (s.match(/(hand|rocket|firelance)/))           
+      if (s.match(/(hand|rocket|firelance|cannon)/))           
 		  return '🔥';
 	  if (s.match(/camel/)) 
 			return '🐫';
@@ -2356,6 +3619,174 @@ _endDrag(x, y) {
       this.update();
     },
 	}; // End of UnitCards object (This is the critical fix)
+
+  // ==========================================================================
+  //  SECTION 7b — AI TACTIC FLOATING EMOJI
+  //   Per direct request: the assigned AI tactic (Skirm/Hold/Charge/Adapt)
+  //   no longer shows as a small badge on the unit's roster card — instead
+  //   it floats directly above the unit's HEAD on the battlefield canvas
+  //   itself, tracking the unit, staying visible while unselected, and
+  //   disappearing only when the tactic is actually cancelled or the unit
+  //   dies (see the CANCELLATION list in Cmd's ★ AI TACTIC GROUPS ★ comment
+  //   block). Driven purely by unit.aiTacticGroup — never by u.selected —
+  //   which is exactly the "Selected state" vs "AI assignment state"
+  //   separation called for.
+  //
+  //   Deliberately unthrottled (unlike UnitCards.update()'s 350ms throttle,
+  //   which redraws a whole scrollable card list): this only iterates
+  //   however many units currently carry a tactic — realistically a handful
+  //   at a time — so a full-rate per-frame update keeps the tracking smooth
+  //   as units move, at negligible cost.
+  // ==========================================================================
+  const AIEmoji = {
+    _nodes: {}, // uid -> { el, tactic } currently mounted in the DOM
+
+    // World-space vertical gap between a unit's own x/y anchor (its feet/
+    // base — see Cmd._moveToWorld's inverse below for the matching
+    // world<->screen convention already used for touch-to-world conversion
+    // elsewhere in this file) and where the emoji should float. Approximate
+    // — this engine's actual sprite head height isn't exposed to this file
+    // (drawInfantryUnit/drawCavalryUnit live elsewhere) — nudge this if the
+    // emoji sits visibly too high or low above the sprite in your build.
+    _Y_OFFSET_WORLD: 46,
+    _BASE_FONT_PX:   18, // approximate "same size as the unit's head" at zoom 1
+
+    _layer() { return D.getElementById('mc3-ai-emoji-layer'); },
+
+    _removeAll() {
+      const layer = this._layer();
+      if (layer) layer.innerHTML = '';
+      this._nodes = {};
+    },
+
+    // PERF FIX ("zoom is somewhat laggy... is there any optimization
+    // possible"): this used to call G.allPlayerUnits() (its own full-array
+    // filter() over EVERY unit on the battlefield, both sides) and then run
+    // a SECOND filter() on top of that result — two full array scans plus
+    // two array allocations, every single requestAnimationFrame tick,
+    // regardless of whether any unit was even tagged. That's pure waste on
+    // the vast majority of frames (most of a battle has few or zero tactic-
+    // tagged units), and it's exactly the kind of steady per-frame cost that
+    // becomes most visible while the camera is actively moving/zooming,
+    // since that's when every tagged unit's screen position actually
+    // changes and the work can't be masked by an unchanged result.
+    // Deliberately NOT solved with UnitCards.update()'s 350ms throttle
+    // pattern — this overlay's entire job is staying glued to a moving
+    // camera in real time, so throttling the position math itself would
+    // make the emoji visibly lag behind the unit/camera during a zoom or
+    // pan, the opposite of the goal. Instead: single pass directly over
+    // e.units (no intermediate allocation), skip everything when nothing's
+    // tagged, and skip the cleanup pass's Object.keys() allocation unless a
+    // node is actually mounted.
+    update() {
+      const layer = this._layer();
+      if (!layer) return;
+
+      if (!G.isBattle()) {
+        if (Object.keys(this._nodes).length) this._removeAll();
+        return;
+      }
+
+      const canvas = D.getElementById('gameCanvas');
+      if (!canvas) return;
+
+      const e = G.env();
+      if (!e || !Array.isArray(e.units)) {
+        if (Object.keys(this._nodes).length) this._removeAll();
+        return;
+      }
+
+      // Fast path: nothing tagged and nothing mounted — the common case for
+      // long stretches of a battle. Skips the position math and the camera
+      // reads entirely rather than doing them for an empty result.
+      let anyTagged = false;
+      for (let i = 0; i < e.units.length; i++) {
+        const u = e.units[i];
+        if (u.aiTacticGroup && !u.isCommander && u.side === 'player' && u.hp > 0) { anyTagged = true; break; }
+      }
+      if (!anyTagged) {
+        if (Object.keys(this._nodes).length) this._removeAll();
+        return;
+      }
+
+      // FIX: this used to read W.camera.x/y/zoom, which caused the ~200px
+      // gap between the emoji and the actual unit sprite reported after
+      // testing. The real render loop (sandboxmode_update.js's
+      // window.draw()) does:
+      //   ctx.translate(canvas.width/2, canvas.height/2);
+      //   ctx.scale(zoom, zoom);
+      //   ctx.translate(-player.x, -player.y);
+      // — i.e. the true camera anchor is window.player.x/y plus the bare
+      // window.zoom global. window.camera is a separate, disconnected
+      // object nothing in the actual draw loop reads from (confirmed: no
+      // file anywhere syncs camera.x/y to player.x/y, or camera.zoom to
+      // window.zoom — mobile_ui.js's pinch-to-zoom writes to camera.zoom,
+      // which the draw loop never reads either, so it's likely dead code
+      // too, left untouched here since that's a separate issue from what
+      // was reported).
+      const px  = (W.player && typeof W.player.x === 'number') ? W.player.x : 0;
+      const py  = (W.player && typeof W.player.y === 'number') ? W.player.y : 0;
+      const z   = (typeof W.zoom === 'number' && W.zoom > 0) ? W.zoom : 1;
+      const cw  = canvas.width  / 2;
+      const ch  = canvas.height / 2;
+
+      // Single pass directly over e.units — no intermediate allPlayerUnits()
+      // + filter() array allocations. Living, tagged player units only —
+      // commander excluded (never tactic-assignable via the normal
+      // selection/group flow), dead units are simply skipped by the same
+      // hp>0 check allPlayerUnits() used to apply.
+      const seen = {};
+      for (let i = 0; i < e.units.length; i++) {
+        const u = e.units[i];
+        if (!(u.aiTacticGroup && !u.isCommander && u.side === 'player' && u.hp > 0)) continue;
+
+        const uid = String(u.id ?? u.unitType);
+        seen[uid] = true;
+
+        let entry = this._nodes[uid];
+        if (!entry) {
+          const el = D.createElement('span');
+          el.className = 'mc3-ai-emoji';
+          layer.appendChild(el);
+          entry = this._nodes[uid] = { el, tactic: null };
+        }
+
+        if (entry.tactic !== u.aiTacticGroup) {
+          entry.tactic = u.aiTacticGroup;
+          entry.el.textContent = Cmd._aiTacticEmoji[u.aiTacticGroup] || '';
+        }
+
+        // World -> screen: exact inverse of Cmd._moveToWorld's screen ->
+        // world formula further down this file (same camera fix applied
+        // there too), so this layer always agrees with where a tap would
+        // actually land.
+        const sx = cw + z * (u.x - px);
+        const sy = ch + z * (u.y - this._Y_OFFSET_WORLD - py);
+        const fontPx = Math.max(11, Math.min(34, this._BASE_FONT_PX * z));
+
+        entry.el.style.fontSize = fontPx + 'px';
+        // translate(-50%,-100%) anchors the emoji's bottom-center on (sx,sy)
+        // — i.e. "a few pixels above the unit's head" sits right at that
+        // point, with the glyph itself occupying the space above it.
+        entry.el.style.transform = `translate3d(${sx}px, ${sy}px, 0) translate(-50%, -100%)`;
+      }
+
+      // Drop any mounted node whose unit is no longer tagged/alive —
+      // cancelled tactic, death, or battle end all resolve here immediately
+      // (next frame), with nothing left behind at a stale position. Only
+      // allocates Object.keys() when there's actually something mounted to
+      // check, rather than every frame regardless.
+      const mountedIds = Object.keys(this._nodes);
+      if (mountedIds.length) {
+        mountedIds.forEach(uid => {
+          if (!seen[uid]) {
+            this._nodes[uid].el.remove();
+            delete this._nodes[uid];
+          }
+        });
+      }
+    },
+  };
   // ==========================================================================
   //  SECTION 10 — GESTURE ENGINE (Canvas touch interactions)
   // ==========================================================================
@@ -2367,7 +3798,7 @@ _endDrag(x, y) {
     _boxActive: false,
     _boxStart: { x: 0, y: 0 },
     _ownIds: new Set([
-      'mc3', 'mc3-hbar', 'mc3-hrow', 'mc3-cmd-tray', 'mc3-form-tray',
+      'mc3', 'mc3-hbar', 'mc3-hrow', 'mc3-cmd-tray', 'mc3-form-tray', 'mc3-tactic-tray', 'mc3-select-tray',
       'mc3-joy', 'mc3-hud-wrap', 'mc3-popup', 'mc3-backdrop', 'mc3-help-overlay'
     ]),
 
@@ -2408,6 +3839,8 @@ _endDrag(x, y) {
             this._boxActive = false;
             const box = D.getElementById('mc3-selbox');
             if (box) box.style.display = 'none';
+            const fl = D.getElementById('mc3-formline');
+            if (fl) fl.style.display = 'none';
           }
         }
       }
@@ -2433,25 +3866,54 @@ _endDrag(x, y) {
         const traveled = Math.hypot(pt.x - this._boxStart.x, pt.y - this._boxStart.y);
         
         if (traveled >= 14) {
-          const box = D.getElementById('mc3-selbox');
-          if (box) {
-            const hasSel = G.selected().length > 0;
-            // Apply Contextual Blue/Gold styling
-            if (hasSel) {
-                box.style.border = '2px dashed rgba(66, 135, 245, 0.82)';
-                box.style.background = 'rgba(66, 135, 245, 0.15)';
-                box.style.boxShadow = 'inset 0 0 10px rgba(66, 135, 245, 0.2)';
-            } else {
-                box.style.border = '2px dashed rgba(245,215,110,0.82)';
-                box.style.background = 'rgba(245,215,110,0.06)';
-                box.style.boxShadow = 'inset 0 0 10px rgba(245,215,110,0.08)';
+          const selUnitsForPreview = G.selected();
+          const selCount = selUnitsForPreview.length;
+          if (selCount > 0) {
+            // FORMATION DRAG: one small blue arrow per selected unit,
+            // arranged in the exact shape battlefield_commands.js's
+            // executeBoxFormationMove will commit to on release — mirrors
+            // the desktop preview exactly (same computeFormationPreviewSlots
+            // math, style-aware: a remembered circle/square/tight/standard
+            // shape on the selection previews as that shape here too, not
+            // just the plain default grid). No J/K-equivalent rotation
+            // gesture on mobile yet — twist-to-rotate is a separate,
+            // harder gesture problem, deliberately not tackled here.
+            const box = D.getElementById('mc3-selbox');
+            if (box) box.style.display = 'none';
+            const fl = D.getElementById('mc3-formline');
+            if (fl && typeof computeFormationPreviewSlots === 'function') {
+              const depth = (typeof window._mc3FormationDepth === 'number') ? window._mc3FormationDepth : 2;
+              const style = (typeof _getSharedDragFormationStyle === 'function')
+                ? _getSharedDragFormationStyle(selUnitsForPreview) : undefined;
+              const grid = computeFormationPreviewSlots(selCount, this._boxStart.x, this._boxStart.y, pt.x, pt.y, depth, style);
+              const ARROW_HALF_LEN = 9;
+              let html = '<defs><marker id="mc3-mobile-arrowhead" markerWidth="8" markerHeight="8" refX="5" refY="4" orient="auto">' +
+                '<path d="M0,0 L8,4 L0,8 L2.5,4 Z" fill="rgba(66,135,245,0.95)"/></marker></defs>';
+              grid.slots.forEach(s => {
+                const x1 = s.x - s.fx * ARROW_HALF_LEN, y1 = s.y - s.fy * ARROW_HALF_LEN;
+                const x2 = s.x + s.fx * ARROW_HALF_LEN, y2 = s.y + s.fy * ARROW_HALF_LEN;
+                html += '<line x1="' + x1 + '" y1="' + y1 + '" x2="' + x2 + '" y2="' + y2 + '" ' +
+                  'stroke="rgba(66,135,245,0.9)" stroke-width="2.5" stroke-linecap="round" ' +
+                  'marker-end="url(#mc3-mobile-arrowhead)" />';
+              });
+              fl.innerHTML = html;
+              fl.style.display = 'block';
             }
-            
-            box.style.left   = Math.min(this._boxStart.x, pt.x) + 'px';
-            box.style.top    = Math.min(this._boxStart.y, pt.y) + 'px';
-            box.style.width  = Math.abs(pt.x - this._boxStart.x) + 'px';
-            box.style.height = Math.abs(pt.y - this._boxStart.y) + 'px';
-            box.style.display = 'block';
+          } else {
+            // BOX-SELECT: unchanged rectangle for selecting units on the map.
+            const fl = D.getElementById('mc3-formline');
+            if (fl) fl.style.display = 'none';
+            const box = D.getElementById('mc3-selbox');
+            if (box) {
+              box.style.border = '2px dashed rgba(245,215,110,0.82)';
+              box.style.background = 'rgba(245,215,110,0.06)';
+              box.style.boxShadow = 'inset 0 0 10px rgba(245,215,110,0.08)';
+              box.style.left   = Math.min(this._boxStart.x, pt.x) + 'px';
+              box.style.top    = Math.min(this._boxStart.y, pt.y) + 'px';
+              box.style.width  = Math.abs(pt.x - this._boxStart.x) + 'px';
+              box.style.height = Math.abs(pt.y - this._boxStart.y) + 'px';
+              box.style.display = 'block';
+            }
           }
         }
       } else if (ids.length === 2) {
@@ -2461,6 +3923,8 @@ _endDrag(x, y) {
         this._boxActive = false;
         const box = D.getElementById('mc3-selbox');
         if (box) box.style.display = 'none';
+        const fl = D.getElementById('mc3-formline');
+        if (fl) fl.style.display = 'none';
 
         const [a, b] = ids.map(id => this._pts[id]);
         const d = Math.hypot(b.x - a.x, b.y - a.y);
@@ -2500,6 +3964,8 @@ _end(e) {
       this._boxActive = false;
       const box = D.getElementById('mc3-selbox');
       if (box) box.style.display = 'none';
+      const fl = D.getElementById('mc3-formline');
+      if (fl) fl.style.display = 'none';
     },
 	
 	
@@ -2528,12 +3994,19 @@ _end(e) {
 _moveToWorld(sx, sy) {
       const canvas = D.getElementById('gameCanvas');
       if (!canvas) return;
-      const cam = W.camera || { x: 0, y: 0, zoom: 1 };
+      // FIX: was reading W.camera.x/y/zoom — the same disconnected object
+      // that caused AIEmoji's ~200px offset (see the fix + comment in
+      // AIEmoji.update() above for the full explanation). Double-tap-move
+      // was silently sending units to the wrong world position by the same
+      // margin. Matches the real render loop's camera anchor now:
+      // window.player.x/y + the bare window.zoom global.
+      const px = (W.player && typeof W.player.x === 'number') ? W.player.x : 0;
+      const py = (W.player && typeof W.player.y === 'number') ? W.player.y : 0;
       const cw = canvas.width / 2;
       const ch = canvas.height / 2;
-      const z = cam.zoom || cam.scale || 1;
-      const wx = (sx - cw) / z + cam.x;
-      const wy = (sy - ch) / z + cam.y;
+      const z = (typeof W.zoom === 'number' && W.zoom > 0) ? W.zoom : 1;
+      const wx = (sx - cw) / z + px;
+      const wy = (sy - ch) / z + py;
       Cmd.moveTo(wx, wy);
     },
 
@@ -2588,6 +4061,7 @@ _applyBoxSelect(x1, y1, x2, y2) {
       if (inMenu) {
         Joystick.setVisible(false);
         UnitCards.setVisible(false);
+        AIEmoji._removeAll();
         return;
       }
 
@@ -2599,11 +4073,16 @@ _applyBoxSelect(x1, y1, x2, y2) {
       // Keep joystick visible during naval for camera panning
       Joystick.setVisible(true);
 
-      for (let i = 1; i <= 5; i++) {
-        const g = D.getElementById(`mc3-g${i}`);
-        if (g) g.style.display = inBattle ? '' : 'none';
-      }
-      ['mc3-form-toggle', 'mc3-cmd-toggle', 'mc3-stack-btn'].forEach(id => {
+      // mc3-g5 (SELECT ALL) is still its own main-row button. mc3-g1..4 now
+      // live inside mc3-select-tray instead of the main row — that tray's
+      // own display:none/.open handling (and the close-on-exit below)
+      // already keeps them hidden outside battle, so they're deliberately
+      // NOT in this loop anymore (there's nothing to individually toggle;
+      // toggling a display:none child inside an already-hidden tray is a
+      // no-op, but leaving the dead code in was misleading).
+      const g5 = D.getElementById('mc3-g5');
+      if (g5) g5.style.display = inBattle ? '' : 'none';
+      ['mc3-form-toggle', 'mc3-cmd-toggle', 'mc3-stack-btn', 'mc3-tactic-toggle', 'mc3-select-toggle', 'mc3-hover-toggle'].forEach(id => {
         const el = D.getElementById(id);
         if (el) el.style.display = inBattle ? '' : 'none';
       });
@@ -2612,10 +4091,27 @@ _applyBoxSelect(x1, y1, x2, y2) {
       if (!inBattle) {
         _closeTray('cmd');
         _closeTray('form');
+        _closeTray('tactic');
+        _closeTray('select');
+        // Leaving battle also fully deactivates the hover panel — no reason
+        // for it to stay latched on into the next mode/menu.
+        window.__hoverButtonHeld = false;
+        window.__hoverPanelActive = false;
+        D.getElementById('mc3-hover-toggle')?.classList.remove('tray-open');
       }
 
       UnitCards.setVisible(inBattle);
       if (inBattle) UnitCards.update();
+      AIEmoji.update(); // handles its own in-battle check + cleanup internally
+
+      // Formation-tray highlight + Depth visibility sync — throttled like
+      // UnitCards.update() (350ms) since this is pure UI polish, not a hot
+      // gameplay path.
+      const _nowFUI = Date.now();
+      if (inBattle && (!W._mc3LastFUISync || _nowFUI - W._mc3LastFUISync >= 350)) {
+        W._mc3LastFUISync = _nowFUI;
+        _syncFormationUI();
+      }
     }
   };
 
@@ -2626,7 +4122,7 @@ _applyBoxSelect(x1, y1, x2, y2) {
     Gestures.mount();
     Loop.start();
 
-    W.MobileControls = { version: VER, G, Cmd, Joystick, UnitCards, Gestures, Help };
+    W.MobileControls = { version: VER, G, Cmd, Joystick, UnitCards, AIEmoji, Gestures, Help };
     console.log(`[mobileControls.js v${VER}] Ready ✓`);
   }
 

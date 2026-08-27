@@ -1,17 +1,10 @@
-function checkAssaultLadders(unit) {
-  if (!inSiegeBattle || unit.hp <= 0 || unit.onWall) return;
-    if (unit.side !== "player" || unit.y < SiegeTopography.wallPixelY) return;
-    if (!canUseSiegeEngines(unit)) return; // SURGERY 1: Prevent climbing
-
-    const tx = Math.floor(unit.x / BATTLE_TILE_SIZE);
-    const ty = Math.floor(unit.y / BATTLE_TILE_SIZE);
-
-    if (battleEnvironment.grid[tx] && battleEnvironment.grid[tx][ty] === 9) {
-        unit.onWall = true;
-        unit.y = SiegeTopography.wallPixelY - 20;
-        if (unit.isCommander) console.log("Commander has reached the ramparts!");
-    }
-}
+// checkAssaultLadders() removed — it was the old instant-teleport-onto-the-
+// wall approach (snap onWall=true the instant a unit's feet touched tile 9),
+// confirmed to have zero callers anywhere in the codebase. ai_categories.js's
+// real climb state machine (_handleMovement's isClimbing branch) already
+// replaced this; its own comments note the teleport approach is what it was
+// built to replace. Removed rather than left in place to cut down on
+// duplicate/contradictory ladder logic living in the same codebase.
 
 function concludeSiegeBattlefield(playerObj, forceVictory = false) {
    console.log("Concluding Siege Assault...");
@@ -167,6 +160,77 @@ function monitorSiegeEndState(playerObj) { //obsolete
 }
 
 function applyStuckExtractor(unit) {
+    // BUGFIX ("ladder climbers head south a bit then bounce back north"):
+    // this function runs every tick for every unit, BEFORE processAction/
+    // _handleMovement (see battlefield_logic.js's main loop), with no
+    // isClimbing/settling/onWall awareness at all. A unit mid-climb moves
+    // north in small, DELIBERATELY slow increments (see _handleMovement's
+    // ladder super-glue: baseSpeed * 1.4 per tick, further slowed during the
+    // settle phase to baseSpeed * 0.5) while standing directly beside solid
+    // stone wall tiles (tile 6) — ladders are built into gaps flanked by
+    // wall on both sides. That combination is exactly what this function's
+    // heuristic ("barely moved this tick" + "touching a wall/tower/tree
+    // tile") is designed to catch and "rescue" — so a perfectly normal,
+    // successful climb was being misdiagnosed as a snag.
+    // Once misdiagnosed, unit.ignoreCollisionTicks = 60 disables real
+    // collision for a full second (see isBattleCollision's GHOST FALL
+    // handling), which is supposed to let a truly snagged unit pass through
+    // the one obstacle tile it's stuck on — but for a climbing unit it also
+    // opens a one-second window where nothing stops other physics
+    // (separation from crowding, knockback, the general per-unit collision
+    // resolver) from shoving it clean through the wall and south, well
+    // outside the ladder's protected climb lane. Once the ghost window
+    // expires and _handleMovement's climb-lock reasserts (it forcibly snaps
+    // unit.x back to the ladder rail and unit.vy back to strictly upward
+    // every tick isClimbing is true), the unit visibly snaps back north —
+    // "bounces back."
+    // Fix: units that are isClimbing, settling (the post-climb drift), or
+    // already onWall have their movement fully owned by _handleMovement's
+    // dedicated ladder/settle state machine, which cannot get permanently
+    // stuck by construction (it doesn't pathfind, it just drives vy/vx
+    // directly) — they never need rescuing by this generic extractor, and
+    // letting it touch them is strictly harmful. Everything else about this
+    // function (ground units genuinely wedged against a tree/wall/tower) is
+    // unchanged.
+    //
+    // BUGFIX ("units run south for a few seconds with no walking animation,
+    // a bit after they start trying to climb"): a unit QUEUED at a ladder
+    // base (siegeRole ladder_carrier/ladder_fanatic, waiting behind the
+    // crew cap — see LADDER_CREW_CAP_MATCH below) legitimately holds still,
+    // pressed close to the same wall tiles (6/7) flanking the ladder gap,
+    // while its turn in line comes up — see battlefield_commands.js's queue
+    // handling. That's indistinguishable from "genuinely snagged" to this
+    // function's heuristic, so it was misdiagnosed the exact same way
+    // climbing units used to be, opening the same 60-tick ghost-collision
+    // window on a densely packed unit — which is exactly what lets ordinary
+    // crowd pressure in applyUnitCollisions shove it through a wall tile it
+    // should have been blocked by, straight into applyWallGravity's silent
+    // southward fall.
+    //
+    // REGRESSION FIX ("ladder climbers stuck at the base, never climbing
+    // further"): the first version of this exclusion covered EVERY
+    // ladder_carrier/ladder_fanatic unconditionally — including the ACTIVE
+    // crew (queuePos null or below the crew cap) who are genuinely walking
+    // toward the ladder, not holding in queue. The ladder gap is a single
+    // tile column flanked by solid wall tiles on both sides — a real,
+    // narrow pinch point — and ignoreCollisionTicks from this function was
+    // the actual mechanism letting an active-crew unit squeeze through that
+    // geometry onto tile 9 in the first place. Excluding them entirely
+    // removed their only way through, so they piled up at the base and
+    // never transitioned into isClimbing. Fix: only exclude units that are
+    // actually QUEUED (queuePos at/beyond LADDER_CREW_CAP, matching the
+    // cap used in battlefield_commands.js's ladder_carrier case) — active
+    // crew keep the normal stuck-rescue behavior so they can still push
+    // through to the ladder tile.
+    const LADDER_CREW_CAP_MATCH = 2; // must match LADDER_CREW_CAP in battlefield_commands.js
+    const isQueuedAtLadder = (unit.siegeRole === "ladder_carrier" || unit.siegeRole === "ladder_fanatic") &&
+        unit.queuePos != null && unit.queuePos >= LADDER_CREW_CAP_MATCH;
+
+    if (unit.isClimbing || unit.settling || unit.onWall || isQueuedAtLadder) {
+        unit.lastPos = { x: unit.x, y: unit.y };
+        return;
+    }
+
     // Initialize tracking variables if they don't exist
     if (!unit.lastPos) {
         unit.lastPos = { x: unit.x, y: unit.y };
@@ -277,23 +341,40 @@ function triggerGateBreach(gate) {
     if (battleEnvironment.units) {
         battleEnvironment.units.forEach(u => {
             
-           // --- SURGERY: ALL PLAYER UNITS RUSH THE PLAZA (STAGE 1 FUNNEL) ---
+           // --- SURGERY: ALL PLAYER UNITS RUSH THE PLAZA ---
             if (u.side === "player" && !u.isCommander) {
                 // MANDATORY EXCEPTION: Ladder fanatics keep swarming the walls!
                 if (u.siegeRole !== "ladder_fanatic") {
                     u.hasOrders = true;
-                    u.orderType = "siege_assault"; 
-                    u.siegeRole = "assault_complete"; // Forces them to drop rams
-                    u.target = null; // Clears current distractions
-                    
-                    let gateX = typeof SiegeTopography !== 'undefined' ? SiegeTopography.gatePixelX : 1200;
-                    let gateY = typeof SiegeTopography !== 'undefined' ? SiegeTopography.gatePixelY : 2000;
-                    
-                    // Immediately point them strictly at the gate centroid
-                    u.orderTargetPoint = { 
-                        x: gateX + (Math.random() - 0.5) * 80, // Tight spread to force the funnel
-                        y: gateY - 20 // Pulls them across the threshold
-                    };
+                    // FIX ("units stuck in a clump at the gate opening after
+                    // breach, visibly vibrating"): this used to be
+                    // orderType = "siege_assault" with orderTargetPoint pointing
+                    // at a tight funnel zone right at the gate threshold
+                    // (gateY - 20). But ai_categories.js's processTargeting
+                    // bails out immediately for ANY orderType === "siege_assault"
+                    // (see its very first check) — it never re-scans for a real
+                    // enemy target for these units. The only thing that was ever
+                    // going to walk them past that funnel point and into the
+                    // plaza was battlefield_commands.js's processTacticalOrders,
+                    // and per the comment on that function's siege_assault
+                    // `default` case (search autoAttack.js for "producing the
+                    // reported flicker"): a unit with no matching named siegeRole
+                    // — which "assault_complete" (set below) isn't — falls into
+                    // that default case, which re-rolls a random +/-20px target
+                    // EVERY SINGLE TICK with no caching. That's the vibrate: the
+                    // unit gets a brand new tiny random destination ~60 times a
+                    // second and never travels far enough in any one direction
+                    // to actually go anywhere, let alone reach real combat.
+                    // seek_engage has no such dependency — processTargeting
+                    // actively scans for and holds a live enemy target for it,
+                    // and processAction's normal _handleMovement/
+                    // _handleCombatExecution pipeline (the same one every other
+                    // combat order already uses) drives it the rest of the way,
+                    // now that step 3 below has made the gate tiles walkable.
+                    u.orderType = "seek_engage";
+                    u.siegeRole = "assault_complete"; // Forces them to drop rams; autoAttack.js's needsAssignment filter already excludes this role from reassignment
+                    u.target = null; // Clears current distractions — processTargeting will scan fresh
+                    u.orderTargetPoint = null; // no longer read once orderType isn't siege_assault/move_to_point
                 }
             }
             
@@ -303,6 +384,30 @@ function triggerGateBreach(gate) {
 // 3. Obliterate Collision Grid (Set to 1 / Road)
     const bounds = gate.bounds;
     if (bounds && battleEnvironment.grid) {
+        // SURGERY: Record each pillar's exact pixel footprint so
+        // battlefield_logic.js's isGatePillarBlocking has a hard,
+        // tile-value-independent hitbox to check large units against —
+        // see that function for why this backstop exists on top of just
+        // leaving the tile untouched below.
+        //
+        // GATE_PILLAR_HITBOX_PAD widens that footprint by a few px on
+        // every side. The raw pillar tile is only BATTLE_TILE_SIZE (8px)
+        // wide — thin enough that a single unusually large movement step
+        // (a capped stuck-unit "panic" nudge, a lag spike, etc.) could in
+        // principle land its endpoint on the far side of it in one tick,
+        // since isBattleCollision only samples the destination point, not
+        // the path swept to get there. 5px of pad on each face gives real
+        // margin against that without eating into the deliberately-tuned
+        // 32px-half-width safe lane attacking units path toward (see
+        // gateOpeningHalfWidth in siegebattle.js) — the padded inner face
+        // still sits at 35px from gate-center, outside that 32px lane.
+        const tSize = (typeof BATTLE_TILE_SIZE !== 'undefined') ? BATTLE_TILE_SIZE : 8;
+        const GATE_PILLAR_HITBOX_PAD = 5;
+        window.__siegeGatePillars__ = [
+            { x0: bounds.x0 * tSize - GATE_PILLAR_HITBOX_PAD, x1: (bounds.x0 + 1) * tSize + GATE_PILLAR_HITBOX_PAD, y0: bounds.y0 * tSize, y1: (bounds.y1 + 1) * tSize },
+            { x0: bounds.x1 * tSize - GATE_PILLAR_HITBOX_PAD, x1: (bounds.x1 + 1) * tSize + GATE_PILLAR_HITBOX_PAD, y0: bounds.y0 * tSize, y1: (bounds.y1 + 1) * tSize }
+        ];
+
         for (let x = bounds.x0; x <= bounds.x1; x++) {
             // SURGERY: Identify the outer edges (Pillars) and protect them
             let isPillar = (x === bounds.x0 || x === bounds.x1);

@@ -70,7 +70,7 @@ function prettyValue(key, value) {
     if (lower.includes("two handed")) return { mode: "infantry", type: "two_handed", ammo, zoom: 2.0, xBias: 0.5, yBias: 0.75 };
     if (lower.includes("spearman")) return { mode: "infantry", type: "spearman", ammo, zoom: 2.0, xBias: 0.5, yBias: 0.75 };
     if (lower === "militia") return { mode: "infantry", type: "peasant", ammo, zoom: 2.0, xBias: 0.5, yBias: 0.75 };
-    if (lower.includes("camel cannon")) return { mode: "cavalry", type: "camel", subtype: "camel_cannon", ammo, zoom: 1.6, xBias: 0.5, yBias: 0.75 };
+    if (lower === "cannon") return { mode: "cavalry", type: "camel_cannon", ammo, zoom: 1.6, xBias: 0.5, yBias: 0.75 };
     if (lower.includes("elephant")) return { mode: "cavalry", type: "elephant", ammo, zoom: 1.3, xBias: 0.5, yBias: 0.75 };
     if (lower.includes("keshig") || lower.includes("horse archer")) return { mode: "cavalry", type: "horse_archer", ammo, zoom: 1.6, xBias: 0.5, yBias: 0.75 };
     if (lower.includes("lancer")) return { mode: "cavalry", type: "lancer", ammo, zoom: 1.6, xBias: 0.5, yBias: 0.75 };

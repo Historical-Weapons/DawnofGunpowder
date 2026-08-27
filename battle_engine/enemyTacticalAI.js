@@ -539,7 +539,7 @@
   function _clampToMap(x, y, margin) {
     margin = margin || 60;
     const mW = (typeof W.BATTLE_WORLD_WIDTH  !== 'undefined') ? W.BATTLE_WORLD_WIDTH  : 2400;
-    const mH = (typeof W.BATTLE_WORLD_HEIGHT !== 'undefined') ? W.BATTLE_WORLD_HEIGHT : 1800;
+    const mH = (typeof W.BATTLE_WORLD_HEIGHT !== 'undefined') ? W.BATTLE_WORLD_HEIGHT : 2400;
     return {
       x: Math.max(margin, Math.min(mW - margin, x)),
       y: Math.max(margin, Math.min(mH - margin, y))
@@ -880,7 +880,7 @@
       return; 
     }
 
-    // 2. More than 500px: March South with random X jitter
+    // 2. More than 500px: march toward the player, with lateral jitter
     _phase = 'RIVER_ADVANCING';
     const { avgSpeed } = analyseEnemy(enemyUnits);
 
@@ -888,16 +888,26 @@
       backupSpeed(u);
       u.stats.speed = avgSpeed * RIVER_SPEED_SCALE;
 
-      // Give each unit a 15% chance per tick to pick a new random X direction
-      if (u._etai_riverTargetX === undefined || Math.random() < 0.15) {
-        // Shifts their X target left or right by up to 150 pixels
-        u._etai_riverTargetX = u.x + (Math.random() - 0.5) * 300; 
+      // SURGERY: direction toward the player's actual centroid — replaces
+      // the old hardcoded "march South" (+Y), which only worked when the
+      // enemy was guaranteed to spawn north of the player. Recomputed each
+      // tick since the player's centroid can drift as their army moves.
+      let pdx = playerCentroid.x - u.x;
+      let pdy = playerCentroid.y - u.y;
+      let pdist = Math.sqrt(pdx * pdx + pdy * pdy) || 1;
+      let dirX = pdx / pdist, dirY = pdy / pdist;
+      let perpX = -dirY, perpY = dirX; // lateral axis, for the jitter below
+
+      // Give each unit a 15% chance per tick to pick a new random lateral offset
+      if (u._etai_riverLateral === undefined || Math.random() < 0.15) {
+        // Shifts their lateral position by up to 150 pixels either way
+        u._etai_riverLateral = (Math.random() - 0.5) * 300;
       }
 
-      // Force the Y target far to the South (+Y direction) so they maintain southward velocity
-      const targetY = u.y + 400; 
+      const targetX = u.x + dirX * 400 + perpX * u._etai_riverLateral;
+      const targetY = u.y + dirY * 400 + perpY * u._etai_riverLateral;
 
-      orderMove(u, u._etai_riverTargetX, targetY);
+      orderMove(u, targetX, targetY);
     });
   }
   // CORE TICK — EVALUATES EVERY TICK_MS MILLISECONDS
