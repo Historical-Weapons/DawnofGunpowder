@@ -192,7 +192,16 @@
   //  used throughout RTSControls.js / battlefield_launch.js)
   // ==========================================================================
   function isBattleActive() {
+    if (window.NavalEscortMode && window.NavalEscortMode.isActive()) return true;
     return typeof inBattleMode !== 'undefined' && !!inBattleMode;
+  }
+
+  // True only during the escort's autopiloted SAILING leg (not during a
+  // handed-off pirate encounter, which already looks like a normal naval
+  // battle and uses the regular grid/dot rendering below unchanged).
+  function isEscortSailing() {
+    const m = window.NavalEscortMode;
+    return !!(m && m.isActive && m.isActive() && m.getState && m.getState().state === 'SAILING');
   }
 
   function isMenuOpen() {
@@ -236,7 +245,7 @@
   // battlefield was painted with), with a keyword-matched fallback for any
   // path that skips generateBattlefield().
   function resolveThemeColor() {
-    if (window.inNavalBattle) {
+    if (window.inNavalBattle || isEscortSailing()) {
       if (typeof navalEnvironment !== 'undefined' && navalEnvironment && navalEnvironment.waterColor) {
         return navalEnvironment.waterColor;
       }
@@ -319,6 +328,7 @@
   // path that skips generateBattlefield() — so the flags win the tiebreak.
   const TERRAIN_EMOJI_BACKUP = '🌍'; // <<<< shown when nothing else matches
   function resolveTerrainEmoji() {
+    if (isEscortSailing()) return '⚓';
     if (window.inNavalBattle) {
       const navMapType = (typeof navalEnvironment !== 'undefined' && navalEnvironment) ? navalEnvironment.mapType : null;
       return navMapType === 'Coastal' ? '🏖️' : '🌊';
@@ -345,6 +355,11 @@
   function updateCaption() {
     const cap = D.getElementById('mmw-caption');
     if (!cap) return;
+    if (isEscortSailing()) {
+      const st = window.NavalEscortMode.getState();
+      cap.textContent = `⚓ ${st.merchantsLeft}/${st.merchantsTotal} merchants — ${st.escortsLeft}/${st.escortsTotal} escorts`;
+      return;
+    }
     const { playerFaction, enemyFaction } = getBattleFactions();
     cap.textContent = `${factionEmoji(playerFaction)} vs ${factionEmoji(enemyFaction)} @ ${resolveTerrainEmoji()}`;
   }
@@ -443,6 +458,15 @@
     ctx.fillStyle = resolveThemeColor();
     ctx.fillRect(0, 0, cssW, cssH);
 
+    if (isEscortSailing()) {
+      drawEscortProgress(ctx, cssW, cssH);
+      ctx.strokeStyle = 'rgba(212,184,134,0.55)';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(0.5, 0.5, cssW - 1, cssH - 1);
+      updateCaption();
+      return;
+    }
+
     // World → minimap scale. Independent X/Y factors so the same compact box
     // works whether the world is a 2400×2400 field or a 50000×32000 ocean.
     const bounds = getWorldBounds();
@@ -462,6 +486,80 @@
     // 2. Emoji caption underneath — text, not canvas, so it's a separate
     // DOM write rather than another draw call (see SECTION 2B).
     updateCaption();
+  }
+
+  // ESCORT NICHE VIEW — a horizontal crossing-progress strip instead of the
+  // normal grid/dot minimap, since the escort's world is an unbounded
+  // scrolling ocean (worldX can run past 40,000px) rather than a bounded
+  // battle grid. Shows: departure -> target-shore track, the convoy's own
+  // position, and every currently-spawned pirate group positioned relative
+  // to the convoy so their closing distance actually reads at a glance.
+  function drawEscortProgress(ctx, cssW, cssH) {
+    const st = window.NavalEscortMode.getState();
+    const trackY = cssH * 0.5;
+    const padX = 14;
+    const trackW = cssW - padX * 2;
+
+    // Track line
+    ctx.strokeStyle = 'rgba(212,184,134,0.5)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(padX, trackY);
+    ctx.lineTo(padX + trackW, trackY);
+    ctx.stroke();
+
+    const progress = st.targetDistance > 0 ? Math.max(0, Math.min(1, st.distanceTraveled / st.targetDistance)) : 0;
+    const convoyX = padX + trackW * progress;
+
+    // Sailed distance — filled portion
+    ctx.strokeStyle = '#8bc34a';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(padX, trackY);
+    ctx.lineTo(convoyX, trackY);
+    ctx.stroke();
+
+    // Departure + target-shore endpoints
+    ctx.fillStyle = 'rgba(212,184,134,0.8)';
+    ctx.beginPath(); ctx.arc(padX, trackY, 3, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#3a5c2b';
+    ctx.beginPath(); ctx.arc(padX + trackW, trackY, 4, 0, Math.PI * 2); ctx.fill();
+
+    // Pirate groups — real per-group markers from NavalEscortMode's own
+    // getPirateGroups() (spotted-only, matching the sighting mechanic — an
+    // unsighted group isn't spoiled here either). Position is convoy-
+    // relative: distanceAhead ranges from ~1100px (just sighted) down to
+    // ~260px (fight triggers), mapped onto a small proximity zone ahead of
+    // the convoy marker so it visibly creeps closer as the group closes in.
+    const SIGHT_RANGE = 1100;
+    const groups = (window.NavalEscortMode.getPirateGroups ? window.NavalEscortMode.getPirateGroups() : []);
+    groups.forEach((g, i) => {
+      const closeness = 1 - Math.max(0, Math.min(1, g.distanceAhead / SIGHT_RANGE)); // 0 = just sighted, 1 = about to fight
+      const markerX = Math.min(padX + trackW, convoyX + trackW * (0.02 + closeness * 0.09));
+      const markerY = trackY - 8 - (i * 10); // stack vertically if more than one group is ever spotted at once
+      ctx.fillStyle = closeness > 0.7 ? '#ff5252' : '#ff8a65';
+      ctx.beginPath();
+      ctx.moveTo(markerX, markerY);
+      ctx.lineTo(markerX - 5, markerY + 7);
+      ctx.lineTo(markerX + 5, markerY + 7);
+      ctx.closePath();
+      ctx.fill();
+    });
+
+    // Convoy marker (ship glyph — simple triangle in the direction of travel)
+    ctx.fillStyle = '#f5d76e';
+    ctx.beginPath();
+    ctx.moveTo(convoyX + 7, trackY);
+    ctx.lineTo(convoyX - 5, trackY - 5);
+    ctx.lineTo(convoyX - 5, trackY + 5);
+    ctx.closePath();
+    ctx.fill();
+
+    // Distance readout
+    ctx.fillStyle = '#f0d9a8';
+    ctx.font = 'bold 10px Arial, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(Math.round(progress * 100) + '%', convoyX, trackY - 14);
   }
 
   // River battles only — draws the horizontal water band across the full

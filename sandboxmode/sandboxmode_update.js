@@ -656,7 +656,20 @@ function update() {
 					// as a defeat (it routes through window.leaveBattlefield, which
 					// Survival's guard now treats as a forced defeat) the instant the
 					// player presses P near the end of a fight they were about to win.
-					if (keys['p'] && !window.__IS_SURVIVAL_BATTLE__) {
+					// NAVAL EXPLORATION GUARD: same shape as the Survival guard above.
+					// This generic "near-victory" P-exit assumes a battle with a real
+					// starting enemy count — Naval Exploration starts with ZERO enemies
+					// (they spawn in over time) and sets currentBattleData.initialCounts
+					// .enemy = 0, which the `|| 1` fallback below turns into "1 enemy
+					// total", so enemyNetCount/enemyInitial < 0.10 (and enemyNetCount < 5)
+					// are BOTH true from the very first frame — every press of P
+					// instantly satisfied this branch and routed into
+					// window.leaveBattlefield(), which computed isVictory = true (no
+					// enemies alive) and threw up a "Victory!" summary screen the
+					// instant P was pressed, even seconds into a fresh voyage. Naval
+					// Exploration owns its own P handling (see naval_exploration.js) —
+					// same treatment Survival gets.
+					if (keys['p'] && !window.__IS_SURVIVAL_BATTLE__ && !window.__IS_NAVAL_EXPLORATION__) {
 						const scale = currentBattleData?.initialCounts?.player > 300 ? 5 : 1; 
 						const enemyNetCount = aliveEnemies * scale;
 						const enemyInitial = currentBattleData?.initialCounts?.enemy || 1;
@@ -1054,7 +1067,14 @@ function update() {
 
     // Custom (non-city) military locations — shows/hides the "Enter <kind>"
     // prompt based on player proximity. See custom_locations_system.js.
+    // Left in place but harmless/unused now that scenarios register their
+    // non-city locations as Points of Interest instead (see below) —
+    // camp_system.js's registry is simply empty, so this is a no-op loop.
     if (typeof updateCustomLocationProximity === 'function') updateCustomLocationProximity();
+
+    // Points of Interest (forts/towers/barracks/etc.) — the replacement for
+    // the above. See poi_system.js.
+    if (typeof updatePointOfInterestProximity === 'function') updatePointOfInterestProximity();
 }
 
 
@@ -1214,6 +1234,14 @@ if (canDrawForts) {
             drawCityCosmeticNPCs(ctx, currentActiveCityFaction, drawCaravan, zoom);
         }
 
+        // Points of Interest: live-animated cosmetics (fire flicker, forge
+        // glow/smoke) that can't be baked into the static bgCanvas. No-op
+        // whenever the current city interior isn't a POI (window.activePOI
+        // is null for real settlements). See poi_system.js.
+        if (typeof drawPointOfInterestCosmeticOverlay === 'function') {
+            drawPointOfInterestCosmeticOverlay(ctx);
+        }
+
         let pColor = "#d32f2f";
         if (typeof FACTIONS !== 'undefined' && player.faction && FACTIONS[player.faction]) {
             pColor = FACTIONS[player.faction].color;
@@ -1256,8 +1284,12 @@ if (canDrawForts) {
         if (typeof s3DrawGate === 'function') s3DrawGate(ctx);
         // Custom (non-city) military locations — barracks, storage, stables,
         // watchtowers, garrison posts, maintenance yards. See
-        // custom_locations_system.js: drawCustomLocationMarkers.
+        // custom_locations_system.js: drawCustomLocationMarkers. Left in
+        // place but harmless/unused now — see the matching note above.
         if (typeof drawCustomLocationMarkers === 'function') drawCustomLocationMarkers(ctx);
+        // Points of Interest — the replacement for the above. See
+        // poi_system.js: drawPointOfInterestMarkers.
+        if (typeof drawPointOfInterestMarkers === 'function') drawPointOfInterestMarkers(ctx);
         let halfWidth = (canvas.width / 2) / zoom;
         let halfHeight = (canvas.height / 2) / zoom;
         let camLeft = player.x - halfWidth - 150;

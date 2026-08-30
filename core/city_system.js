@@ -705,6 +705,7 @@ function isCavCollision(x, y, factionName) {
 
 // --- City Entry/Exit ---
 function enterCity(factionName, playerObj) {
+    if (window.NavalEscortMode && window.NavalEscortMode.isActive()) return; // no city interiors mid-voyage
     // Determine whether the entering city is a village.
     // activeCity is set in sandboxmode_update.js before enterCity is called.
     const _entering_isVillage = !!(

@@ -93,6 +93,26 @@ return "Easy";
     const NIGHT_RAID_INITIAL_DEFENDERS = 2;    // sentries already awake/armed the instant the alert sounds
     const NIGHT_RAID_REWARD_GOLD = [60, 130];  // "reward huge" per spec — well above a normal day's take
     const NIGHT_RAID_REWARD_FOOD = [30, 70];
+
+    // ------------------------------------------------------------------
+    // CAMP TENTS — persistent condition, separate from the ephemeral tent
+    // POSITIONS generated fresh each raid (window.__nightRaidTents). Raiders
+    // who reach a tent during a night raid can set it alight; burnt tents
+    // slowly rebuild day by day, and the camp's overall damage level
+    // applies a real morale/HP penalty to EVERY defender you field —
+    // normal waves included — until it's repaired. Gives real weight to
+    // actually defending the tents during a raid, not just killing raiders.
+    // ------------------------------------------------------------------
+    const CAMP_TENT_COUNT = 5;
+    const CAMP_TENT_MAX_HP = 100;
+    const TENT_IGNITE_CHANCE_PER_TICK = 0.025; // ADJUST HERE — per nearby-enemy, per 500ms tick during a raid
+    const TENT_IGNITE_RADIUS = 70;             // how close a raider needs to be to risk lighting a tent
+    const TENT_FIRE_DAMAGE = [18, 35];         // burst damage per ignition event
+    const TENT_FIRE_FLASH_MS = 3200;           // how long the flame visual plays after an ignition
+    const TENT_REGEN_PER_DAY = 14;             // hp restored per tent, per day — "rebuilt overtime"
+    const CAMP_DAMAGE_MORALE_PENALTY_MAX = 0.35; // up to -35% morale at a fully-burnt camp
+    const CAMP_DAMAGE_HP_PENALTY_MAX = 0.18;     // up to -18% max HP at a fully-burnt camp
+
     function randRange([lo, hi]) { return lo + Math.floor(Math.random() * (hi - lo + 1)); }
 
     // ------------------------------------------------------------------
@@ -238,6 +258,7 @@ return "Easy";
     let nightRaidSpawnTimer = null;
     let nightRaidSpawnQueue = [];
     let nightRaidMonitorInterval = null;
+    let nightRaidTentSnapshot = [];
 
     let run = null;      // the current run's persistent state (see freshRunState)
     let draft = null;    // the in-progress setup-screen selection, pre-"Begin Defense"
@@ -259,7 +280,8 @@ return "Easy";
             food: 0,          // set to SURVIVAL_STARTING_FOOD in beginSurvivalRun
             laborRemainingToday: 0, // this day's build budget, set once predeployment begins
             lastDayReport: null,    // most recent resolveDayEconomy() + handleWaveCleared() report
-            nightRaidCooldown: 0    // days remaining before another night raid can roll
+            nightRaidCooldown: 0,   // days remaining before another night raid can roll
+            campTents: []           // persistent tent condition, populated in beginSurvivalRun
         };
     }
 
@@ -278,6 +300,17 @@ return "Easy";
         };
     }
     function rosterIsFightable(entry) { return !entry.healDaysLeft || entry.healDaysLeft <= 0; }
+
+    // 0 (pristine) to 1 (every tent burnt to nothing) — the single source
+    // of truth for how damaged the camp currently is. Read by both battle
+    // spawners to apply the morale/HP penalty, and by resolveDayEconomy's
+    // daily regen tick.
+    function campDamageFraction() {
+        if (!run || !Array.isArray(run.campTents) || run.campTents.length === 0) return 0;
+        let totalMax = 0, totalHp = 0;
+        run.campTents.forEach(t => { totalMax += t.maxHp; totalHp += t.hp; });
+        return totalMax > 0 ? Math.max(0, 1 - (totalHp / totalMax)) : 0;
+    }
 
     // Today's structure-building budget: scales with how many troops are
     // actually standing (wounded/healing troops can't swing a shovel either).
@@ -543,6 +576,15 @@ return "Easy";
                     unitStats.speed *= mult;
                     unitStats.accuracy *= mult;
                     unitStats.missileBaseDamage *= mult;
+                }
+                // Camp damage penalty — a burnt camp saps morale and health
+                // for EVERY defender fielded, not just night-raid ones, until
+                // the tents are rebuilt (see campDamageFraction).
+                const campDmg = campDamageFraction();
+                if (campDmg > 0) {
+                    unitStats.morale = Math.round((unitStats.morale || 20) * (1 - CAMP_DAMAGE_MORALE_PENALTY_MAX * campDmg));
+                    unitStats.maxMorale = Math.round((unitStats.maxMorale || 20) * (1 - CAMP_DAMAGE_MORALE_PENALTY_MAX * campDmg));
+                    unitStats.health = Math.round((unitStats.health || 100) * (1 - CAMP_DAMAGE_HP_PENALTY_MAX * campDmg));
                 }
             }
 
@@ -926,7 +968,10 @@ return "Easy";
         btnRow.style.display = "flex";
         btnRow.style.gap = "16px";
         btnRow.appendChild(svBtn("Take Command", () => { el.remove(); onContinue(); }));
-        btnRow.appendChild(svBtn("Cancel", () => { el.remove(); survivalUiOpen = false; window.isPaused = false; }, { small: true }));
+        btnRow.appendChild(svBtn("Cancel", () => {
+    window.location.reload();
+}, { small: true }));
+		
         el.appendChild(btnRow);
     }
 
@@ -1141,6 +1186,12 @@ return "Easy";
         run.roster = draft.roster.map(unitKey => makeRosterEntry(unitKey));
         run.gold = SURVIVAL_STARTING_GOLD - draft.cost; // leftover carries forward into day 1's prep shop
         run.food = SURVIVAL_STARTING_FOOD;
+        // Persistent camp tent condition — separate from the fresh
+        // positions generated each night raid. See CAMP_TENT_* constants.
+        run.campTents = [];
+        for (let i = 0; i < CAMP_TENT_COUNT; i++) {
+            run.campTents.push({ id: i, hp: CAMP_TENT_MAX_HP, maxHp: CAMP_TENT_MAX_HP });
+        }
         survivalActive = true;
         survivalWaveResolved = false;
         currentWaveLoot = { food: 0, gold: 0 };
@@ -1401,11 +1452,13 @@ return "Easy";
         const laborTotal = computeLaborBudget(run.roster);
         const season = seasonForDay(run.day);
         const seasonIcon = { Spring: "🌱", Summer: "☀", Autumn: "🍂", Winter: "❄" }[season] || "";
+        const campDmgPct = Math.round(campDamageFraction() * 100);
         hud.innerHTML = `
             <span style="color:#f5d76e;">DAY ${run.day} ${seasonIcon}</span>
             <span>🌾 ${fmtNum(run.food)}</span>
             <span>🪙 ${run.gold}</span>
             <span>🪏 ${run.laborRemainingToday}/${laborTotal}</span>
+            ${campDmgPct > 0 ? `<span style="color:#ffb74d;" title="Camp damage — reduces morale/HP for every soldier fielded">🔥 ${campDmgPct}%</span>` : ""}
         `;
     }
 
@@ -1784,6 +1837,19 @@ return "Easy";
         // everything else in this function.
         if (run.nightRaidCooldown > 0) run.nightRaidCooldown -= 1;
 
+        // Camp tents slowly rebuild — "get rebuilt overtime" per spec.
+        // Purely passive, no labor cost — this is home-base upkeep, not a
+        // player-built structure.
+        let tentsRepaired = 0;
+        if (Array.isArray(run.campTents)) {
+            run.campTents.forEach(t => {
+                if (t.hp < t.maxHp) {
+                    t.hp = Math.min(t.maxHp, t.hp + TENT_REGEN_PER_DAY);
+                    tentsRepaired++;
+                }
+            });
+        }
+
         const report = {
             foodStart: run.food,
             foodConsumed: 0,
@@ -1796,7 +1862,9 @@ return "Easy";
             deserted: [],
             healedUp: [],
             wentHungry: false,
-            shipmentArrived: false
+            shipmentArrived: false,
+            tentsRepaired: tentsRepaired,
+            campDamagePct: Math.round(campDamageFraction() * 100)
         };
 
         // 1. Weekly shipment, checked against the day that's now starting.
@@ -2024,6 +2092,8 @@ return "Easy";
         if (report.wounded.length) noticeLines.push(`<div style="color:#ffb74d;">${report.wounded.length} wounded, recovering: ${report.wounded.map(w => `${w.type} (${w.days}d)`).join(", ")}.</div>`);
         if (report.healedUp.length) noticeLines.push(`<div style="color:#8bc34a;">${report.healedUp.length} soldier${report.healedUp.length === 1 ? "" : "s"} recovered and rejoin the line: ${groupByType(report.healedUp).join(", ")}.</div>`);
         if (report.shipmentArrived) noticeLines.push(`<div style="color:#8bc34a;">🚚 The weekly supply shipment arrived: +${report.foodFromShipment} food.</div>`);
+        if (report.tentsRepaired > 0) noticeLines.push(`<div style="color:#8bc34a;">🏕 Camp crews patched up ${report.tentsRepaired} tent${report.tentsRepaired === 1 ? "" : "s"} overnight.</div>`);
+        if (report.campDamagePct > 0) noticeLines.push(`<div style="color:#ffb74d;">🔥 Camp damage: ${report.campDamagePct}% — every soldier fields with reduced morale and HP until it's rebuilt.</div>`);
         if (noticeLines.length) {
             const notices = document.createElement("div");
             notices.style.width = "min(680px, 90vw)";
@@ -2292,6 +2362,16 @@ return "Easy";
             unitStats.accuracy *= mult;
             unitStats.missileBaseDamage *= mult;
         }
+        // Camp damage penalty — read LIVE at spawn time. Since defenders
+        // trickle in over the raid's duration and tents can be actively
+        // burning right now, later reinforcements can arrive more
+        // demoralized than the first responders if the fire keeps spreading.
+        const campDmg = campDamageFraction();
+        if (campDmg > 0) {
+            unitStats.morale = Math.round((unitStats.morale || 20) * (1 - CAMP_DAMAGE_MORALE_PENALTY_MAX * campDmg));
+            unitStats.maxMorale = Math.round((unitStats.maxMorale || 20) * (1 - CAMP_DAMAGE_MORALE_PENALTY_MAX * campDmg));
+            unitStats.health = Math.round((unitStats.health || 100) * (1 - CAMP_DAMAGE_HP_PENALTY_MAX * campDmg));
+        }
         const safeHP = unitStats.health || unitStats.hp || unitStats.maxHealth || template.health || 100;
         const visType = visTypeFor(unitKey, template);
         const unit = {
@@ -2336,6 +2416,9 @@ return "Easy";
         if (nightRaidMonitorInterval) clearInterval(nightRaidMonitorInterval);
         nightRaidMonitorInterval = setInterval(() => {
             if (!nightRaidActive || typeof battleEnvironment === "undefined" || !battleEnvironment) return;
+
+            tickTentFires();
+
             const enemyAlive = battleEnvironment.units.filter(u => u.side === "enemy" && u.hp > 0).length;
             const playerAlive = battleEnvironment.units.filter(u => u.side === "player" && u.hp > 0).length;
 
@@ -2348,6 +2431,28 @@ return "Easy";
                 handleNightRaidOutcome(false);
             }
         }, 500);
+    }
+
+    // Enemies lingering near a tent risk setting it alight. Damage is an
+    // immediate burst (not a sustained drain) — simpler than tracking a
+    // burning-duration timer, while still creating real risk: the longer
+    // raiders roam near the camp core, the more ignition rolls they get.
+    function tickTentFires() {
+        if (!Array.isArray(window.__nightRaidTents) || !run || !Array.isArray(run.campTents)) return;
+        window.__nightRaidTents.forEach(tentPos => {
+            const rec = run.campTents.find(t => t.id === tentPos.tentId);
+            if (!rec || rec.hp <= 0) { if (rec) tentPos.hp = rec.hp; return; } // already burnt out — nothing left to catch
+
+            const enemyNear = battleEnvironment.units.some(u =>
+                u.side === "enemy" && u.hp > 0 && Math.hypot(u.x - tentPos.x, u.y - tentPos.y) < TENT_IGNITE_RADIUS);
+
+            if (enemyNear && Math.random() < TENT_IGNITE_CHANCE_PER_TICK) {
+                const dmg = randRange(TENT_FIRE_DAMAGE);
+                rec.hp = Math.max(0, rec.hp - dmg);
+                tentPos.fireFlashUntil = Date.now() + TENT_FIRE_FLASH_MS;
+            }
+            tentPos.hp = rec.hp; // keep the render-side copy in sync either way
+        });
     }
 
     function showNightRaidAlertBanner() {
@@ -2373,7 +2478,7 @@ return "Easy";
         setTimeout(() => { el.style.transition = "opacity 500ms ease"; el.style.opacity = "0"; setTimeout(() => el.remove(), 550); }, 3200);
     }
 
-    function showNightRaidResultBanner(won, goldReward, foodReward, killedTypes) {
+    function showNightRaidResultBanner(won, goldReward, foodReward, killedTypes, tentsBurnedDown, tentsDamaged) {
         const el = document.createElement("div");
         el.id = "night-raid-result";
         el.style.position = "fixed";
@@ -2391,14 +2496,24 @@ return "Easy";
         const lostLine = killedTypes.length
             ? `<div style="color:#e57373; font-size:12px; margin-top:6px;">Lost: ${groupByType(killedTypes).join(", ")}</div>`
             : `<div style="color:#8bc34a; font-size:12px; margin-top:6px;">No losses.</div>`;
+        let tentLine = "";
+        if (tentsBurnedDown > 0) {
+            tentLine = `<div style="color:#ff8a65; font-size:12px; margin-top:4px;">🔥 ${tentsBurnedDown} tent${tentsBurnedDown === 1 ? "" : "s"} burnt down${tentsDamaged > tentsBurnedDown ? `, ${tentsDamaged - tentsBurnedDown} more scorched` : ""}.</div>`;
+        } else if (tentsDamaged > 0) {
+            tentLine = `<div style="color:#ffb74d; font-size:12px; margin-top:4px;">🔥 ${tentsDamaged} tent${tentsDamaged === 1 ? "" : "s"} scorched.</div>`;
+        } else {
+            tentLine = `<div style="color:#8bc34a; font-size:12px; margin-top:4px;">Camp untouched.</div>`;
+        }
         el.innerHTML = won ? `
             <div style="font-size:22px; letter-spacing:2px; color:#8bc34a;">✓ RAID REPELLED</div>
             <div style="font-size:14px; color:#f5d76e; margin-top:8px;">+${goldReward} gold &nbsp;·&nbsp; +${foodReward} food</div>
             ${lostLine}
+            ${tentLine}
         ` : `
             <div style="font-size:22px; letter-spacing:2px; color:#e57373;">THE CAMP WAS OVERRUN</div>
             <div style="font-size:13px; color:#d4b886; margin-top:8px;">The raiders melt back into the dark before your reinforcements can finish them.</div>
             ${lostLine}
+            ${tentLine}
         `;
         document.body.appendChild(el);
         setTimeout(() => { el.style.transition = "opacity 500ms ease"; el.style.opacity = "0"; setTimeout(() => el.remove(), 550); }, 3600);
@@ -2442,13 +2557,25 @@ return "Easy";
         // "leave the camp alone for a while" narratively.
         run.nightRaidCooldown = NIGHT_RAID_COOLDOWN_DAYS;
 
+        // Tent damage caused specifically by THIS raid, vs. the snapshot
+        // taken at its start — separate from campDamageFraction, which is
+        // the camp's total accumulated (possibly multi-raid) condition.
+        let tentsBurnedDown = 0, tentsDamaged = 0;
+        run.campTents.forEach((t, i) => {
+            const before = nightRaidTentSnapshot[i];
+            if (before === undefined || t.hp >= before) return;
+            tentsDamaged++;
+            if (t.hp <= 0 && before > 0) tentsBurnedDown++;
+        });
+        nightRaidTentSnapshot = [];
+
         battleEnvironment.units = [];
         battleEnvironment.projectiles = [];
         const canvas = document.getElementById("gameCanvas");
         if (canvas) canvas.style.display = "none";
         hideSurvivalResourceHud();
 
-        showNightRaidResultBanner(won, goldReward, foodReward, killedTypes);
+        showNightRaidResultBanner(won, goldReward, foodReward, killedTypes, tentsBurnedDown, tentsDamaged);
 
         // Reopen the day-prep screen — merge the CURRENT (post-reward)
         // food/gold into the last real day-transition report rather than
@@ -2498,16 +2625,25 @@ return "Easy";
         // Tent positions near the player's usual spawn anchor — defenders
         // wake up and walk out of these one at a time. Read by
         // survivalStructures.js's render hook to draw them + the night tint.
+        // Each position is linked (by index) to its PERSISTENT condition
+        // record in run.campTents, so this run's actual accumulated fire
+        // damage is what renders and burns further — not fresh state
+        // every raid.
+        if (!Array.isArray(run.campTents) || run.campTents.length === 0) {
+            run.campTents = [];
+            for (let i = 0; i < CAMP_TENT_COUNT; i++) run.campTents.push({ id: i, hp: CAMP_TENT_MAX_HP, maxHp: CAMP_TENT_MAX_HP });
+        }
         const geo = window.battleSpawnAssignment ? window.battleSpawnAssignment.player : null;
         const anchorX = geo ? geo.ax : BATTLE_WORLD_WIDTH / 2;
         const anchorY = geo ? geo.ay : BATTLE_WORLD_HEIGHT - 80;
-        const tentPositions = [];
-        for (let i = 0; i < 5; i++) {
-            tentPositions.push({
-                x: anchorX + (i - 2) * 26 + (Math.random() - 0.5) * 10,
-                y: anchorY + (Math.random() - 0.5) * 16
-            });
-        }
+        const tentPositions = run.campTents.map((rec, i) => ({
+            x: anchorX + (i - (run.campTents.length - 1) / 2) * 26 + (Math.random() - 0.5) * 10,
+            y: anchorY + (Math.random() - 0.5) * 16,
+            tentId: rec.id,
+            hp: rec.hp,
+            maxHp: rec.maxHp,
+            fireFlashUntil: 0
+        }));
         window.__nightRaidTents = tentPositions;
 
         // Enemy raiders — already inside the perimeter, close to camp, and
@@ -2561,6 +2697,7 @@ return "Easy";
         window.inBattleMode = true;
         window.isPaused = false;
         nightRaidActive = true;
+        nightRaidTentSnapshot = run.campTents.map(t => t.hp);
         showSurvivalResourceHud();
 
         showNightRaidAlertBanner();

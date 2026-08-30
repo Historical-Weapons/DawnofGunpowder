@@ -1893,40 +1893,93 @@
     // ========================================================================
     function drawNightRaidTents(ctx) {
         if (!window.__IS_NIGHT_RAID__ || !Array.isArray(window.__nightRaidTents)) return;
+        const now = Date.now();
         window.__nightRaidTents.forEach(t => {
+            const hpPct = (t.maxHp > 0) ? Math.max(0, t.hp / t.maxHp) : 1;
+            const destroyed = t.hp <= 0;
+            const onFire = !destroyed && t.fireFlashUntil && now < t.fireFlashUntil;
+
             ctx.save();
             ctx.translate(t.x, t.y);
 
-            // Lantern glow underneath — the visual cue that a defender might
-            // still be waking up here.
-            const glow = ctx.createRadialGradient(0, -8, 0, 0, -8, 46);
-            glow.addColorStop(0, "rgba(255,190,80,0.35)");
-            glow.addColorStop(1, "rgba(255,140,0,0)");
-            ctx.fillStyle = glow;
-            ctx.beginPath();
-            ctx.arc(0, -8, 46, 0, Math.PI * 2);
-            ctx.fill();
+            // Lantern glow underneath — dims as the tent takes damage, gone
+            // entirely once destroyed (nothing left to light).
+            if (!destroyed) {
+                const glow = ctx.createRadialGradient(0, -8, 0, 0, -8, 46);
+                glow.addColorStop(0, `rgba(255,190,80,${0.35 * hpPct})`);
+                glow.addColorStop(1, "rgba(255,140,0,0)");
+                ctx.fillStyle = glow;
+                ctx.beginPath();
+                ctx.arc(0, -8, 46, 0, Math.PI * 2);
+                ctx.fill();
+            }
 
-            // Plain A-frame silhouette — deliberately simple, this is a
-            // battlefield decoration, not a full camp scene.
-            ctx.fillStyle = "#2a2016";
+            // Tent body — darkens/scorches proportional to accumulated
+            // damage; a fully destroyed tent is a flat charred husk.
+            const scorch = 1 - hpPct; // 0 = pristine, 1 = fully charred
+            const bodyCol = destroyed ? "#1a1512" : lerpColor("#2a2016", "#0d0908", scorch);
+            ctx.fillStyle = bodyCol;
             ctx.beginPath();
-            ctx.moveTo(-14, 6); ctx.lineTo(0, -20); ctx.lineTo(14, 6);
+            if (destroyed) {
+                // Collapsed husk — low, flattened silhouette instead of the
+                // standing A-frame, reads clearly as "burnt out" at a glance.
+                ctx.moveTo(-14, 6); ctx.lineTo(-6, -4); ctx.lineTo(8, -2); ctx.lineTo(14, 6);
+            } else {
+                ctx.moveTo(-14, 6); ctx.lineTo(0, -20); ctx.lineTo(14, 6);
+            }
             ctx.closePath();
             ctx.fill();
-            ctx.strokeStyle = "#4a3520";
+            ctx.strokeStyle = destroyed ? "#000" : "#4a3520";
             ctx.lineWidth = 1;
             ctx.stroke();
 
-            // Glowing entrance flap
-            ctx.fillStyle = "rgba(255,180,80,0.5)";
-            ctx.beginPath();
-            ctx.moveTo(-3, 6); ctx.lineTo(0, -6); ctx.lineTo(3, 6);
-            ctx.closePath();
-            ctx.fill();
+            // Entrance flap glow — only on a tent still standing and not
+            // actively on fire (the flame animation below replaces it).
+            if (!destroyed && !onFire) {
+                ctx.fillStyle = `rgba(255,180,80,${0.5 * hpPct})`;
+                ctx.beginPath();
+                ctx.moveTo(-3, 6); ctx.lineTo(0, -6); ctx.lineTo(3, 6);
+                ctx.closePath();
+                ctx.fill();
+            }
+
+            // Active flame animation — plays for TENT_FIRE_FLASH_MS after an
+            // ignition event, simple flicker built from a couple of
+            // overlapping triangles rather than a full particle system.
+            if (onFire) {
+                const flicker = Math.sin(now * 0.02) * 2;
+                const flicker2 = Math.cos(now * 0.017) * 2;
+                ctx.fillStyle = "#e05c00";
+                ctx.beginPath();
+                ctx.moveTo(-6, 4); ctx.quadraticCurveTo(-3 + flicker, -14, 0, -22); ctx.quadraticCurveTo(3 - flicker, -12, 6, 4);
+                ctx.closePath(); ctx.fill();
+                ctx.fillStyle = "#ffbb00";
+                ctx.beginPath();
+                ctx.moveTo(-3, 3); ctx.quadraticCurveTo(-1 + flicker2, -8, 0, -14); ctx.quadraticCurveTo(1 - flicker2, -7, 3, 3);
+                ctx.closePath(); ctx.fill();
+
+                // Rising smoke for a few embers
+                ctx.fillStyle = "rgba(80,80,80,0.35)";
+                for (let i = 0; i < 3; i++) {
+                    const st = ((now / 900) + i * 0.33) % 1;
+                    ctx.beginPath();
+                    ctx.arc((i - 1) * 4, -20 - st * 30, 2 + st * 3, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+            }
 
             ctx.restore();
         });
+    }
+
+    // Tiny hex-color lerp helper for the scorch effect above — self-
+    // contained rather than reusing another file's color-math helper.
+    function lerpColor(a, b, t) {
+        const pa = parseInt(a.slice(1), 16), pb = parseInt(b.slice(1), 16);
+        const ar = (pa >> 16) & 0xff, ag = (pa >> 8) & 0xff, ab = pa & 0xff;
+        const br = (pb >> 16) & 0xff, bg = (pb >> 8) & 0xff, bb = pb & 0xff;
+        const rr = Math.round(ar + (br - ar) * t), rg = Math.round(ag + (bg - ag) * t), rb = Math.round(ab + (bb - ab) * t);
+        return `rgb(${rr},${rg},${rb})`;
     }
 
     function drawNightRaidOverlay(ctx) {

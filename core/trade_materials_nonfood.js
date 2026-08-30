@@ -504,6 +504,7 @@ let _tradePanelCity = null;
 let _tradeTab       = "buy"; // "buy" | "sell"
 
 function openTradePanel() {
+    if (window.NavalEscortMode && window.NavalEscortMode.isActive()) return; // no trade posts mid-voyage
     const city = typeof activeCity !== 'undefined' ? activeCity : _tradePanelCity;
     if (!city) { console.warn("Trade: no activeCity"); return; }
     

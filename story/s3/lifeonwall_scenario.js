@@ -51,7 +51,7 @@
 //      you a uniform, take it. But if they offer you glory, run."
 //   Liu Sheng joins the army anyway. The wages are stable. So they say.
 //
-// STARTING POST  —  Black Sand Fort (黑沙堡)
+// STARTING POST  —  Fushun Suo (撫順所)
 //   Small frontier fort on the wall itself, in the Kaiyuan sector of the
 //   Liaodong defense line. 400 men on paper. ~170 in reality. The rest:
 //   dead in old skirmishes, deserted, on fake payrolls, or skimmed by
@@ -144,10 +144,12 @@ var CONFIG = {
 
     // ── PLAYER  (Liu Sheng) ──────────────────────────────────────────────────
     // Fresh recruit — small kit, light infantry roster.
-    // Black Sand Fort sits ~150 px south of the wall band centre.
+    // Fushun Suo sits ~40px south of the wall band's south face (moved
+    // closer to the wall from the old ~150px gap — kept in sync with
+    // FIXED_SETTLEMENTS_story3 in story3_map_and_update.js).
     player: {
         x:          1680,
-        y:          1380,
+        y:          1237,
         troops:     12,
         gold:       50,
         food:       80,
@@ -168,14 +170,18 @@ var CONFIG = {
     // sparse, narrow patrol paths between segments (~32 px walkable gaps).
     //
     locations: {
-        BLACK_SAND_FORT:       { name: "Black Sand Fort",        x: 1680, y: 1380 },
+        FUSHUN_SUO:       { name: "Fushun Suo",        x: 1680, y: 1237 },
         DATONG:                { name: "Kaiyuan Garrison",       x: 1080, y: 1880 },
         XUANFU:                { name: "Liaoyang",               x: 2600, y: 2020 },
-        JUYONG_PASS:           { name: "Fushun Pass Tower",      x: 1920, y: 1620 },
+        JUYONG_PASS:           { name: "Fushun Pass Tower",      x: 1920, y: 1266 },
         NORTH_BEACON:          { name: "North Beacon Tower",     x: 1680, y: 1270 }, // just south of wall
         SHEEP_HAMLET:          { name: "Sheep Hamlet (Yangwa)",  x: 2000, y: 1500 },
         HORSE_VILLAGE:         { name: "Horse Village (Mawang)", x: 1280, y: 1520 },
         TAX_POST:              { name: "Grain Tax Post",         x: 1520, y: 1760 },
+        // Matches the "Powder Magazine" custom-location building placed on
+        // the story3 overworld map (see FIXED_SETTLEMENTS_story3 in
+        // story3_map_and_update.js) — same coordinates, same building.
+        POWDER_MAGAZINE:       { name: "Powder Magazine",        x: 1160, y: 1258 },
         // Burned hamlet sits just south of the wall — closest civilian
         // settlement to the forest frontier. Jurchen riders reach it through
         // a narrow gap between wall segments.
@@ -209,9 +215,9 @@ var CONFIG = {
     // ── WALL OPENINGS (the one real gate — NOT patrol paths) ─────────────────
     // The two "patrol path" gaps (western/eastern) were removed — the wall is
     // now one continuous band with only this single closable gate as an
-    // opening, directly north of Black Sand Fort.
+    // opening, directly north of Fushun Suo.
     wallOpenings: [
-        { x: 1680, width: 32 }  // central — directly north of Black Sand Fort
+        { x: 1680, width: 32 }  // central — directly north of Fushun Suo
     ],
 
     // ── ART (placeholder paths — files don't exist yet; fallbacks will play) ──
@@ -306,7 +312,7 @@ function _sub(text, ms, color) {
     return { type: "show_subtitle", params: { text: text, ms: ms || 5000, color: color || "#f5d76e" } };
 }
 function _log(text, category) {
-    return { type: "log_event", params: { text: text, category: category || "general" } };
+    return { type: "log_message", params: { text: text, tag: category || "general" } };
 }
 function _line(side, name, color, portrait, text) {
     return { side: side, name: name, color: color, portrait: portrait, text: text };
@@ -328,7 +334,7 @@ var ART_PATHS = {
 
     // Placeholder — no file yet; will be replaced when frontier art arrives
     forest_horizon:       CONFIG.artBase + "northern_forest_horizon.jpg",
-    black_sand_fort:     CONFIG.artBase + "black_sand_fort.jpg",
+    fushun_suo:     CONFIG.artBase + "fushun_suo.jpg",
     burning_hamlet:      CONFIG.artBase + "burning_border_hamlet.jpg",
     cannon_yard:         CONFIG.artBase + "bronze_cannon_yard.jpg",
     jurchen_campfires:    CONFIG.artBase + "jurchen_campfires_north.jpg",
@@ -412,7 +418,7 @@ var PLAYER_SETUP = {
 // IMPORTANT NPCs
 // =============================================================================
 // Captain Yu, Veteran Wei, Commander Xu, Quartermaster Du, and Cook Han are
-// always-present at Black Sand Fort from boot. The rest are spawned on-demand
+// always-present at Fushun Suo from boot. The rest are spawned on-demand
 // by chapter triggers when the player walks into the relevant proximity radius.
 var IMPORTANT_NPCS = [
     // ── ALWAYS-ON  (autoSpawn: true) ─────────────────────────────────────────
@@ -420,10 +426,10 @@ var IMPORTANT_NPCS = [
         id:          "captain_yu",
         name:        "Captain Yu",
         faction:     CONFIG.factions.PLAYER,
-        x:           CONFIG.locations.BLACK_SAND_FORT.x + 20,
-        y:           CONFIG.locations.BLACK_SAND_FORT.y - 20,
-        targetX:     CONFIG.locations.BLACK_SAND_FORT.x + 20,
-        targetY:     CONFIG.locations.BLACK_SAND_FORT.y - 20,
+        x:           CONFIG.locations.FUSHUN_SUO.x + 20,
+        y:           CONFIG.locations.FUSHUN_SUO.y - 20,
+        targetX:     CONFIG.locations.FUSHUN_SUO.x + 20,
+        targetY:     CONFIG.locations.FUSHUN_SUO.y - 20,
         role:        "Military",
         troops:      18,
         roster:      _buildRoster({ "Spearman": 70, "Archer": 30 }, 18),
@@ -437,10 +443,10 @@ var IMPORTANT_NPCS = [
         id:          "veteran_wei",
         name:        "Veteran Wei",
         faction:     CONFIG.factions.PLAYER,
-        x:           CONFIG.locations.BLACK_SAND_FORT.x - 25,
-        y:           CONFIG.locations.BLACK_SAND_FORT.y + 10,
-        targetX:     CONFIG.locations.BLACK_SAND_FORT.x - 25,
-        targetY:     CONFIG.locations.BLACK_SAND_FORT.y + 10,
+        x:           CONFIG.locations.FUSHUN_SUO.x - 25,
+        y:           CONFIG.locations.FUSHUN_SUO.y + 10,
+        targetX:     CONFIG.locations.FUSHUN_SUO.x - 25,
+        targetY:     CONFIG.locations.FUSHUN_SUO.y + 10,
         role:        "Military",
         troops:      10,
         roster:      _buildRoster({ "Archer": 60, "Spearman": 40 }, 10),
@@ -453,10 +459,10 @@ var IMPORTANT_NPCS = [
         id:          "commander_xu",
         name:        "Commander Xu",
         faction:     CONFIG.factions.PLAYER,
-        x:           CONFIG.locations.BLACK_SAND_FORT.x + 60,
-        y:           CONFIG.locations.BLACK_SAND_FORT.y + 40,
-        targetX:     CONFIG.locations.BLACK_SAND_FORT.x + 60,
-        targetY:     CONFIG.locations.BLACK_SAND_FORT.y + 40,
+        x:           CONFIG.locations.FUSHUN_SUO.x + 60,
+        y:           CONFIG.locations.FUSHUN_SUO.y + 40,
+        targetX:     CONFIG.locations.FUSHUN_SUO.x + 60,
+        targetY:     CONFIG.locations.FUSHUN_SUO.y + 40,
         role:        "Military",
         troops:      20,
         roster:      _buildRoster({ "Shielded Infantry": 60, "Spearman": 40 }, 20),
@@ -469,10 +475,10 @@ var IMPORTANT_NPCS = [
         id:          "quartermaster_du",
         name:        "Quartermaster Du",
         faction:     CONFIG.factions.PLAYER,
-        x:           CONFIG.locations.BLACK_SAND_FORT.x + 80,
-        y:           CONFIG.locations.BLACK_SAND_FORT.y + 80,
-        targetX:     CONFIG.locations.BLACK_SAND_FORT.x + 80,
-        targetY:     CONFIG.locations.BLACK_SAND_FORT.y + 80,
+        x:           CONFIG.locations.FUSHUN_SUO.x + 80,
+        y:           CONFIG.locations.FUSHUN_SUO.y + 80,
+        targetX:     CONFIG.locations.FUSHUN_SUO.x + 80,
+        targetY:     CONFIG.locations.FUSHUN_SUO.y + 80,
         role:        "Commerce",
         troops:      5,
         roster:      _buildRoster({ "Spearman": 100 }, 5),
@@ -485,10 +491,10 @@ var IMPORTANT_NPCS = [
         id:          "cook_han",
         name:        "Cook Han",
         faction:     CONFIG.factions.PLAYER,
-        x:           CONFIG.locations.BLACK_SAND_FORT.x + 100,
-        y:           CONFIG.locations.BLACK_SAND_FORT.y + 110,
-        targetX:     CONFIG.locations.BLACK_SAND_FORT.x + 100,
-        targetY:     CONFIG.locations.BLACK_SAND_FORT.y + 110,
+        x:           CONFIG.locations.FUSHUN_SUO.x + 100,
+        y:           CONFIG.locations.FUSHUN_SUO.y + 110,
+        targetX:     CONFIG.locations.FUSHUN_SUO.x + 100,
+        targetY:     CONFIG.locations.FUSHUN_SUO.y + 110,
         role:        "Civilian",
         troops:      2,
         roster:      _buildRoster({ "Spearman": 100 }, 2),
@@ -500,17 +506,17 @@ var IMPORTANT_NPCS = [
 
     // ── ON-DEMAND  (spawned by trigger actions) ──────────────────────────────
     {
-        id:          "clerk_ma",
-        name:        "Clerk Ma",
-        faction:     CONFIG.factions.PLAYER,
-        x:           CONFIG.locations.BLACK_SAND_FORT.x + 110,
-        y:           CONFIG.locations.BLACK_SAND_FORT.y + 30,
-        role:        "Commerce",
-        troops:      4,
-        roster:      _buildRoster({ "Spearman": 100 }, 4),
+        id:          "raider_probe",
+        name:        "Jianzhou Raider Probe",
+        faction:     CONFIG.factions.ENEMY,
+        x:           CONFIG.locations.FUSHUN_SUO.x,
+        y:           CONFIG.locations.FUSHUN_SUO.y - 260, // just north of the gate
+        role:        "Military",
+        troops:      7,
+        roster:      _buildRoster({ "Lancer": 60, "Horse Archer": 40 }, 7),
         rosterMode:  "hard",
-        hp: 90, gold: 200, food: 30,
-        portraitUrl: ART_PATHS.portraits["Clerk Ma"]
+        hp: 90, gold: 0, food: 0,
+        portraitUrl: ART_PATHS.portraits["Jurchen Raider"]
     },
     {
         id:          "deserter_bo",
@@ -625,7 +631,7 @@ var STORY_INTRO = {
     art:         ART_PATHS.mountain_defence,        // wall + watchtowers, opening
     art2:        ART_PATHS.everyday_life_walls,     // garrison routine, mid-intro
     art2OnLine:  4,
-    art2Caption: "Black Sand Fort. Life on the wall. 400 men on paper. 170 in fact.",
+    art2Caption: "Fushun Suo. Life on the wall. 400 men on paper. 170 in fact.",
     art3:        ART_PATHS.on_walls_watching,       // parapet at dusk, final beats
     art3OnLine:  6,
     art3Caption: "The watch fires north of the wall. Quiet. Always quiet. Until they aren't.",
@@ -660,7 +666,7 @@ var STORY_INTRO = {
 
         _line("left", "Narrator", "#d4b886", ART_PATHS.portraits["Narrator"],
             "You joined the army anyway. The wages were stable. Or so the recruiter said. " +
-            "They posted you to Black Sand Fort, a day's ride from Kaiyuan, on the wall itself. " +
+            "They posted you to Fushun Suo, a day's ride from Kaiyuan, on the wall itself. " +
             "You expected to fight Jurchens. You expected to be a hero."),
 
         _line("left", "Narrator", "#d4b886", ART_PATHS.portraits["Narrator"],
@@ -731,15 +737,15 @@ var STORY_QUESTS = [
         noAutoComplete:  true
     },
     {
-        id:              "sq3_escort_tax_clerk",
-        title:           "Escort Clerk Ma to the grain post",
-        description:     "Clerk Ma needs an escort to the Grain Tax Post. The villagers hate him.",
-        x:               CONFIG.locations.TAX_POST.x,
-        y:               CONFIG.locations.TAX_POST.y,
-        radius:          280,
+        id:              "sq3_raiders_at_gate",
+        title:           "Drive off the raiders beyond the gate",
+        description:     "A handful of Jianzhou riders are probing the wall near the gate. Captain Yu has granted you leave to pass and drive them off.",
+        x:               CONFIG.locations.FUSHUN_SUO.x,
+        y:               CONFIG.locations.FUSHUN_SUO.y - 260,
+        radius:          150,
         autoActivate:    true,
         dependsOn:       "sq3_missing_sheep",
-        triggerOnArrive: "t_tax_escort_arrive",
+        triggerOnArrive: "t_raiders_at_gate_arrive",
         noAutoComplete:  true
     },
     {
@@ -750,7 +756,7 @@ var STORY_QUESTS = [
         y:               CONFIG.locations.NORTH_BEACON.y,
         radius:          200,
         autoActivate:    true,
-        dependsOn:       "sq3_escort_tax_clerk",
+        dependsOn:       "sq3_raiders_at_gate",
         triggerOnArrive: "t_beacon_repair_arrive",
         noAutoComplete:  true
     },
@@ -770,8 +776,8 @@ var STORY_QUESTS = [
         id:              "sq3_dry_powder",
         title:           "Dry and inventory the powder magazine",
         description:     "Damp powder cakes up and won't fire. Air it out, count it, log it.",
-        x:               CONFIG.locations.HORSE_VILLAGE.x,
-        y:               CONFIG.locations.HORSE_VILLAGE.y,
+        x:               CONFIG.locations.POWDER_MAGAZINE.x,
+        y:               CONFIG.locations.POWDER_MAGAZINE.y,
         radius:          240,
         autoActivate:    true,
         dependsOn:       "sq3_catch_deserters",
@@ -834,8 +840,8 @@ var STORY_QUESTS = [
         id:              "sq3_corruption",
         title:           "Confront Commander Xu",
         description:     "The fake casualty reports trace to Commander Xu. Confront him at the fort.",
-        x:               CONFIG.locations.BLACK_SAND_FORT.x + 60,
-        y:               CONFIG.locations.BLACK_SAND_FORT.y + 40,
+        x:               CONFIG.locations.FUSHUN_SUO.x + 60,
+        y:               CONFIG.locations.FUSHUN_SUO.y + 40,
         radius:          200,
         autoActivate:    true,
         dependsOn:       "sq3_false_alarm",
@@ -858,10 +864,10 @@ var STORY_QUESTS = [
     // CHAPTER 9 — MOBILIZATION
     {
         id:              "sq3_mobilization",
-        title:           "Return to Black Sand — news from Liaoyang",
+        title:           "Return to Fushun Suo — news from Liaoyang",
         description:     "Word from Liaoyang: the frontier is moving again. Report to Captain Yu.",
-        x:               CONFIG.locations.BLACK_SAND_FORT.x,
-        y:               CONFIG.locations.BLACK_SAND_FORT.y,
+        x:               CONFIG.locations.FUSHUN_SUO.x,
+        y:               CONFIG.locations.FUSHUN_SUO.y,
         radius:          180,
         autoActivate:    true,
         dependsOn:       "sq3_real_scouts",
@@ -880,13 +886,13 @@ var TRIGGERS = [
     // ─────────────────────────────────────────────────────────────────────────
     {
         id: "t0_boot",
-        name: "Boot — arrival at Black Sand Fort",
-        enabled: true, once: true, activatedBy: "scenario_start",
-        conditions: [],
+        name: "Boot — arrival at Fushun Suo",
+        enabled: true, once: true, activatedBy: null,
+        conditions: [ { type: "scenario_start", params: {} } ],
         actions: [
             { type: "set_var", params: { name: "phase", value: "arrival" } },
-            _log("📜 1578 — You arrive at Black Sand Fort on the Liaodong frontier.", "general"),
-            _sub("Black Sand Fort — Liaodong frontier, 1578.", 6000, "#f5d76e"),
+            _log("📜 1578 — You arrive at Fushun Suo on the Liaodong frontier.", "general"),
+            _sub("Fushun Suo — Liaodong frontier, 1578.", 6000, "#f5d76e"),
             _dlg([
                 _line("right", "Captain Yu", "#b71c1c", ART_PATHS.portraits["Captain Yu"],
                     "Liu Sheng. So you're our new recruit. Good. " +
@@ -912,7 +918,7 @@ var TRIGGERS = [
         enabled: true, once: true, activatedBy: "t0_boot",
         conditions: [ { type: "custom_js", params: { code: "return false;" } } ],
         actions: [
-            { type: "show_scene_art", params: { url: ART_PATHS.everyday_life_walls, ms: 4500, caption: "Three days of shovel work. The north parapet of Black Sand Fort.", kenburns: true } },
+            { type: "show_scene_art", params: { url: ART_PATHS.everyday_life_walls, ms: 4500, caption: "Three days of shovel work. The north parapet of Fushun Suo.", kenburns: true } },
             _sub("The north parapet — three days of shovel work.", 5500, "#a89060"),
             _log("🛠️ You spend three days patching the north parapet.", "general"),
             _dlg([
@@ -960,7 +966,7 @@ var TRIGGERS = [
                     "Jurchens don't leave army-issue bootprints. " +
                     "Find your own men, soldier. They're the thieves.")
             ]),
-            _sub("You track the bootprints back toward Black Sand Fort.", 5000, "#a89060"),
+            _sub("You track the bootprints back toward Fushun Suo.", 5000, "#a89060"),
             _dlg([
                 _line("right", "Cook Han", "#5e554c", ART_PATHS.portraits["Cook Han"],
                     "All right, all right. It was us. The millet ration's been cut twice this month. " +
@@ -974,37 +980,50 @@ var TRIGGERS = [
             ]),
             { type: "set_var", params: { name: "sheep_recovered", value: 1 } },
             { type: "story_quest_complete", params: { id: "sq3_missing_sheep" } },
-            _log("🐑 You sorted the sheep business. Cook Han owes you. Captain Yu does not need to know.", "general")
+            _log("🐑 You sorted the sheep business. Cook Han owes you. Captain Yu does not need to know.", "general"),
+            _sub("A lookout calls down from the parapet — riders, just past the gate.", 5000, "#cc2200"),
+            _dlg([
+                _line("right", "Captain Yu", "#b71c1c", ART_PATHS.portraits["Captain Yu"],
+                    "Six, maybe eight. Testing us — see how fast we answer, then gone before we close " +
+                    "the distance. They do this every few weeks."),
+                _line("left", "Liu Sheng", "#ffffff", ART_PATHS.portraits["Liu Sheng"],
+                    "Let me go out after them, sir."),
+                _line("right", "Captain Yu", "#b71c1c", ART_PATHS.portraits["Captain Yu"],
+                    "...Granted. Wei — open the gate for him. " +
+                    "Liu Sheng, you have leave to pass. Drive them off and get back inside " +
+                    "before it shuts on you.")
+            ]),
+            { type: "custom_js", params: { code:
+                "if (typeof window.s3SetGateOpen === 'function') window.s3SetGateOpen(true);"
+            } },
+            _sub("The gate creaks open. The guards wave you through.", 4000, "#a89060")
         ]
     },
 
-    // Tax escort
+    // Raiders beyond the gate
     {
-        id: "t_tax_escort_arrive",
-        name: "Daily quest — escort Clerk Ma to the grain post",
+        id: "t_raiders_at_gate_arrive",
+        name: "Daily quest — drive off the raiders beyond the gate",
         enabled: true, once: true, activatedBy: "t_missing_sheep_arrive",
         conditions: [ { type: "custom_js", params: { code: "return false;" } } ],
         actions: [
-            { type: "spawn_important_npc", params: { id: "clerk_ma" } },
-            { type: "show_scene_art", params: { url: ART_PATHS.supply_caravan, ms: 4500, caption: "Supply carts and tax wagons — the lifeblood of the frontier.", kenburns: true } },
-            _sub("Grain Tax Post — escort completed. The villagers did not throw stones today.", 5500, "#a89060"),
+            { type: "spawn_important_npc", params: { id: "raider_probe" } },
+            { type: "show_scene_art", params: { url: ART_PATHS.skirmish_wall, ms: 4500, caption: "Beyond the gate — a handful of Jianzhou riders circling just out of bowshot.", kenburns: true } },
+            _sub("North of the wall — the raiders scatter as you close on them.", 5500, "#cc2200"),
             _dlg([
-                _line("right", "Clerk Ma", "#7a6840", ART_PATHS.portraits["Clerk Ma"],
-                    "Stay close. Last spring they killed my predecessor with a hoe. " +
-                    "A hoe, soldier. A farming tool. " +
-                    "I prefer the spear."),
+                _line("right", "Jurchen Raider", "#455a64", ART_PATHS.portraits["Jurchen Raider"],
+                    "..."),
                 _line("left", "Liu Sheng", "#ffffff", ART_PATHS.portraits["Liu Sheng"],
-                    "They don't like the new levies?"),
-                _line("right", "Clerk Ma", "#7a6840", ART_PATHS.portraits["Clerk Ma"],
-                    "Nobody likes the new levies. " +
-                    "I don't like the new levies. " +
-                    "But the wall doesn't eat air. The army doesn't eat air. " +
-                    "Beijing wants grain. So we take grain.")
+                    "They're not even trying to fight. They're just — watching us. Counting us.")
             ]),
-            _sub("A villager spits at Ma's feet. You step between them. Nothing more happens.", 4500, "#a89060"),
-            { type: "set_var", params: { name: "tax_escort_done", value: 1 } },
-            { type: "story_quest_complete", params: { id: "sq3_escort_tax_clerk" } },
-            _log("🪙 You escorted Clerk Ma to the grain post. He paid you in copper.", "general")
+            _sub("The riders peel off north in twos and threes, unhurried. They got what they came for: a good look.", 5000, "#a89060"),
+            { type: "custom_js", params: { code:
+                "if (typeof window.s3SetGateOpen === 'function') window.s3SetGateOpen(true);"
+            } },
+            _sub("The gate opens again to let you back inside. It shuts the moment you clear it.", 4000, "#a89060"),
+            { type: "set_var", params: { name: "raiders_driven_off", value: 1 } },
+            { type: "story_quest_complete", params: { id: "sq3_raiders_at_gate" } },
+            _log("⚔️ You drove off the probing riders. Nobody caught. Wei doesn't like how little they fought for it.", "general")
         ]
     },
 
@@ -1012,7 +1031,7 @@ var TRIGGERS = [
     {
         id: "t_beacon_repair_arrive",
         name: "Daily quest — repair the North Beacon",
-        enabled: true, once: true, activatedBy: "t_tax_escort_arrive",
+        enabled: true, once: true, activatedBy: "t_raiders_at_gate_arrive",
         conditions: [ { type: "custom_js", params: { code: "return false;" } } ],
         actions: [
             { type: "show_scene_art", params: { url: ART_PATHS.everyday_life_walls, ms: 4000, caption: "The beacon tower — rebuilt every spring with whatever the storms haven't taken.", kenburns: true } },
@@ -1073,7 +1092,7 @@ var TRIGGERS = [
         conditions: [ { type: "custom_js", params: { code: "return false;" } } ],
         actions: [
             { type: "show_scene_art", params: { url: ART_PATHS.everyday_life_walls, ms: 4500, caption: "The powder magazine — barrels laid out, mats opened, prayers said.", kenburns: true } },
-            _sub("Horse Village powder shed — the air smells like sulphur and wet rope.", 5500, "#a89060"),
+            _sub("The Powder Magazine — the air smells like sulphur and wet rope.", 5500, "#a89060"),
             _dlg([
                 _line("right", "Veteran Wei", "#c8a200", ART_PATHS.portraits["Veteran Wei"],
                     "Pull every barrel out into the sun. Open them. Spread the powder thin on the mats. " +
@@ -1196,7 +1215,7 @@ var TRIGGERS = [
                     "Picked men only — Wei, you and five others start training on them tomorrow. " +
                     "Don't drop one in the mud. It's worth more than you are.")
             ]),
-            _sub("Two Folangji swivel-guns and six matchlock arquebuses are unloaded at Black Sand Fort. Quartermaster Du complains about the cartage fee anyway.", 5500, "#a89060"),
+            _sub("Two Folangji swivel-guns and six matchlock arquebuses are unloaded at Fushun Suo. Quartermaster Du complains about the cartage fee anyway.", 5500, "#a89060"),
             { type: "set_var", params: { name: "cannon_received", value: 1 } },
             { type: "story_quest_complete", params: { id: "sq3_cannon_arrival" } },
             _log("⚙️ Two Folangji breech-loaders and six matchlocks delivered. Officer Shi attached to the fort. Field-test ordered.", "general")
@@ -1265,7 +1284,7 @@ var TRIGGERS = [
         actions: [
             { type: "show_scene_art", params: { url: ART_PATHS.on_walls_watching, ms: 5000, caption: "Three hundred men on the wall at dawn. The forest line is quiet.", kenburns: true } },
             _sub("The North Beacon is lit. Three hundred men ride through the night.", 6000, "#cc2200"),
-            _log("🚨 BEACON SIGNAL! Every man at Black Sand boots up and rides for the wall.", "general"),
+            _log("🚨 BEACON SIGNAL! Every man at Fushun Suo boots up and rides for the wall.", "general"),
             _dlg([
                 _line("right", "Captain Yu", "#b71c1c", ART_PATHS.portraits["Captain Yu"],
                     "Form on the wall. Form ON the wall. " +
@@ -1301,7 +1320,7 @@ var TRIGGERS = [
         enabled: true, once: true, activatedBy: "t_false_alarm_arrive",
         conditions: [ { type: "custom_js", params: { code: "return false;" } } ],
         actions: [
-            _sub("Black Sand Fort — you spread the ledger on Commander Xu's table.", 6000, "#a89060"),
+            _sub("Fushun Suo — you spread the ledger on Commander Xu's table.", 6000, "#a89060"),
             _dlg([
                 _line("left", "Liu Sheng", "#ffffff", ART_PATHS.portraits["Liu Sheng"],
                     "Commander. The casualty reports do not match the burial registers. " +
@@ -1332,7 +1351,18 @@ var TRIGGERS = [
             _sub("Commander Xu is recalled to Liaoyang under guard. His replacement arrives in a week.", 5500, "#a89060"),
             { type: "set_var", params: { name: "corruption_exposed", value: 1 } },
             { type: "story_quest_complete", params: { id: "sq3_corruption" } },
-            _log("📜 Commander Xu is recalled to Liaoyang. The ghost soldiers are struck from the rolls. The wages do not improve.", "general")
+            _log("📜 Commander Xu is recalled to Liaoyang. The ghost soldiers are struck from the rolls. The wages do not improve.", "general"),
+            _dlg([
+                _line("right", "Veteran Wei", "#c8a200", ART_PATHS.portraits["Veteran Wei"],
+                    "With Xu gone somebody has to actually walk the wall's flank and see what's " +
+                    "really out there. I'm going. You're coming with me."),
+                _line("right", "Captain Yu", "#b71c1c", ART_PATHS.portraits["Captain Yu"],
+                    "Granted. Open the gate for them.")
+            ]),
+            { type: "custom_js", params: { code:
+                "if (typeof window.s3SetGateOpen === 'function') window.s3SetGateOpen(true);"
+            } },
+            _sub("The gate opens onto the forest frontier. Wei is already moving.", 4000, "#a89060")
         ]
     },
 
@@ -1425,7 +1455,7 @@ var TRIGGERS = [
         conditions: [ { type: "custom_js", params: { code: "return false;" } } ],
         actions: [
             { type: "show_scene_art", params: { url: ART_PATHS.mountain_defence, ms: 5500, caption: "1578 — Word arrives from Liaoyang. The frontier is being reinforced.", kenburns: true } },
-            _sub("Black Sand Fort — Captain Yu reads a courier's scroll, then reads it again.", 6500, "#cc2200"),
+            _sub("Fushun Suo — Captain Yu reads a courier's scroll, then reads it again.", 6500, "#cc2200"),
             _log("📜 1578 — Word from Liaoyang. The northern command is mobilising every garrison.", "general"),
             _dlg([
                 _line("right", "Captain Yu", "#b71c1c", ART_PATHS.portraits["Captain Yu"],

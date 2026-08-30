@@ -2700,15 +2700,30 @@ function _computeFixedSpacingPreviewSlots(count, sx, sy, ex, ey, spacingX, spaci
 // principle as computeDragGridSlots already followed for the plain
 // default case, just extended to the other rememberable shapes.
 // Coordinates are in whatever space the caller passes (screen px for both
-// current callers). `depth` (window._mc3FormationDepth) is ONLY meaningful
-// for the final default/"dragGrid" fallback below — none of the five named
-// styles (tight/standard/line/circle/square) read it in the real
-// calculateFormationOffsets, so none of them read it here either; circle/
-// square instead derive a sensible ring count from unit count alone
-// (the real case's exact cavalry-ratio nuance needs actual unit role data
-// this preview doesn't have — close enough for a preview), and
-// tight/standard/line use a fixed column cap instead (see
-// _computeFixedSpacingPreviewSlots above).
+// current callers).
+//
+// BUG FIX ("MOMENT I PRESS THSES BUTTONS... UNITS BLUE ARROWS ARE STUCK TO
+// 1 SINGLE LINE FOR ANY OF THESE THREE BUTTONS WHEN SELECTED" — direct
+// report, reproduced with TIGHT/STANDARD/LOOSE highlighted yellow, i.e.
+// actively remembered as the drag's style): this function's own comment
+// used to claim "none of the five named styles read depth in the real
+// calculateFormationOffsets, so none of them read it here either" — that
+// was accurate when written, but calculateFormationOffsets was fixed in a
+// separate session to genuinely solve column count FROM the requested
+// depth for tight/standard/line (see that function's own depthCols()
+// helper) — this preview was never updated to match, so it kept using
+// each style's ORIGINAL fixed maxCols (tight=30, standard=20, line=40)
+// no matter what DEPTH showed. A small selection (say 8 units) against a
+// 30-column cap always resolves to cols=8, i.e. every unit in one row —
+// exactly the reported "stuck to 1 single line," and completely
+// unaffected by clicking the DEPTH button, exactly as reported. Mirrors
+// the same inversion depthCols() uses in calculateFormationOffsets:
+// solve maxCols backward from the requested row count instead of using
+// the style's fixed cap directly, so the live preview always matches
+// what committing the drag will actually produce. Circle/square still
+// don't take a depth argument here (matching calculateFormationOffsets,
+// which also never reads it for those two — confirmed unrelated to this
+// bug, ring/blob count there is unit-count-driven by design).
 function computeFormationPreviewSlots(count, sx, sy, ex, ey, depth, style) {
     if (style === "circle" || style === "square") {
         const anchor = { x: (sx + ex) / 2, y: (sy + ey) / 2 };
@@ -2728,8 +2743,16 @@ function computeFormationPreviewSlots(count, sx, sy, ex, ey, depth, style) {
             standard: { x: 36, y: 30, maxCols: 20 },
             line:     { x: 60, y: 48, maxCols: 40 } // "Loose" in the UI
         }[style];
+        // Same inversion as calculateFormationOffsets' depthCols(): solve
+        // maxCols BACKWARD from the requested depth (rows) instead of
+        // using the style's fixed cap directly, capped at that original
+        // cap as an upper bound (an extreme depth-1 request still can't
+        // blow past how wide this formation's spacing was tuned to look).
+        const _previewReqDepth = (typeof depth === 'number' && depth >= 1) ? depth : 2;
+        const previewCols = (count <= 0) ? SPACING.maxCols
+            : Math.min(SPACING.maxCols, Math.max(1, Math.ceil(count / _previewReqDepth)));
         return _computeFixedSpacingPreviewSlots(count, sx, sy, ex, ey,
-            SPACING.x, SPACING.y, SPACING.maxCols);
+            SPACING.x, SPACING.y, previewCols);
     }
     // default / "dragGrid" (no shared style) — the ONLY case that actually
     // reads the depth toggle, unchanged original math via the existing
@@ -3333,35 +3356,79 @@ function calculateFormationOffsets(units, style, centerPoint, angleOverride, lin
             if (forceUnifiedShape) {
                 assignRing(units, Math.max(70, units.length * 5));
             } else {
-                let nonLarge = [...shields, ...infantry, ...ranged, ...gunpowder];
+                // FIX ("ranged units advance very close to almost melee" —
+                // direct request: "ranged units in hold ai should NEVER
+                // move except to form the circle/square... not for self
+                // defence"): the cause wasn't a self-defense chase —
+                // hold_position's own combat code already roots a unit in
+                // place once formed (ai_categories.js's "NEVER CHARGE,
+                // NEVER RETREAT" block, unconditional for any
+                // hold_position unit regardless of range/target). It's that
+                // this formation never gave ranged units anywhere safe to
+                // stand in the first place: melee/ranged/gunpowder used to
+                // all land on ONE shared ring (nonLarge =
+                // shields+infantry+ranged+gunpowder, a single assignRing
+                // call) — a "holding" ranged unit's assigned slot was
+                // already shoulder-to-shoulder with melee on the exact same
+                // radius, not protected behind it. Split into a melee ring
+                // (outer, facing the threat) and a smaller ranged ring
+                // nested just inside it — the classic protected-infantry-
+                // circle shape, and the actual reason ranged units never
+                // need to move again once formed: nothing reaches them
+                // without going through the melee ring first.
+                let meleeRing  = [...shields, ...infantry];
+                let rangedRing = [...ranged, ...gunpowder];
                 if (units.length <= 12) {
                     largeUnits.forEach(u => {
                         u.formationOffsetX = (Math.random() - 0.5) * 15;
                         u.formationOffsetY = (Math.random() - 0.5) * 15;
                     });
-                    assignRing(nonLarge, Math.max(50, units.length * 8));
+                    let meleeRadius = Math.max(50, units.length * 8);
+                    assignRing(meleeRing, meleeRadius);
+                    // Nested just inside the melee ring — falls back to the
+                    // old shared radius if there's no melee to hide behind
+                    // (a pure ranged/cav selection has nothing to nest
+                    // inside of).
+                    assignRing(rangedRing, meleeRing.length ? Math.max(28, meleeRadius * 0.55) : meleeRadius);
                 } else {
-                    let innerRadius = Math.max(60, nonLarge.length * 3.5);
-                    assignRing(nonLarge, innerRadius);
+                    let rangedRadius = Math.max(40, rangedRing.length * 4.5);
+                    assignRing(rangedRing, rangedRadius);
+                    let meleeRadius = rangedRadius + 45 + (meleeRing.length * 1.5);
+                    assignRing(meleeRing, meleeRadius);
                     if (largeUnits.length > 0) {
-                        let outerRadius = innerRadius + 60 + (largeUnits.length * 1.5);
+                        let outerRadius = meleeRadius + 60 + (largeUnits.length * 1.5);
                         assignRing(largeUnits, outerRadius);
                     }
                 }
             }
             break;
 case "square":
-            // SURGERY: Simplified Blob. No sorting or extra arrays.
+            // FIX (same "ranged units end up right next to melee" bug as
+            // circle above): this used to be a flat, unsorted blob — "No
+            // sorting or extra arrays" — so a ranged unit could land
+            // anywhere in the grid, including the very front-center cell.
+            // Now cells are ordered by ring distance from the block's own
+            // edge (ringDist 0 = outer perimeter), and melee/shields/
+            // cavalry/large units fill those outer rings first; ranged/
+            // gunpowder only ever get whatever's left, which — since melee
+            // fills outer-in — is always the innermost cells still
+            // available. Same protected-center idea as the circle fix,
+            // square-grid shaped instead of ring-shaped.
             const sideSize = Math.ceil(Math.sqrt(units.length));
-            const spacing =30; // Personal spacing
-            
-            units.forEach((u, i) => {
-                const col = i % sideSize;
-                const row = Math.floor(i / sideSize);
-                
+            const spacing = 30; // Personal spacing
+            const _cells = [];
+            for (let row = 0; row < sideSize; row++) {
+                for (let col = 0; col < sideSize; col++) {
+                    _cells.push({ row, col, ringDist: Math.min(row, col, sideSize - 1 - row, sideSize - 1 - col) });
+                }
+            }
+            _cells.sort((a, b) => a.ringDist - b.ringDist); // outermost ring first
+            const _squareOrder = [...shields, ...infantry, ...cavalry, ...largeUnits, ...ranged, ...gunpowder];
+            _squareOrder.forEach((u, i) => {
+                const cell = _cells[i] || _cells[_cells.length - 1];
                 // Center the blob and add high jitter (20) for the "blob" look
-                u.formationOffsetX = (col - sideSize / 2) * spacing + (Math.random() - 0.5) * 20;
-                u.formationOffsetY = (row - sideSize / 2) * spacing + (Math.random() - 0.5) * 20;
+                u.formationOffsetX = (cell.col - sideSize / 2) * spacing + (Math.random() - 0.5) * 20;
+                u.formationOffsetY = (cell.row - sideSize / 2) * spacing + (Math.random() - 0.5) * 20;
             });
             break;
 

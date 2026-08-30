@@ -482,6 +482,26 @@ leaveBattlefield = function(playerObj) {
         return;
     }
 
+    // --- NAVAL EXPLORATION GUARD ---
+    // Same shape as the Survival guard directly above. This override's
+    // campaign bookkeeping (roster rebuild, eSurvivors.length===0 "victory",
+    // permadeath odds) assumes a persistent campaign roster and a battle with
+    // a real win/lose condition, neither of which apply to an open-ended
+    // voyage. Naval Exploration owns its own end-of-voyage flow entirely
+    // (naval_exploration.js's _endExploration / naval_exploration_menu.js's
+    // results screen) — this guard exists purely as a defensive backstop in
+    // case something calls the bare `leaveBattlefield`/`window.leaveBattlefield`
+    // identifier during a voyage from a code path this mode doesn't already
+    // intercept itself (its own P-key and Return-to-Port handling call
+    // NavalExplorationMode.endVoyage() directly and never reach this file at
+    // all under normal play).
+    if (window.__IS_NAVAL_EXPLORATION__) {
+        if (typeof window.NavalExplorationMode !== 'undefined' && window.NavalExplorationMode) {
+            window.NavalExplorationMode.endVoyage();
+        }
+        return;
+    }
+
     // Always tear down the Lazy General AI heartbeat when leaving the battlefield.
     // (Idempotent — safe even if the custom-battle branch below also runs the
     // original leaveBattlefield, which stops it again via battlefield_logic.js.)

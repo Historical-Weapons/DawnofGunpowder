@@ -1,38 +1,3 @@
-// =============================================================================
-// SESSION CHANGELOG (for fusion with the other diverging Story 3 session)
-// =============================================================================
-//   - CustomLocationsSystem (non-city military points of interest — barracks/
-//     storage/stables/watchtower/garrison/maintenance) reworked so the WORLD
-//     and MECHANICS come from city_system.js, and camp_system.js supplies
-//     only the cosmetics (hero-building sprites, decorations, per-kind
-//     worker rosters). Concretely:
-//       - Interior world resized to city_system.js's actual footprint
-//         (CITY_WORLD_WIDTH/HEIGHT/LOGICAL_HEIGHT) instead of a bespoke
-//         1000x800 camp canvas.
-//       - Collision is now a real tile grid (LE.grid), same technique as
-//         isCityCollision, built from the cosmetic layout — replacing a
-//         single hardcoded bounding box.
-//       - Exit now matches city mode exactly: "P" key or walking off the
-//         south edge. The old dedicated bottom-left "Leave" button is gone.
-//       - Entrance uses the same triggerEpicZoom transition city mode uses.
-//       - The Enter prompt button is centered on the x-axis at the bottom
-//         instead of bottom-left.
-//       - Worker NPCs are no longer static — each patrols a leash radius
-//         around its post using the same grid collision the player uses.
-//       - NPCs are now talkable: a self-contained Talk button/E-key bark
-//         system (_WORKER_BARKS) is the guaranteed-working layer. There is
-//         ALSO a best-effort hook into the real window.cityDialogueSystem /
-//         window.cityCosmeticNPCs (the same objects city_system.js itself
-//         drives) — that file was NOT part of this session's uploads, so
-//         verify field names/behavior line up once it's available.
-//   - Fixed: sandboxmode_update.js's main update() had no branch for
-//     window.inCustomLocationMode, so it fell through to the OVERWORLD
-//     branch every frame underneath this system's own tick — see that
-//     file's own changelog note.
-//   - All of the above is shared engine/mechanics work, not Story-3-specific
-//     narrative — nothing here conflicts with either Story 3 continuation.
-// =============================================================================
-
 // ============================================================================
 // DAWN OF GUNPOWDER — MEDIEVAL ASIAN ENCAMPMENT SYSTEM  v2.0
 // camp_system.js  |  Full rewrite — all bugs fixed, ambush system, expanded camps
@@ -3136,15 +3101,6 @@ window.campApplyBattleOutcome = window.campApplyBattleOutcome;
 
 
 
-
-
-
-
-
-
-
-
-
 // ============================================================================
 // DAWN OF GUNPOWDER — CUSTOM (NON-CITY) MILITARY LOCATIONS SYSTEM  v1.0
 // custom_locations_system.js
@@ -3191,22 +3147,12 @@ if (window.CustomLocationsSystem) {
 window.CustomLocationsSystem = { VERSION: "1.0.0" };
 
 // ─── CONSTANTS ───────────────────────────────────────────────────────────────
-// Interior world now matches city_system.js's own footprint (CITY_WORLD_WIDTH /
-// CITY_WORLD_HEIGHT / CITY_LOGICAL_HEIGHT — top-level consts declared in
-// city_system.js, which index.html loads before this file) instead of a small
-// bespoke camp-style canvas. CITY_LOGICAL_HEIGHT is the "real" usable area;
-// the remaining strip down to CITY_WORLD_HEIGHT is the same south exit /
-// deployment runway city mode uses to walk back out onto the overworld — see
-// the south-edge check in _locTick(). Only the WORLD SIZE and exit mechanics
-// are borrowed from city mode here — the interior itself is still dressed
-// with camp_system's own props/hero-buildings per location kind below.
-const LOC_W         = (typeof CITY_WORLD_WIDTH    !== 'undefined') ? CITY_WORLD_WIDTH    : 3200;
-const LOC_H         = (typeof CITY_WORLD_HEIGHT   !== 'undefined') ? CITY_WORLD_HEIGHT   : 4000;
-const LOC_LOGICAL_H = (typeof CITY_LOGICAL_HEIGHT !== 'undefined') ? CITY_LOGICAL_HEIGHT : 3200;
-const LOC_CX        = LOC_W / 2;
-const LOC_CY        = LOC_LOGICAL_H / 2;
-const VIS_RADIUS    = 900;
-const ENTER_RADIUS  = 46;    // overworld px — how close the player must be for the Enter prompt (unchanged)
+const LOC_W        = 1000;
+const LOC_H        = 800;
+const LOC_CX       = 500;
+const LOC_CY       = 460;
+const VIS_RADIUS   = 700;
+const ENTER_RADIUS = 46;    // overworld px — how close the player must be for the Enter prompt
 
 // ─── LOCATION KIND REGISTRY ───────────────────────────────────────────────────
 // `hero` draws the one big identifying structure (used for BOTH the overworld
@@ -3269,10 +3215,6 @@ let LE = {
     savedWorldX: 0, savedWorldY: 0,
     entering:    false, enterProg: 0,
     leaving:     false, leaveProg: 0,
-    // NPC talk/interaction state — see _WORKER_BARKS / _talkToNearest below.
-    nearestWorker: null,
-    talkTarget:  null, talkText: "", talkUntil: 0, talkCooldown: {},
-    _dialogueKey: null, // set by _registerCityDialogueNPCs when active
 };
 window._CUSTOM_LOC_ENGINE = LE;
 
@@ -3798,13 +3740,11 @@ function _buildInteriorBg(kindKey, col) {
     c.fillStyle = grad; c.fillRect(0, 0, LOC_W, LOC_H);
 
     if (mp) {
-        // Density bumped up from the old 1000×800 camp canvas to keep the
-        // ground from reading as empty now that the world is city-sized.
-        for (let i = 0; i < 280; i++) mp.drawDirtPatch(c, Math.random() * LOC_W, Math.random() * LOC_LOGICAL_H, 4 + Math.random() * 14, ground);
-        for (let i = 0; i < 360; i++) mp.drawGrassTuft(c, Math.random() * LOC_W, Math.random() * LOC_LOGICAL_H, ground);
-        for (let i = 0; i < 70; i++) mp.drawStones(c, Math.random() * LOC_W, Math.random() * LOC_LOGICAL_H);
+        for (let i = 0; i < 120; i++) mp.drawDirtPatch(c, Math.random() * LOC_W, Math.random() * LOC_H, 4 + Math.random() * 14, ground);
+        for (let i = 0; i < 160; i++) mp.drawGrassTuft(c, Math.random() * LOC_W, Math.random() * LOC_H, ground);
+        for (let i = 0; i < 30; i++) mp.drawStones(c, Math.random() * LOC_W, Math.random() * LOC_H);
         // Perimeter trees for a "this is a real place in the world" frame
-        for (let i = 0; i < 28; i++) {
+        for (let i = 0; i < 14; i++) {
             const a = Math.random() * Math.PI * 2, r = LOC_W * 0.46 + Math.random() * 60;
             const px = LOC_CX + Math.cos(a) * r, py = LOC_CY + Math.sin(a) * r * 0.55;
             if (px > 10 && px < LOC_W - 10 && py > 10 && py < LOC_H - 10) {
@@ -3831,214 +3771,21 @@ function _buildInteriorBg(kindKey, col) {
 }
 
 // ─── COLLISION ────────────────────────────────────────────────────────────────
-// Tile-grid collision — the SAME technique city_system.js's isCityCollision
-// uses (a blocked/walkable tile grid built once, then looked up per-move),
-// rather than a single hardcoded bounding box. camp_system.js's job is only
-// to decide WHICH tiles are blocked (from the cosmetic layout — the hero
-// building's footprint) and how they look; the lookup mechanism itself
-// mirrors city mode's. See _buildLocationGrid().
-const LOC_TILE = (typeof CITY_TILE_SIZE !== 'undefined') ? CITY_TILE_SIZE : 8;
-
-function _buildLocationGrid() {
-    const cols = Math.ceil(LOC_W / LOC_TILE);
-    const rows = Math.ceil(LOC_H / LOC_TILE);
-    const grid = new Uint8Array(cols * rows); // 0 = walkable, 1 = blocked
-    const marginTiles = Math.ceil(24 / LOC_TILE);
-
-    // Border — left/right/top only. The south border is deliberately left
-    // walkable: it's the exit runway (mirrors city mode's south-edge walk-off
-    // exit — see _locTick), not a wall.
-    for (let gy = 0; gy < rows; gy++) {
-        for (let gx = 0; gx < cols; gx++) {
-            if (gx < marginTiles || gx >= cols - marginTiles || gy < marginTiles) {
-                grid[gy * cols + gx] = 1;
-            }
-        }
-    }
-
-    // Hero building footprint (the one cosmetic structure every kind places)
-    const heroD = LE.decos.find((d) => d.kind === "hero");
-    if (heroD) {
-        const x0 = Math.max(0, Math.floor((heroD.x - 44) / LOC_TILE));
-        const x1 = Math.min(cols - 1, Math.floor((heroD.x + 44) / LOC_TILE));
-        const y0 = Math.max(0, Math.floor((heroD.y - 26) / LOC_TILE));
-        const y1 = Math.min(rows - 1, Math.floor((heroD.y + 26) / LOC_TILE));
-        for (let gy = y0; gy <= y1; gy++) {
-            for (let gx = x0; gx <= x1; gx++) grid[gy * cols + gx] = 1;
-        }
-    }
-
-    LE.grid = grid; LE.gridCols = cols; LE.gridRows = rows;
-}
-
-function _locGridBlocked(px, py) {
-    if (!LE.grid) return false;
-    const gx = Math.floor(px / LOC_TILE), gy = Math.floor(py / LOC_TILE);
-    if (gx < 0 || gy < 0 || gx >= LE.gridCols || gy >= LE.gridRows) return true;
-    return LE.grid[gy * LE.gridCols + gx] === 1;
-}
-
 function _locCollision(nx, ny) {
-    return _locGridBlocked(nx, ny);
+    const margin = 24;
+    if (nx < margin || nx > LOC_W - margin || ny < margin || ny > LOC_H - margin) return true;
+    // Block the hero building's footprint
+    const heroD = LE.decos.find((d) => d.kind === "hero");
+    if (heroD && Math.abs(nx - heroD.x) < 44 && Math.abs(ny - heroD.y) < 26) return true;
+    return false;
 }
 
-// ─── WORKER AI — alive, wandering NPCs ─────────────────────────────────────────
-// Each worker patrols a small leash radius around the spot the interior
-// layout placed them (their "post"), pausing between walks. Movement checks
-// LE.grid via _locGridBlocked — the same collision check the player uses —
-// so they respect the hero building's footprint and the location bounds
-// exactly like a city's cosmetic NPCs respect isCityCollision.
-function _initWorkerAI() {
-    LE.workers.forEach((w) => {
-        w.homeX = w.x; w.homeY = w.y;
-        w.state = "idle";
-        w.pauseUntil = 0;
-        w.leash = 90;
-        w.speed = 0.5 + Math.random() * 0.4;
-        w.moving = false;
-        w.dir = 1;
-    });
-}
-
-function _locFindWanderTarget(w) {
-    for (let attempt = 0; attempt < 6; attempt++) {
-        const ang  = Math.random() * Math.PI * 2;
-        const dist = 20 + Math.random() * w.leash;
-        const tx = w.homeX + Math.cos(ang) * dist;
-        const ty = w.homeY + Math.sin(ang) * dist;
-        if (!_locGridBlocked(tx, ty)) return { tx, ty };
-    }
-    return { tx: w.homeX, ty: w.homeY };
-}
-
-function _locTickWorkers() {
-    const now = (typeof performance !== "undefined") ? performance.now() : Date.now();
-    LE.workers.forEach((w) => {
-        if (w.state === "idle") {
-            w.moving = false;
-            if (now >= w.pauseUntil) {
-                const t = _locFindWanderTarget(w);
-                w.tx = t.tx; w.ty = t.ty;
-                w.state = "walking";
-            }
-        } else {
-            const dx = w.tx - w.x, dy = w.ty - w.y;
-            const dist = Math.hypot(dx, dy);
-            if (dist < 3) {
-                w.state = "idle";
-                w.moving = false;
-                w.pauseUntil = now + 1500 + Math.random() * 3000;
-            } else {
-                const step = Math.min(w.speed, dist);
-                const nx = w.x + (dx / dist) * step;
-                const ny = w.y + (dy / dist) * step;
-                if (!_locGridBlocked(nx, ny)) {
-                    w.x = nx; w.y = ny;
-                    w.dir = dx > 0 ? 1 : -1;
-                    w.moving = true;
-                } else {
-                    // Blocked mid-walk — give up gracefully rather than
-                    // shove through the wall.
-                    w.state = "idle";
-                    w.moving = false;
-                    w.pauseUntil = now + 800 + Math.random() * 1500;
-                }
-            }
-        }
-        w.anim += w.moving ? 1 : 0.25;
-    });
-}
-
-// ─── NPC TALK / DIALOGUE ────────────────────────────────────────────────────
-// Two layers, in order of preference:
-//   1. The REAL city dialogue system (cityDialogueSystem / cityCosmeticNPCs),
-//      the same one city_system.js drives — see the guarded hook in
-//      _locTick()/_locRender() below. That system's actual implementation is
-//      NOT part of this file (it lives elsewhere in the project and wasn't
-//      included in what was uploaded this session), so this hook is
-//      best-effort: it registers each worker into window.cityCosmeticNPCs
-//      under a synthetic per-location faction key and calls
-//      tryAutoCityContact/cityDialogueUpdate/cityDialogueRender exactly the
-//      way city_system.js does. IF cityDialogueSystem's real NPC objects
-//      need fields beyond what's set here (x/y/role/name/faction), or if it
-//      expects `role` to be one of its own movement-behavior enum values
-//      rather than a troop-type like "spearman", this layer may no-op rather
-//      than error — that's intentional (guarded) but means it should be
-//      verified once this is fused with whatever session/file actually
-//      defines cityDialogueSystem.
-//   2. A small self-contained fallback (_talkToNearest/_WORKER_BARKS below)
-//      that ALWAYS works regardless of #1 — walk up to a worker, tap Talk
-//      (or press E), get a short flavor line. This is the guaranteed layer.
-const _WORKER_BARKS = {
-    spearman:     ["Feet together, spear straight — sergeant's words, not mine.",
-                   "Drills every morning. My arms hate this posting.",
-                   "Quiet week. I'll take it."],
-    sword_shield: ["Shield's heavier than it looks. You get used to it.",
-                   "Edge's dull. Needs a stone. Everything needs a stone out here."],
-    archer:       ["Wind's tricky up here. Takes a season to read it right.",
-                   "String's damp again. Second time this week.",
-                   "Can see clean to the tree line from up top. Nothing moving today."],
-    crossbow:     ["Loads slower than a bow, hits harder. Trade-off.",
-                   "Cleaned this twice today. Sand gets into everything."],
-    peasant:      ["Just keeping the place standing. Someone has to.",
-                   "Pay's late again. Pay's always late.",
-                   "Long way from home. Not much choice in it, though."],
-};
-
-function _pickBark(role) {
-    const lines = _WORKER_BARKS[role] || _WORKER_BARKS.peasant;
-    // Avoid repeating the same line twice in a row for this worker.
-    const last = LE.talkCooldown[role];
-    let idx = Math.floor(Math.random() * lines.length);
-    if (lines.length > 1 && idx === last) idx = (idx + 1) % lines.length;
-    LE.talkCooldown[role] = idx;
-    return lines[idx];
-}
-
-const TALK_RADIUS = 46;
-
-function _findNearestWorker(px, py, maxDist) {
-    let best = null, bestDist = maxDist;
-    LE.workers.forEach((w) => {
-        const d = Math.hypot(w.x - px, w.y - py);
-        if (d <= bestDist) { best = w; bestDist = d; }
-    });
-    return best;
-}
-
-function _talkToNearest() {
-    if (!LE.nearestWorker) return;
-    const w = LE.nearestWorker;
-    LE.talkTarget = w;
-    LE.talkText = _pickBark(w.role);
-    LE.talkUntil = ((typeof performance !== "undefined") ? performance.now() : Date.now()) + 3500;
-}
-
-// Best-effort real-system hook (layer #1 above). Registers this location's
-// workers into the same window.cityCosmeticNPCs registry city_system.js's
-// own pedestrians live in, under a synthetic key so it can never collide
-// with a real faction's roster. If cityDialogueSystem/cityCosmeticNPCs
-// aren't loaded, both functions are no-ops.
-function _registerCityDialogueNPCs() {
-    if (typeof cityCosmeticNPCs === "undefined") return;
-    LE._dialogueKey = "__customLocation_" + (LE.kind || "unknown") + "_" + Date.now();
-    cityCosmeticNPCs[LE._dialogueKey] = LE.workers.map((w) => ({
-        x: w.x, y: w.y, role: w.role, name: w.role, faction: LE._dialogueKey,
-        dialogueLines: _WORKER_BARKS[w.role] || _WORKER_BARKS.peasant,
-        isKid: false, isParent: false,
-    }));
-}
-function _unregisterCityDialogueNPCs() {
-    if (typeof cityCosmeticNPCs === "undefined" || !LE._dialogueKey) return;
-    delete cityCosmeticNPCs[LE._dialogueKey];
-    LE._dialogueKey = null;
-}
-
-
+// ─── STATIC WORKERS (idle, no wander AI — just alive-feeling) ─────────────────
 function _drawWorkers(ctx) {
     LE.workers.forEach((w) => {
+        w.anim++;
         if (typeof drawInfantryUnit === "function") {
-            drawInfantryUnit(ctx, w.x, w.y, !!w.moving, w.anim, LE.colors.primary, w.role,
+            drawInfantryUnit(ctx, w.x, w.y, false, w.anim, LE.colors.primary, w.role,
                 false, "player", "", false, 100, 0, w, 0);
         } else {
             ctx.save(); ctx.translate(w.x, w.y);
@@ -4071,16 +3818,6 @@ function _locTick() {
     if (typeof player === "undefined") return;
 
     if (!LE.entering && !LE.leaving) {
-        // ── EXIT — identical controls to city mode: the "P"/return key, or
-        // walking south off the edge into the exit runway. Replaces the old
-        // dedicated bottom-left "🚪 LEAVE" button — there is no longer a
-        // custom exit button, just the same return control city mode uses.
-        if (typeof keys !== "undefined" && keys["p"]) {
-            keys["p"] = false;
-            window.leaveCustomLocation();
-            return;
-        }
-
         const speed = 2.5;
         let dx = 0, dy = 0;
         if (typeof keys !== "undefined") {
@@ -4091,9 +3828,6 @@ function _locTick() {
         }
         if (dx || dy) {
             const nx = player.x + dx, ny = player.y + dy;
-            // Mirrors city_system.js's enterCity: crossing into the south
-            // runway leaves immediately instead of colliding with anything.
-            if (ny >= LOC_H - 5) { window.leaveCustomLocation(); return; }
             if (!_locCollision(nx, player.y)) player.x = nx;
             if (!_locCollision(player.x, ny)) player.y = ny;
             if (dx !== 0) player.direction = dx > 0 ? 1 : -1;
@@ -4101,29 +3835,6 @@ function _locTick() {
             player.anim = (player.anim || 0) + 1;
         } else {
             player.isMoving = false;
-        }
-
-        // Workers keep patrolling their post even while the player stands
-        // still — this is what makes the place feel inhabited rather than
-        // a diorama.
-        _locTickWorkers();
-
-        // NPC talk — self-contained layer (always works): find whoever's in
-        // range, show/hide the Talk prompt, handle the "E" shortcut.
-        LE.nearestWorker = _findNearestWorker(player.x, player.y, TALK_RADIUS);
-        _updateTalkPrompt();
-        if (typeof keys !== "undefined" && keys["e"] && LE.nearestWorker) {
-            keys["e"] = false;
-            _talkToNearest();
-        }
-
-        // Real city dialogue system — best-effort layer, see the comment
-        // above _WORKER_BARKS. No-ops safely if that global isn't loaded.
-        if (typeof cityDialogueSystem !== "undefined" && LE._dialogueKey) {
-            if (typeof cityDialogueSystem.tryAutoCityContact === "function") {
-                cityDialogueSystem.tryAutoCityContact(player, LE._dialogueKey, { radius: 22 });
-            }
-            if (typeof cityDialogueUpdate === "function") cityDialogueUpdate();
         }
     }
 
@@ -4168,28 +3879,6 @@ function _locRender() {
     _drawWorkers(ctx);
     _drawLocPlayer(ctx);
 
-    // Self-contained talk bubble — the guaranteed-to-work layer. Drawn in
-    // world space (same transform as the workers above) so it tracks the
-    // speaking NPC as they wander.
-    const _now = (typeof performance !== "undefined") ? performance.now() : Date.now();
-    if (LE.talkTarget && _now < LE.talkUntil) {
-        const t = LE.talkTarget;
-        ctx.save();
-        ctx.font = "9px Georgia"; ctx.textAlign = "center";
-        const bw = Math.min(180, 24 + ctx.measureText(LE.talkText).width);
-        ctx.fillStyle = "rgba(20,14,8,0.85)";
-        ctx.fillRect(t.x - bw / 2, t.y - 54, bw, 22);
-        ctx.fillStyle = "#f5e8c8";
-        // Simple word-wrap-free fit — bubble width above already sized to text.
-        ctx.fillText(LE.talkText, t.x, t.y - 39, bw - 8);
-        ctx.restore();
-    }
-
-    // Real city dialogue system render — best-effort, see _WORKER_BARKS note.
-    if (typeof cityDialogueSystem !== "undefined" && LE._dialogueKey && typeof cityDialogueRender === "function") {
-        cityDialogueRender(ctx);
-    }
-
     ctx.restore();
 
     // Vignette
@@ -4205,17 +3894,6 @@ function _locRender() {
     ctx.fillRect(5, 5, bw, 22);
     ctx.fillStyle = "#ffca28"; ctx.font = "bold 9px Georgia"; ctx.textAlign = "left";
     ctx.fillText(label, 9, 18);
-    ctx.restore();
-
-    // Leave hint — same "P / ↩️" return control convention used everywhere
-    // else in the game (city mode, battle mode), since there's no dedicated
-    // leave button here anymore.
-    ctx.save();
-    ctx.font = "bold 9px Georgia"; ctx.textAlign = "center";
-    ctx.fillStyle = "#000"; ctx.globalAlpha = 0.5;
-    ctx.fillText("Press [P] or ↩️ to return to the Overworld.", cw / 2 + 1, ch - 15);
-    ctx.globalAlpha = 1; ctx.fillStyle = "#f5e8c8";
-    ctx.fillText("Press [P] or ↩️ to return to the Overworld.", cw / 2, ch - 16);
     ctx.restore();
 
     // Enter/leave fade
@@ -4248,9 +3926,6 @@ window.enterCustomLocation = function (loc) {
     LE.leaving  = false; LE.leaveProg = 0;
 
     meta.interior(LE.colors.primary);
-    _buildLocationGrid();
-    _initWorkerAI();
-    _registerCityDialogueNPCs();
     LE.bgCanvas = _buildInteriorBg(loc.kind, LE.colors.primary);
 
     LE.savedWorldX = player.x;
@@ -4261,12 +3936,7 @@ window.enterCustomLocation = function (loc) {
     LE.camX = player.x; LE.camY = player.y;
 
     _hideEnterPrompt();
-
-    // Same entrance transition city mode uses — 0.3x → 1.2x zoom over
-    // 1.2s — so a location entrance actually feels like a city entrance.
-    if (typeof triggerEpicZoom === "function") {
-        triggerEpicZoom(0.3, 1.2, 1200);
-    }
+    _showLeaveButton(meta.label);
 
     window.inCustomLocationMode = true;
     _logEvent(`Entered ${loc.name} (${meta.label}).`);
@@ -4284,10 +3954,8 @@ function _finishLeave() {
         player.x = LE.savedWorldX;
         player.y = LE.savedWorldY;
     }
+    _hideLeaveButton();
     LE.active = null; LE.kind = null;
-    LE.nearestWorker = null; LE.talkTarget = null; LE.talkText = ""; LE.talkUntil = 0;
-    _hideTalkPrompt();
-    _unregisterCityDialogueNPCs();
     _logEvent("Left the location.");
 }
 
@@ -4341,16 +4009,11 @@ window.updateCustomLocationProximity = function () {
 };
 
 // ─── UI ───────────────────────────────────────────────────────────────────────
-// NOTE: there is deliberately no dedicated "leave" button here anymore.
-// Exit uses the same return control as city mode — the "P" key, or walking
-// off the south edge — see _locTick(). Nothing else to build for that.
 function _buildLocationUI() {
     if (!document.getElementById("cl-enter-wrapper")) {
         const wrap = document.createElement("div");
         wrap.id = "cl-enter-wrapper";
-        // Centered on the x-axis, flush to the bottom — matches where the
-        // rest of the game's primary bottom action button sits.
-        wrap.style.cssText = "position:fixed;bottom:24px;left:50%;transform:translateX(-50%);z-index:15;display:none;flex-direction:column;align-items:center;gap:6px;pointer-events:auto;";
+        wrap.style.cssText = "position:fixed;bottom:24px;left:16px;z-index:15;display:none;flex-direction:column;align-items:flex-start;gap:6px;pointer-events:auto;";
         const btn = document.createElement("button");
         btn.id = "cl-enter-btn";
         btn.className = "menu-btn";
@@ -4359,22 +4022,18 @@ function _buildLocationUI() {
         wrap.appendChild(btn);
         document.body.appendChild(wrap);
     }
-    // Talk prompt — only relevant once inside a location, so it sits at the
-    // same bottom-center spot the Enter button uses (the two are never
-    // shown at the same time: Enter only shows in the overworld approach,
-    // Talk only shows once inCustomLocationMode is true).
-    if (!document.getElementById("cl-talk-wrapper")) {
-        const wrap = document.createElement("div");
-        wrap.id = "cl-talk-wrapper";
-        wrap.style.cssText = "position:fixed;bottom:24px;left:50%;transform:translateX(-50%);z-index:15;display:none;flex-direction:column;align-items:center;gap:6px;pointer-events:auto;";
-        const btn = document.createElement("button");
-        btn.id = "cl-talk-btn";
-        btn.className = "menu-btn";
-        btn.style.cssText = "min-height:48px;min-width:150px;font-size:1rem;padding:10px 18px;touch-action:manipulation;";
-        btn.innerHTML = "💬 Talk";
-        btn.onclick = () => _talkToNearest();
-        wrap.appendChild(btn);
-        document.body.appendChild(wrap);
+    if (!document.getElementById("cl-leave-wrapper")) {
+        const lw = document.createElement("div");
+        lw.id = "cl-leave-wrapper";
+        lw.style.cssText = "position:fixed;bottom:24px;left:16px;z-index:3000;display:none;flex-direction:column;align-items:flex-start;gap:8px;pointer-events:auto;";
+        const lbtn = document.createElement("button");
+        lbtn.id = "cl-leave-btn";
+        lbtn.className = "menu-btn";
+        lbtn.style.cssText = "min-height:48px;min-width:150px;font-size:0.95rem;padding:10px 16px;touch-action:manipulation;background:linear-gradient(to bottom,#4a3010,#2a1a05);";
+        lbtn.innerHTML = "🚪 LEAVE";
+        lbtn.onclick = () => window.leaveCustomLocation();
+        lw.appendChild(lbtn);
+        document.body.appendChild(lw);
     }
 }
 function _showEnterPrompt(loc) {
@@ -4389,13 +4048,12 @@ function _hideEnterPrompt() {
     const wrap = document.getElementById("cl-enter-wrapper");
     if (wrap) wrap.style.display = "none";
 }
-function _updateTalkPrompt() {
-    const wrap = document.getElementById("cl-talk-wrapper");
-    if (!wrap) return;
-    wrap.style.display = LE.nearestWorker ? "flex" : "none";
+function _showLeaveButton(label) {
+    const wrap = document.getElementById("cl-leave-wrapper");
+    if (wrap) wrap.style.display = "flex";
 }
-function _hideTalkPrompt() {
-    const wrap = document.getElementById("cl-talk-wrapper");
+function _hideLeaveButton() {
+    const wrap = document.getElementById("cl-leave-wrapper");
     if (wrap) wrap.style.display = "none";
 }
 

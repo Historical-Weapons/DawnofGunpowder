@@ -268,6 +268,17 @@ const survivalBtn = createBtn("🏹 Survival", () => {
     }
 });
 
+// --- NAVAL EXPLORATION BUTTON ---
+const navalEscortBtn = createBtn("🗺️ Naval Exploration", () => {
+    // This calls the GUI function from menu/naval_exploration_menu.js
+    if (typeof window.showNavalExplorationSetupMenu === "function") {
+        window.showNavalExplorationSetupMenu();
+        uiContainer.style.display = "none"; // Hide the main menu buttons
+    } else {
+        alert("Naval Exploration module not loaded!");
+    }
+});
+
 // ── CAMPAIGN BUTTON ────────────────────────────────────────────────────────
 const campaignBtn = createBtn("⚔️ Campaign Mode", () => {
     uiContainer.style.display = "none";
@@ -338,7 +349,7 @@ function showCampaignScreen(menuEl, onBack, onLaunch) {
     id:       3,
     title:    "Life on the Wall",
     subtitle: "Liaodong Frontier — 1578",
-    desc:     "You are Liu Sheng, a young Ming recruit stationed at Black Sand Fort " +
+    desc:     "You are Liu Sheng, a young Ming recruit stationed at Fushun Suo " +
               "on the restless northeastern frontier. Repair the walls, drill with the " +
               "garrison, and endure the long quiet between raids. The border is calm " +
               "for now—but quiet years do not last forever.",
@@ -736,6 +747,7 @@ optionsBtn.style.display = "block";
 // Start hidden to match your "Manual First" flow
 customBattleBtn.style.display = "none";
 survivalBtn.style.display = "none";
+navalEscortBtn.style.display = "none";
 
 
 // --- ENHANCED START ENGINE WRAPPER ---
@@ -765,6 +777,7 @@ const instrBtn = createBtn("Manual", () => {
     playBtn.style.display = "block";
     customBattleBtn.style.display = "block"; 
     survivalBtn.style.display = "block";
+    navalEscortBtn.style.display = "block"; // Naval Exploration now revealed here, on the main menu, right after Manual is read — same as Custom Battle / Survival / Campaign
     campaignBtn.style.display = "block"; // STORY1: show campaign button
     const unitsBtn = document.getElementById("units-guide-btn");
     if (unitsBtn) unitsBtn.style.display = "block";
@@ -908,6 +921,7 @@ uiContainer.appendChild(playBtn);
 uiContainer.appendChild(campaignBtn);
 uiContainer.appendChild(customBattleBtn);
 uiContainer.appendChild(survivalBtn);
+uiContainer.appendChild(navalEscortBtn);
 uiContainer.appendChild(loadGameBtn); // Surgery 7: Appended here
 uiContainer.appendChild(optionsBtn);
         menu.appendChild(uiContainer);
@@ -931,8 +945,8 @@ uiContainer.appendChild(optionsBtn);
         // Diverse cultural unit pool — a handful of each archetype.
         // factionColor drives helmet / armor style in infscript & cavscript:
         //   #1976d2 = Mongol/Steppe   #c2185b = Yamato/Japan   #455a64 = Jin/Jurchen
-        //   #00838f = Dali Kingdom     #7b1fa2 = Goryun/Korea   #7b1a1a = Song/Ming
-        //   #fbc02d = Xiaran/Arabian   #d32f2f = Hong Dynasty
+        //   #00838f = Dali Kingdom/yunan     #7b1fa2 = Goryun/Korea   #7b1a1a = Song/Ming
+        //   #fbc02d = Xiaran/tangut   #d32f2f = Hong Dynasty
         const MENU_UNIT_POOL = [
             // ── INFANTRY ────────────────────────────────────────────────────────
             { type: "archer",       unitName: "Archer",               factionColor: "#c2185b", armor: 12, side: "player", isCavalry: false }, // Japanese ashigaru

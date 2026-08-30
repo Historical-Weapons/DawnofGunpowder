@@ -159,6 +159,36 @@
     OPPORTUNIST: { skirmishTicks: 0.85, commitDist: 1.05, retreatGain: 0.85, hammerHold: 0.75, kiteRange: 0.95 },
   };
 
+
+  // ════════════════════════════════════════════════════════════════════════
+  //  DUMB AI TIER (LOW graphics/performance setting)
+  // ════════════════════════════════════════════════════════════════════════
+  /**
+   * Per direct request: the LOW graphics/performance tier (settings_ui.js's
+   * window.mobileBattleQuality / window.desktopBattleQuality -- 0 for LOW
+   * vs 40/80/100 for MED/HIGH/MAX, see window.GRAPHICS_QUALITY_TIERS there)
+   * also gets the dumbest, cheapest enemy AI available: no doctrine, no
+   * formation, no personality, no hit-and-run kiting, no crisis bodyguards
+   * -- just orderChase() (the engine's existing seek_engage nearest-target
+   * scan) issued once per unit. Two birds, one stone: it skips composition
+   * analysis, grouping, and every per-tick micro function (cheapest AI path,
+   * for the tier that most needs the CPU headroom), and it also plays like a
+   * much dumber, more exploitable opponent -- exactly what a player who
+   * deliberately dropped to LOW is asking for. Uses the same "< 40" cutoff
+   * optimization-mobile-battles.js's own MB1/MB2/etc. already use to detect
+   * LOW (see settings_ui.js).
+   */
+  function isDumbAITier () {
+    const q = (typeof W.mobileBattleQuality === 'number')  ? W.mobileBattleQuality
+            : (typeof W.desktopBattleQuality === 'number') ? W.desktopBattleQuality
+            : null;
+    return (q !== null) && (q < 40);
+  }
+
+  /** Cheapest possible order: every unit just chases/engages the nearest enemy. */
+  function runDumbTick (enemyUnits) {
+    for (let i = 0; i < enemyUnits.length; i++) orderChase(enemyUnits[i]);
+  }
   // ════════════════════════════════════════════════════════════════════════
   //  MODULE STATE
   // ════════════════════════════════════════════════════════════════════════
@@ -204,6 +234,24 @@
 
   /** Returns broad role: INFANTRY / CAVALRY / RANGED / GUNPOWDER (engine compat) */
   function resolveBroadRole (unit) {
+    // ── CANNON OVERRIDE (direct request) ──────────────────────────
+    // Wagon cannons (role "mounted_gunner": Cannon, Breech-Loading Cannon)
+    // were being tagged CAVALRY by the shared window.getTacticalRole()
+    // classifier below (battlefield_commands.js / ai_categories.js both
+    // treat MOUNTED_GUNNER / isLarge as cavalry -- that's used for player-
+    // side UI/targeting and is left alone here). That CAVALRY tag reached
+    // resolveSubRole() below, which then saw isRanged:true and produced
+    // RANGED_CAV -- routing cannons into microLightCav()'s horse-archer
+    // kite/orbit logic, which force-restores full speed ("light cav
+    // always at full speed") regardless of the cannon's deliberately
+    // gimped 0.28 wagon-gun speed. That's what read as "moves to a
+    // corner before shooting." Intercepting here, before the shared-
+    // classifier delegation, routes cannons to GUNPOWDER's hold-and-fire
+    // microShooters() path instead (fixed anchor, fires immediately)
+    // without touching getTacticalRole() itself, which other systems
+    // still rely on. Mirrored in enemyTacticalAI.js's resolveRole().
+    if (String((unit.stats && unit.stats.role) || '').toUpperCase() === 'MOUNTED_GUNNER') return 'GUNPOWDER';
+
     if (typeof W.getTacticalRole === 'function') return W.getTacticalRole(unit);
     const r = String((unit.stats && unit.stats.role) || '').toUpperCase();
     const t = String((unit.unitType || (unit.stats && unit.stats.name) || '')).toUpperCase();
@@ -375,33 +423,64 @@
   // ════════════════════════════════════════════════════════════════════════
   /**
    * Pick a doctrine based on player composition + own composition.
-   * The doctrine is locked at battle start (re-evaluated only on stop/start).
+   * The doctrine is locked at battle start (re-evaluated only on stop/start,
+   * and again mid-battle -- see the SKIRMISHING re-evaluation in tick()).
+   *
+   * REWORKED per direct request ("less predictability, more different
+   * strats"): this used to be a hard if/else cascade -- the same
+   * composition always produced the exact same doctrine, every single time.
+   * Now every doctrine gets a continuous fitness score from the composition
+   * (still centered on the original hard-coded thresholds below, so the
+   * best-fit doctrine is still favored most often) and the actual pick is a
+   * weighted random roll across all six doctrines, each with a guaranteed
+   * floor weight -- so even a clearly-secondary doctrine has a real, if
+   * smaller, chance every battle. Two otherwise-identical armies can now
+   * come at the player completely differently from fight to fight.
    */
   function pickDoctrine (playerComp, enemyComp) {
-    // 1. Massive cavalry threat -> anti-cav ring (only if we have ranged worth protecting)
-    if (playerComp.r_melee_cav >= 0.50 && (enemyComp.r_ranged_inf + enemyComp.r_gunpowder) >= 0.20) {
-      return 'ANTI_CAV_RING';
+    const pCav    = playerComp.r_melee_cav  || 0;
+    const pRCav   = playerComp.r_ranged_cav || 0;
+    const pShoot  = (playerComp.r_ranged_inf || 0) + (playerComp.r_gunpowder || 0);
+    const pMelee  = (playerComp.r_melee_inf  || 0) + (playerComp.r_shield    || 0);
+    const eScreen = (enemyComp.r_ranged_inf  || 0) + (enemyComp.r_gunpowder  || 0);
+    const eCav    = enemyComp.r_melee_cav || 0;
+    const overwhelmed = (enemyComp.total > 0)
+      ? Math.max(0, ((playerComp.total || 0) / enemyComp.total) - 1)
+      : 0;
+
+    // Each fit is normalized against its original hard threshold (0.50,
+    // 0.35, 0.50, 0.55, 0.5-over) so hitting that threshold produces a
+    // strongly (not exclusively) favored weight; capped at 1.4 so wildly
+    // lopsided compositions don't completely drown out the floor below.
+    const weights = {
+      ANTI_CAV_RING:    (eScreen >= 0.20 ? 1 : 0.15) * Math.min(1.4, pCav   / 0.50),
+      SKIRMISH_HUNT:    Math.min(1.4, pRCav  / 0.35),
+      SHIELD_PUSH:      Math.min(1.4, pShoot / 0.50),
+      HAMMER_AND_ANVIL: (eCav >= 0.10 ? 1 : 0.15) * Math.min(1.4, pMelee / 0.55),
+      DEFENSIVE_HOLD:   Math.min(1.4, overwhelmed / 0.5),
+      COMBINED_ARMS:    0.55, // flat generalist baseline -- always a live option
+    };
+
+    // Floor guarantees every doctrine SOME chance (the unpredictability);
+    // the power curve still sharpens the bias toward whichever doctrine(s)
+    // actually fit this composition well.
+    const DOCTRINE_FLOOR = 0.12;
+    const DOCTRINE_POWER = 1.8;
+
+    let total = 0;
+    const rolled = {};
+    for (const key in weights) {
+      const w = DOCTRINE_FLOOR + Math.pow(Math.max(0, weights[key]), DOCTRINE_POWER);
+      rolled[key] = w;
+      total += w;
     }
-    // 2. Horse archer heavy -> hunt them with our own cav, tight shield wall
-    if (playerComp.r_ranged_cav >= 0.35) {
-      return 'SKIRMISH_HUNT';
+
+    let roll = Math.random() * total;
+    for (const key in rolled) {
+      roll -= rolled[key];
+      if (roll <= 0) return key;
     }
-    // 3. Player is mostly ranged on foot -> shield push them down
-    if ((playerComp.r_ranged_inf + playerComp.r_gunpowder) >= 0.50) {
-      return 'SHIELD_PUSH';
-    }
-    // 4. Player is mostly infantry, and we have cavalry -> hammer & anvil.
-    //    Use a low cav threshold (10%) -- even a token cavalry force is enough
-    //    to make hammer-and-anvil the better choice than a flat infantry brawl.
-    if ((playerComp.r_melee_inf + playerComp.r_shield) >= 0.55 && enemyComp.r_melee_cav >= 0.10) {
-      return 'HAMMER_AND_ANVIL';
-    }
-    // 5. Heavy underdog -> defensive hold (waiting for the player to overextend)
-    if (enemyComp.total > 0 && playerComp.total / enemyComp.total >= 1.5) {
-      return 'DEFENSIVE_HOLD';
-    }
-    // 6. Default
-    return 'COMBINED_ARMS';
+    return 'COMBINED_ARMS'; // unreachable in practice; defensive fallback
   }
 
   function pickPersonality () {
@@ -1377,6 +1456,14 @@
       return;
     }
 
+    // DUMB MODE (LOW graphics/performance tier) -- see isDumbAITier() above.
+    // Skips doctrine/formation/personality/crisis/kiting entirely; every
+    // enemy unit just re-affirms orderChase() and the tick is done.
+    if (isDumbAITier()) {
+      runDumbTick(enemyUnits);
+      return;
+    }
+
     _strategyTick++;
     const playerCentroid = centroid(playerUnits);
 
@@ -1743,6 +1830,32 @@
     _formingTicks   = 0;
     _strategyTick   = 0;
     _feintTriggered = false;
+
+    // DUMB MODE (LOW graphics/performance tier) -- see isDumbAITier() above.
+    // Skips pickPersonality()/pickDoctrine()/pickFormationShape()/FORMING
+    // pause/groupUnits()/executeForming()/executePhase() entirely: every
+    // enemy unit just gets orderChase() once, then the (now-trivial) tick
+    // loop keeps re-affirming it.
+    if (isDumbAITier()) {
+      _personality    = 'BALANCED';
+      _personalityMod = PERSONALITIES.BALANCED;
+      _doctrine       = 'COMBINED_ARMS';
+      _formationShape = 'LINE';
+      _phase          = 'ADVANCING'; // no FORMING pause either -- straight in
+      const dumbEnemyUnits  = getEnemyUnits();
+      const dumbPlayerUnits = getPlayerUnits();
+      if (dumbEnemyUnits.length && dumbPlayerUnits.length) {
+        deepResetUnits(dumbEnemyUnits);
+        runDumbTick(dumbEnemyUnits);
+      }
+      _tickInterval = setInterval(tick, STRAT_TICK_MS);
+      if (typeof console !== 'undefined' && console.log) {
+        console.log('[EnemyLandStrategyAI] start() OK -> DUMB MODE (LOW tier) | enemyUnits=' +
+          dumbEnemyUnits.length + ' playerUnits=' + dumbPlayerUnits.length);
+      }
+      return;
+    }
+
     _personality    = pickPersonality();
     _personalityMod = PERSONALITIES[_personality] || PERSONALITIES.BALANCED;
 

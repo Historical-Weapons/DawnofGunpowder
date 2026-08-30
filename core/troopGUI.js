@@ -100,6 +100,7 @@ const troopGUI= {
     },
 
     openUpgradeMenu() {
+        if (window.NavalEscortMode && window.NavalEscortMode.isActive()) return; // no settlement menu mid-voyage
         this.isOpen = true;
         if (!this.menuDiv) this.init(); 
         this.overlayDiv.style.display = "block";

@@ -207,17 +207,6 @@
         box-shadow: 0 0 6px rgba(255, 215, 0, 0.7);
       }
 
-      /* Depth button while BOX/square is the active formation — stays
-         visible (per direct request, it must never disappear) but reads as
-         inert: square blobs units by count alone and never consults this
-         value, so the click handler no-ops and this communicates that at a
-         glance instead of the button looking clickable but silently doing
-         nothing. */
-      .mc3-tray-btn.mc3-depth-disabled {
-        opacity: 0.45;
-        cursor: not-allowed;
-      }
-
       /* ── TOAST notification ───────────────────────────────────────────── */
       #mc3-toast {
         position: fixed;
@@ -809,6 +798,13 @@
           String(currentLocation).match(/(city|town|village|castle|fort|camp)/i))
       );
     },
+    // Is the player currently inside a non-city custom location (barracks,
+    // storage depot, stables, watchtower, garrison post, maintenance yard)?
+    // Kept separate from isInCity() rather than folded into it, so every
+    // other existing caller of isInCity() keeps its current meaning.
+    isInCustomLocation() {
+      return !!(typeof window.inCustomLocationMode !== 'undefined' && window.inCustomLocationMode);
+    },
     env() {
       return (typeof battleEnvironment !== 'undefined') ? battleEnvironment : null;
     },
@@ -889,8 +885,19 @@
         : { x, y };
     },
 
-    // ── P — exit battle / city / overworld ──────────────────────────────
+    // ── P — exit battle / city / non-city location / overworld ───────────
     exit() {
+      // Non-city custom locations (barracks/storage/stables/watchtower/
+      // garrison/maintenance) aren't wired to the simulated 'p' keydown the
+      // way city mode is — sandboxmode_update.js only checks keys['p'] under
+      // inCityMode, and camp_system.js's own location loop never reads keys
+      // at all for exiting. So call the real exit function directly instead
+      // of firing a key nothing is listening for.
+      if (G.isInCustomLocation()) {
+        if (typeof window.leaveCustomLocation === 'function') window.leaveCustomLocation();
+        this._audio('ui_click');
+        return;
+      }
       // Show a context-appropriate toast message, but still fire the key
       // so the game engine can do whatever 'P' does in the current state.
       if (!G.isBattle() && !G.isInCity()) {
@@ -1211,11 +1218,23 @@
     // up front, which doesn't read as a real front line at all. Now: if
     // shields are fewer than the plain-melee count (covers the zero-shield
     // case too), enough plain melee are promoted into the front row to
-    // bring it up to roughly half of shields+plainMelee combined — shields
-    // still anchor the front (pushed to the array front so they occupy the
-    // center after layoutRow's centered spacing), plain melee fill out the
-    // rest of the line, and only genuine leftover plain melee still forms
-    // row 2 behind them.
+    // bring it up to roughly half of shields+plainMelee combined, and only
+    // genuine leftover plain melee still forms row 2 behind them.
+    //
+    // FIX ("make sure melee shields are at the front always if possible"):
+    // the promoted plain melee used to be appended AFTER the real
+    // shield-bearers in the array (b.shields.concat(promoted)). Since
+    // layoutRow centers a row symmetrically around its array midpoint
+    // (index 0 = left edge, last index = right edge), that put the real
+    // shields at the LEFT edge of the front row instead of the center —
+    // the promoted plain melee, not the shields, occupied the visually
+    // central/most-forward position. Now the promoted units are split
+    // evenly across both sides of the real shields (left half prepended,
+    // right half appended), so the actual shield-bearers anchor the center
+    // of the front line with plain melee filling out both flanks of that
+    // same row — a real shieldwall reads shields-in-the-middle, not
+    // shields-off-to-one-side.
+    _SHIELD_MAX_FRONT: 8, // widest a single shieldwall rank gets before overflow forms a second rank behind it — see FIX comment in _bucketForShield. Tune to taste.
     _bucketForShield(units) {
       const b = { shields: [], secondRow: [], ranged: [], cavalry: [] };
       const plainMelee = [];
@@ -1232,21 +1251,53 @@
       if (plainMelee.length > b.shields.length) {
         const frontTarget = Math.ceil((b.shields.length + plainMelee.length) / 2);
         const promoteCount = Math.max(0, frontTarget - b.shields.length);
-        b.shields = b.shields.concat(plainMelee.splice(0, promoteCount));
+        const promoted = plainMelee.splice(0, promoteCount);
+        const leftHalf = Math.floor(promoted.length / 2);
+        // real shields sandwiched in the middle, promoted melee split
+        // evenly to both flanks of the front row — see FIX comment above.
+        b.shields = promoted.slice(0, leftHalf).concat(b.shields, promoted.slice(leftHalf));
       }
       b.secondRow = plainMelee; // whatever's left after any promotion above
+
+      // FIX ("Viking shield wall" depth): a big selection used to form ONE
+      // single-file-wide, one-unit-thick line no matter how many
+      // shield-eligible units it had — 20 shield-bearers read as a very
+      // wide, very thin wall with zero depth, nothing like a real
+      // multi-rank shieldwall. Split the (already center-weighted,
+      // real-shields-prioritized) front-line pool into ranks of at most
+      // _SHIELD_MAX_FRONT, so a large group reads as several ranks deep
+      // once it outgrows a single line. b.shields stays the FULL flat
+      // pool — _shieldPaceFor still wants the whole pool for its speed
+      // average, rank depth doesn't change how fast the line as a whole
+      // should walk. b.frontRank is specifically rank 0: the only rank
+      // that can physically be "attacking" at first contact, since ranks
+      // 2+ are still a full ROW behind the enemy. _buildShieldFormationOffsets
+      // (cavalry flank width) and _startShieldTick (the 30%-engaged
+      // hammer-and-anvil threshold) both need frontRank specifically —
+      // measuring against the full multi-rank pool would make that 30%
+      // threshold unreachable for any formation deep enough to have units
+      // that can never be in melee range at all.
+      b.shieldRanks = [];
+      for (let i = 0; i < b.shields.length; i += this._SHIELD_MAX_FRONT) {
+        b.shieldRanks.push(b.shields.slice(i, i + this._SHIELD_MAX_FRONT));
+      }
+      if (!b.shieldRanks.length) b.shieldRanks.push([]); // keep .frontRank safe on an empty/all-ranged-cavalry group
+      b.frontRank = b.shieldRanks[0];
+
       return b;
     },
 
     // Lays out formationOffsetX/Y for a Shield formation: shields (and any
-    // promoted plain melee, see _bucketForShield) front row, second row
-    // (leftover non-shield melee) directly behind them, ranged row behind
-    // that, cavalry held level with the front row on both flanks (NOT
-    // screening ahead — per direct request "they hold, only hammer and
-    // anvil once units are engaged"). frontDir is a unit vector pointing
-    // toward the enemy. Does not issue orders itself — _shieldTick does
-    // that every interval so the same offsets can be re-centered on an
-    // advancing point.
+    // promoted plain melee, see _bucketForShield) front rank(s) — split
+    // into multiple ranks of _SHIELD_MAX_FRONT width if the group is big
+    // enough, see FIX comment above — second row (leftover non-shield
+    // melee) directly behind the LAST shield rank, ranged row behind that,
+    // cavalry held level with the FRONT rank on both flanks (NOT screening
+    // ahead — per direct request "they hold, only hammer and anvil once
+    // units are engaged"). frontDir is a unit vector pointing toward the
+    // enemy. Does not issue orders itself — _shieldTick does that every
+    // interval so the same offsets can be re-centered on an advancing
+    // point.
     //
     // FIX ("way tighter formation"): COL/ROW cut roughly in half (42→22,
     // 55→30) — a real shield wall reads as a tight, shoulder-to-shoulder
@@ -1263,14 +1314,19 @@
           u.formationOffsetY = side.y * colOff + (-frontDir.y) * ROW * rowIdx;
         });
       };
-      layoutRow(b.shields,   0);
-      layoutRow(b.secondRow, 1);
-      layoutRow(b.ranged,    2);
+      b.shieldRanks.forEach((rank, idx) => layoutRow(rank, idx));
+      const backDepth = b.shieldRanks.length; // however many shield ranks were actually used — secondRow/ranged sit directly behind the real formation, not always at a hardcoded rowIdx 1/2
+      layoutRow(b.secondRow, backDepth);
+      layoutRow(b.ranged,    backDepth + 1);
 
-      // Cavalry: both flanks, level with the front row (rowIdx 0 depth) —
-      // NOT ahead of it. Half on each side, spaced outward from the edge of
-      // the shield line so they don't overlap the infantry's column spread.
-      const frontHalfWidth = ((b.shields.length - 1) / 2) * COL + 20;
+      // Cavalry: both flanks, level with the FRONT RANK ONLY (rowIdx 0
+      // depth) — NOT ahead of it, and NOT spaced out to the width of the
+      // full multi-rank pool (that would push them needlessly far out on a
+      // deep formation whose actual front rank is capped at
+      // _SHIELD_MAX_FRONT wide). Half on each side, spaced outward from the
+      // edge of the front rank so they don't overlap the infantry's column
+      // spread.
+      const frontHalfWidth = ((b.frontRank.length - 1) / 2) * COL + 20;
       b.cavalry.forEach((u, i) => {
         const flip  = (i % 2 === 0) ? 1 : -1;
         const depth = Math.floor(i / 2) * 26;
@@ -1352,53 +1408,94 @@
     // fresh order every tick for a target that's essentially unchanged was
     // itself adding move_to_point churn on top of the layout wobble.
     //
-    // FIX ("shield formation keeps moving back and forth... looks like
-    // its dancing" — reported again after the frontDir-lerp/retarget-
-    // threshold fix above reduced it but didn't eliminate it): the root
-    // cause was continuous retargeting itself. Even smoothed and
-    // throttled to "only when the slot moves >3px", a unit's order was
-    // still being re-evaluated every single 90ms tick, so it could never
-    // settle into one clean, uninterrupted walk — it was always somewhere
-    // between "just got nudged" and "about to get nudged again", which
-    // reads as dancing no matter how small each individual nudge is. Per
-    // direct request, replaced the continuous per-tick creep with a
-    // discrete per-unit MOVE/PAUSE cycle (MOVE_MIN_MS/MOVE_MAX_MS/
-    // PAUSE_MIN_MS/PAUSE_MAX_MS below): each unit snapshots its target
-    // slot exactly ONCE, right as its own move phase begins, and that
-    // order is left completely alone — no re-centering, no distance
-    // checks — until the unit either arrives, gets engaged, or its move
-    // phase times out and it switches to a full stop (hold_position) for
-    // a pause phase. Nothing is touching the order mid-walk anymore, so
-    // there's nothing left to dance around. Durations are randomized per
-    // unit, per phase (re-rolled on every flip) so units desync from each
-    // other within a few cycles instead of pulsing in lockstep — reads as
-    // a body of soldiers rather than one machine, per direct request
-    // ("each interval is slightly random to be human"). This also means a
-    // slower unit's movement windows are no longer partly wasted on
-    // corrective wobble — every bit of its MOVE phase is now real
-    // progress toward its slot, which is what actually lets it close the
-    // gap on faster units over a few cycles ("allows slow units to catch
-    // up"). PAUSE is always a full stop at the unit's current position —
-    // same NEVER-CHARGE/NEVER-RETREAT discipline used everywhere else in
-    // this function, never a backward order. Formation tightness (COL/
-    // ROW in _buildShieldFormationOffsets) and shield-front bucketing
-    // (_bucketForShield) are unrelated to this bug and untouched here.
+    // FIX ("shield custom AI is not working — needs to constantly be
+    // moving, but slower, at the speed of the melee units"): the MOVE/PAUSE
+    // cycle that used to live here (snapshot a target once every ~3s, then
+    // sit dead still in hold_position for another ~1-2.5s) was built on the
+    // wrong assumption that a unit's real walking speed roughly matched the
+    // formation's own crawl pace. It didn't: ADVANCE_STEP was a hand-picked
+    // 0.75px/tick (~8px/sec) with zero connection to unit.stats.speed,
+    // which is many times faster for a real melee unit. A unit would
+    // snapshot a target maybe 20-25px ahead of it, close that entire gap in
+    // a fraction of a second at its true walking speed, and then just stand
+    // there doing nothing for the rest of its multi-second MOVE phase, plus
+    // the whole PAUSE phase after — reading as broken/frozen rather than a
+    // shieldwall advancing. That same ~20-25px gap also sat right inside
+    // processTacticalOrders' own arrival hysteresis band (18px stopDistance
+    // / 30px wakeDistance for infantry, in battlefield_commands.js), so
+    // depending on exact positions a unit could fail to even register as
+    // needing to walk at all.
+    //
+    // Fixed two ways:
+    //  1. PACE: the centroid's own per-tick advance (ADVANCE_STEP below) is
+    //     now derived every tick from the REAL stats.speed of the
+    //     formation's actual front-row melee/shield units (_shieldPaceFor),
+    //     not a made-up constant. Every still-marching member's own
+    //     stats.speed is temporarily clamped to that same shared pace
+    //     (restored the instant it engages, gets hammer-and-anvil released,
+    //     or the tactic is cancelled — see _shieldOriginalSpeed/
+    //     _restoreSpeed) so the whole body — front row, second row, ranged,
+    //     still-leashed cavalry — genuinely marches together at one
+    //     uniform "melee unit" pace instead of faster units repeatedly
+    //     outrunning the line and stalling out ahead of it.
+    //  2. NO MORE SETTLING MID-MARCH: dropped the MOVE/PAUSE snapshot
+    //     entirely and instead drive marching units with the SAME
+    //     hysteresis-free primitive the Total War-style drag-formation
+    //     march already uses: unit._formationLocked. Both
+    //     processTacticalOrders() (battlefield_commands.js) and
+    //     processAction() (ai_categories.js) hard-return at the very top
+    //     for any _formationLocked unit and drive it with one direct
+    //     _handleMovement call toward orderTargetPoint — none of the
+    //     stopDistance/wakeDistance "settle" hysteresis that STANDARD/FIELD
+    //     MOVEMENT applies to plain move_to_point orders ever runs on it.
+    //     orderTargetPoint is refreshed every single tick (not once per
+    //     phase) to the unit's current formation slot, so a marching unit
+    //     is always chasing a point that's freshly a little further ahead
+    //     of it and can never fully "arrive" and stop on its own — it only
+    //     actually halts once the group truly stops advancing (front line
+    //     engaged) or the unit itself gets in range of a target.
+    //
+    // The earlier frontDir-wobble fixes above (the slow FRONT_DIR_LERP
+    // blend) are untouched and still do their job — nothing about this fix
+    // touches how frontDir/side is computed, only how often/how far units
+    // are told to walk and how fast they're allowed to do it. Formation
+    // tightness (COL/ROW in _buildShieldFormationOffsets) and shield-front
+    // bucketing (_bucketForShield) are also unrelated and untouched here.
     _shieldIntervals: {},
+    // Raw representative walking speed for the formation's actual melee/
+    // shield units — the baseline "speed of the melee units" that the
+    // CREEP_FACTOR slowdown in _startShieldTick is applied to, not the
+    // final formation pace itself. Front-row shields first (that's
+    // literally what's being matched), falling back to the second row,
+    // then a sane default for the rare one-tick window where the group is
+    // entirely ranged/cavalry (e.g. mid-reshuffle right after the
+    // front-row shields just died).
+    _shieldPaceFor(b) {
+      const src = b.shields.length ? b.shields : (b.secondRow.length ? b.secondRow : null);
+      if (!src) return 1.2;
+      const sum = src.reduce((s, u) => s + (u.stats?.speed || 1.2), 0);
+      return sum / src.length;
+    },
     _startShieldTick(groupNum, initialCx, initialCy, initialFrontDir) {
       if (this._shieldIntervals[groupNum]) clearInterval(this._shieldIntervals[groupNum]);
       let cx = initialCx, cy = initialCy;
       let frontDir = initialFrontDir;
       let cavRelease = false; // hammer-and-anvil commit latch — one-way once tripped
-      const ADVANCE_STEP     = 0.75; // px per tick — see comment above for the math matching the old pace
-      const TICK_MS           = 90;  // cadence for the shared centroid/frontDir tracking below — NOT the per-unit move/pause cadence, see FIX comment above
-      const FRONT_DIR_LERP    = 0.04; // how fast frontDir chases the freshly computed enemy heading — low on purpose, see FIX comment above
-      // Per-unit MOVE/PAUSE cycle — see FIX comment above. "Slightly
-      // random" per direct request, so kept to a modest spread rather
-      // than wide variance; re-rolled independently for every unit on
-      // every phase flip.
-      const MOVE_MIN_MS  = 2500, MOVE_MAX_MS  = 3500; // ~3s of walking per burst
-      const PAUSE_MIN_MS = 1000, PAUSE_MAX_MS = 2500; // "a few random seconds" break
-      const _rndMs = (lo, hi) => lo + Math.random() * (hi - lo);
+      const TICK_MS         = 90;   // cadence for the centroid/frontDir advance AND the orderTargetPoint refresh below — see FIX comment above for why this is now every tick, not once per MOVE phase
+      const FRONT_DIR_LERP  = 0.04; // how fast frontDir chases the freshly computed enemy heading — low on purpose, see earlier FIX comment above
+      const FRAMES_PER_TICK = TICK_MS / (1000 / 60); // _handleMovement applies stats.speed once per ~60fps sim frame; converts a per-frame speed stat into a per-tick advance distance
+
+      // Releases a unit's temporarily-clamped walking speed back to its own
+      // real value — called the instant a unit stops being an actively-
+      // marching, not-yet-engaged Shield member (engages, gets hammer-and-
+      // anvil released, goes onto committed siege duty, or the tactic is
+      // cancelled elsewhere in RTSControls.js).
+      const _restoreSpeed = (u) => {
+        if (u._shieldOriginalSpeed !== undefined) {
+          u.stats.speed = u._shieldOriginalSpeed;
+          u._shieldOriginalSpeed = undefined;
+        }
+      };
 
       this._shieldIntervals[groupNum] = setInterval(() => {
         if (!G.isBattle()) { clearInterval(this._shieldIntervals[groupNum]); delete this._shieldIntervals[groupNum]; return; }
@@ -1412,15 +1509,18 @@
         // a live siege role (ladder_carrier/ram_pusher/trebuchet_crew, same
         // set battlefield_commands.js's isCommittedSiegeCrew already
         // exempts from other overrides) sits out of the Shield formation
-        // entirely for as long as that role is active — it keeps doing its
-        // siege job untouched, and simply isn't included in this tick's
-        // formation layout/advance/order-issuing, exactly as if it had
-        // temporarily left the group. It resumes being driven by Shield the
-        // next tick after its siegeRole clears (e.g. the ladder's up, the
-        // ram's through), since group is rebuilt fresh from live
-        // aiTacticGroup/aiTacticNumber every tick rather than snapshotted.
+        // entirely for as long as that role is active — also releases any
+        // speed clamp/march lock it was carrying so the siege job runs at
+        // full normal speed. It resumes being driven by Shield the next
+        // tick after its siegeRole clears, since group is rebuilt fresh
+        // from live aiTacticGroup/aiTacticNumber every tick.
         const committedSiegeRoles = ['ladder_carrier', 'ram_pusher', 'trebuchet_crew'];
-        const activeGroup = group.filter(u => committedSiegeRoles.indexOf(u.siegeRole) === -1);
+        const activeGroup = group.filter(u => {
+          if (committedSiegeRoles.indexOf(u.siegeRole) === -1) return true;
+          _restoreSpeed(u);
+          u._formationLocked = false;
+          return false;
+        });
         if (!activeGroup.length) return; // whole group is currently on siege duty — nothing to advance this tick
 
         const enemies = e.units.filter(u => u.side === 'enemy' && u.hp > 0);
@@ -1431,9 +1531,10 @@
           const mag = Math.hypot(dx, dy) || 1;
           const targetDir = { x: dx / mag, y: dy / mag };
           // Slow lerp toward the freshly computed heading instead of
-          // snapping straight to it — see FIX comment above. Re-normalize
-          // after blending so frontDir stays a true unit vector (a lerp
-          // between two unit vectors isn't itself unit length).
+          // snapping straight to it — see earlier FIX comment above.
+          // Re-normalize after blending so frontDir stays a true unit
+          // vector (a lerp between two unit vectors isn't itself unit
+          // length).
           let blendedX = frontDir.x + (targetDir.x - frontDir.x) * FRONT_DIR_LERP;
           let blendedY = frontDir.y + (targetDir.y - frontDir.y) * FRONT_DIR_LERP;
           const blendedMag = Math.hypot(blendedX, blendedY) || 1;
@@ -1445,18 +1546,95 @@
         // get its offset re-centered out from under it (that would yank it
         // off whatever it's fighting). Only advance units that are not yet
         // locked into combat.
-        const shieldsEngaged = b.shields.filter(u => u.state === 'attacking').length;
-        const engagedFrac = b.shields.length ? (shieldsEngaged / b.shields.length) : 0;
+        //
+        // Measured against b.frontRank, NOT the full (possibly multi-rank,
+        // see _bucketForShield) b.shields pool — units in rank 2+ are still
+        // a full ROW behind the enemy and can never be "attacking" at first
+        // contact, so dividing by the whole pool would make the 30%
+        // threshold below unreachable for any formation deep enough to have
+        // a second rank.
+        const shieldsEngaged = b.frontRank.filter(u => u.state === 'attacking').length;
+        const engagedFrac = b.frontRank.length ? (shieldsEngaged / b.frontRank.length) : 0;
         if (!cavRelease && engagedFrac >= 0.30) cavRelease = true; // one-way latch, per direct request "~30%"
 
-        // Advance the shared centroid only while the front line isn't yet
-        // meaningfully engaged — once real contact is made the formation
-        // has arrived, it shouldn't keep marching through its own melee.
+        // Pace the shared centroid's own advance off the real melee/shield
+        // walking speed — see FIX comment above. Only advances while the
+        // front line isn't yet meaningfully engaged; once real contact is
+        // made the formation has arrived and shouldn't keep marching
+        // through its own melee.
+        //
+        // FIX ("is it like a Viking shield wall slowly creeping, compared
+        // to Hold?"): _shieldPaceFor() returns the shield units' raw,
+        // unmodified stats.speed — every marching unit's own speed then
+        // gets clamped to that SAME value, which for the actual melee/
+        // shield units is a no-op. Net result was the formation marching
+        // at completely normal, undiminished walking speed — fixed the
+        // freeze, but lost the cautious, deliberate "shieldwall creep" feel
+        // entirely; it just read as an ordinary march. CREEP_FACTOR pulls
+        // that down to a genuinely slow advance (per direct request "at the
+        // speed of the melee units" — reinterpreted here as "no faster
+        // than," not "exactly equal to," since a real shieldwall advances
+        // well under a soldier's normal marching pace). This is safe from
+        // reintroducing the old bug: ADVANCE_STEP is derived from this same
+        // reduced meleePace value, and every marching unit's stats.speed is
+        // clamped to that identical value below — the target-advance
+        // distance and the actual walking speed can never drift apart from
+        // each other again, no matter what fraction of full speed
+        // CREEP_FACTOR is set to. Tune this single constant to taste.
+        const CREEP_FACTOR = 0.45;
+        const meleePace = this._shieldPaceFor(b) * CREEP_FACTOR;
+        const ADVANCE_STEP = meleePace * FRAMES_PER_TICK;
         if (engagedFrac < 0.30) {
           const landed = this._landHoldCentroid(cx + frontDir.x * ADVANCE_STEP, cy + frontDir.y * ADVANCE_STEP);
           const clamped = this._clampToDeployZone(landed.x, landed.y);
           cx = clamped.x; cy = clamped.y;
         }
+
+        // FIX ("shield still doesn't advance after forming up — holds
+        // better than Hold AI"): the bug above wasn't the last word.
+        // ADVANCE_STEP (a few px per 90ms tick, deliberately small for a
+        // slow creep) is smaller than ai_categories.js's OWN hardcoded
+        // FORMATION_ARRIVAL_THRESHOLD (14px) — the radius _formationLocked
+        // snaps a unit to "arrived" and locks it into hold_position. Every
+        // fresh target issued below (the true slot, cx+offsetX/cy+offsetY)
+        // sits only ADVANCE_STEP away from where the unit already was,
+        // which is WELL inside that 14px radius the instant it's assigned.
+        // So the unit "arrives" and snaps to hold_position almost
+        // immediately after every single tick — spending the vast majority
+        // of each 90ms window sitting locked in that held state, with only
+        // a barely-visible ADVANCE_STEP-sized twitch when the next tick
+        // fires. That reads as "basically not moving" — worse than HOLD,
+        // which at least holds cleanly instead of stutter-twitching.
+        //
+        // Fixed with LOOKAHEAD: the chase target handed to
+        // _formationLocked is projected LOOKAHEAD px further along frontDir
+        // than the unit's actual formation slot — comfortably clear of the
+        // 14px snap radius, and deliberately independent of
+        // ADVANCE_STEP/CREEP_FACTOR/pace so this property can never be
+        // broken again by future speed tuning alone. The unit's own walking
+        // speed is still clamped to the real (slow) meleePace, so it can
+        // only close a small fraction of that lookahead gap each tick — it
+        // perpetually trails the projected point without ever closing the
+        // full distance, which is exactly "always still walking, never
+        // arriving" while the group is genuinely still advancing.
+        //
+        // Only applied while engagedFrac < 0.30, mirroring the guard on cx/
+        // cy's own advance just above: once real contact stops the
+        // centroid, still-unengaged units (rear ranks, ranged, unreleased
+        // cavalry) must walk to their TRUE slot with no lookahead so they
+        // actually arrive and settle cleanly behind the engaged front line
+        // — otherwise they'd keep overshooting LOOKAHEAD px past where
+        // they're supposed to stand, potentially into the front rank's own
+        // melee.
+        //
+        // During pre-deployment this also directly delivers "you can see
+        // them trying, but the zone blocks them": _clampToDeployZone below
+        // clips the lookahead-projected point to window.__playerDeployZone,
+        // so a marching unit's target visibly sits pinned right at the
+        // zone edge nearest the enemy instead of never attempting to push
+        // past it at all.
+        const stillAdvancing = engagedFrac < 0.30;
+        const LOOKAHEAD = 30; // safely clear of ai_categories.js's 14px FORMATION_ARRIVAL_THRESHOLD, with margin for clamp/rounding jitter
 
         this._buildShieldFormationOffsets(activeGroup, frontDir);
 
@@ -1467,6 +1645,8 @@
             // even if engagedFrac later drops (a unit dying shouldn't yank
             // committed cavalry back to the flank mid-charge).
             if (u.aiTacticGroup === 'shield') { // only reassign once, on the tick it actually flips
+              _restoreSpeed(u);
+              u._formationLocked = false;
               u.aiTacticGroup = undefined;
               u.aiTacticNumber = undefined;
               u._lazyManual = true;
@@ -1480,54 +1660,34 @@
           const inOwnRange = u.target && u.target.hp > 0 && dist <= (u.stats.range || 30);
           if (inOwnRange) {
             // Already fighting something within real reach — lock in place,
-            // same NEVER-CHARGE/NEVER-RETREAT discipline as HOLD. Does not
-            // touch formationOffsetX/Y (already updated above so the slot
-            // is ready the instant the unit disengages).
+            // same NEVER-CHARGE/NEVER-RETREAT discipline as HOLD. Not
+            // marching anymore, so release both the hysteresis-free march
+            // lock and the shared-pace speed clamp. Does not touch
+            // formationOffsetX/Y (already updated above so the slot is
+            // ready the instant the unit disengages).
+            _restoreSpeed(u);
+            u._formationLocked = false;
             u._lazyManual = true;
             u.orderType = 'hold_position';
             u.orderTargetPoint = null;
           } else {
+            // Still marching, not yet engaged. Clamp this unit's own
+            // walking speed to the shared melee pace (so a naturally-faster
+            // unit — an unreleased flank cavalry, say — can't outrun the
+            // line) and drive it via the hysteresis-free _formationLocked
+            // march primitive, refreshing orderTargetPoint EVERY tick so it
+            // never settles/stops on its own mid-approach — see FIX comment
+            // above _shieldIntervals for the full reasoning, and the
+            // LOOKAHEAD comment just above for why the target itself is
+            // projected past the unit's true slot while still advancing.
+            if (u._shieldOriginalSpeed === undefined) u._shieldOriginalSpeed = u.stats.speed;
+            u.stats.speed = meleePace;
             u._lazyManual = true;
-
-            // Per-unit MOVE/PAUSE clock — see FIX comment above
-            // _shieldIntervals. Lazily initialized the first tick a unit
-            // lands in this branch (fresh join, or just disengaged).
-            if (!u._shieldPhase) {
-              u._shieldPhase   = 'move';
-              u._shieldPhaseMs = _rndMs(MOVE_MIN_MS, MOVE_MAX_MS);
-            }
-            u._shieldPhaseMs -= TICK_MS;
-            let justFlipped = false;
-            if (u._shieldPhaseMs <= 0) {
-              justFlipped = true;
-              u._shieldPhase   = (u._shieldPhase === 'move') ? 'pause' : 'move';
-              u._shieldPhaseMs = (u._shieldPhase === 'move')
-                ? _rndMs(MOVE_MIN_MS, MOVE_MAX_MS)
-                : _rndMs(PAUSE_MIN_MS, PAUSE_MAX_MS);
-            }
-
-            if (u._shieldPhase === 'move') {
-              // Snapshot the slot ONCE, right as this move phase starts,
-              // then leave it alone for the rest of the phase — this is
-              // the actual fix. Nothing re-nudges the order mid-walk, so
-              // the unit gets one clean, uninterrupted line to its target
-              // instead of a slot that keeps drifting under its feet.
-              if (justFlipped || u.orderType !== 'move_to_point') {
-                u.orderTargetPoint = this._clampToDeployZone(cx + (u.formationOffsetX || 0), cy + (u.formationOffsetY || 0));
-                u.orderType = 'move_to_point';
-                u.formationTimer = 60;
-              }
-            } else {
-              // PAUSE — full stop. Same NEVER-CHARGE/NEVER-RETREAT
-              // discipline as the engaged branch above: only ever holds
-              // the unit at its current spot, never sends it backward.
-              // Gives slower units in the group a window where the front
-              // isn't pulling further ahead of them.
-              if (u.orderType !== 'hold_position') {
-                u.orderType = 'hold_position';
-                u.orderTargetPoint = null;
-              }
-            }
+            u._formationLocked = true;
+            u.orderType = 'move_to_point';
+            const lookX = stillAdvancing ? frontDir.x * LOOKAHEAD : 0;
+            const lookY = stillAdvancing ? frontDir.y * LOOKAHEAD : 0;
+            u.orderTargetPoint = this._clampToDeployZone(cx + (u.formationOffsetX || 0) + lookX, cy + (u.formationOffsetY || 0) + lookY);
             u.target = (u.target && u.target.isDummy) ? u.target : null;
           }
           u.hasOrders = true;
@@ -1625,6 +1785,14 @@
           this._buildShieldFormationOffsets(sel, frontDir);
           sel.forEach(u => {
             u._lazyManual      = true;
+            // Locked in immediately (not just once the first 90ms tick of
+            // _startShieldTick fires below) so there's no brief window
+            // where a fresh Shield unit is sitting on the generic
+            // stopDistance/wakeDistance settle logic instead of the
+            // hysteresis-free march primitive — see the big FIX comment on
+            // _shieldIntervals for why that logic can freeze a unit that's
+            // already close to its slot.
+            u._formationLocked = true;
             u.orderType        = 'move_to_point';
             const tgt = this._clampToDeployZone(landed.x + (u.formationOffsetX || 0), landed.y + (u.formationOffsetY || 0));
             u.orderTargetPoint = tgt;
@@ -1687,6 +1855,14 @@
         // unit that's never been selected.
         u._lazyManual      = false;
         u._formationLocked = false; // cancel-AI also cancels a mid-march formation lock
+        // Shield's shared-melee-pace speed clamp — see _shieldOriginalSpeed
+        // in _startShieldTick. Must be released here too, or a unit
+        // cancelled mid-march would keep walking at the clamped pace under
+        // whatever tactic/control picks it up next.
+        if (u._shieldOriginalSpeed !== undefined) {
+          u.stats.speed = u._shieldOriginalSpeed;
+          u._shieldOriginalSpeed = undefined;
+        }
         u.orderType        = 'hold_position';
         u.orderTargetPoint = null;
         u.hasOrders        = true;
@@ -1724,6 +1900,13 @@
       list.forEach(u => {
         u.aiTacticGroup  = undefined;
         u.aiTacticNumber = undefined;
+        // Same speed-clamp release as cancelAiTactic() above — a drag-
+        // waypoint command superseding Shield mid-march shouldn't leave the
+        // unit walking at the formation's clamped pace.
+        if (u._shieldOriginalSpeed !== undefined) {
+          u.stats.speed = u._shieldOriginalSpeed;
+          u._shieldOriginalSpeed = undefined;
+        }
       });
     },
 
@@ -1750,6 +1933,13 @@
         if (u.originalRange) {
           u.stats.range  = u.originalRange;
           u.originalRange = null;
+        }
+        // Shield's shared-melee-pace speed clamp (see _shieldOriginalSpeed
+        // in _startShieldTick) — same idea as the originalRange restore
+        // just above, for a unit the player interrupted mid-march.
+        if (u._shieldOriginalSpeed !== undefined) {
+          u.stats.speed = u._shieldOriginalSpeed;
+          u._shieldOriginalSpeed = undefined;
         }
         const s = this._safe(u.x, u.y, 15);
         u.x = s.x;
@@ -2177,30 +2367,29 @@
     return b;
   }
 
-  // Formation-tray highlight + Depth-state sync (called from the tick loop,
-  // throttled — see the call site below). Reads the shared formation style
-  // the exact same way battlefield_commands.js's own executeBoxFormationMove
-  // /preview code does (_getSharedDragFormationStyle — a unit-count===0 or
-  // mixed-style selection yields "dragGrid", meaning no formation is
-  // "active"), so this can never disagree with what the blue-arrow
-  // preview/commit actually does. Two effects, always applied together from
-  // the same single style read:
+  // Formation-tray highlight + Depth visibility sync (called from the tick
+  // loop, throttled — see the call site below). Reads the shared formation
+  // style the exact same way battlefield_commands.js's own
+  // executeBoxFormationMove/preview code does (_getSharedDragFormationStyle
+  // — a unit-count===0 or mixed-style selection yields "dragGrid", meaning
+  // no formation is "active"), so this can never disagree with what the
+  // blue-arrow preview/commit actually does. Two effects, always applied
+  // together from the same single style read:
   //   1. Yellow outline (.mc3-formation-active) on whichever of the 5
-  //      formation buttons matches (including BOX/square now) — none
+  //      formation buttons matches (including BOX/square) — none
   //      highlighted for "dragGrid".
-  //   2. Depth button's STATE (never its visibility — see the button's own
-  //      comment for the full "why it used to vanish" history):
-  //        - dragGrid / tight / standard / line -> full 1-4 range, enabled.
-  //        - circle -> enabled but clamped to 1-2; if a stale 3 or 4 was
-  //          left over from a previous dragGrid session, snap it down to 2
-  //          the moment circle becomes active rather than showing a value
-  //          the click handler's own 1<->2 cycle could never have produced.
-  //        - square -> disabled, label shows no number ("blob to each
-  //          other," not a depth-driven shape).
-  //      activeStyle is stashed on the button's dataset so the click
-  //      handler (which only fires on a user tap, not every tick) knows
-  //      which of the three behaviors to apply without recomputing the
-  //      shared style itself.
+  //   2. Depth button VISIBILITY (reworked per direct request — depth is
+  //      now a real, consumed row-count for TIGHT/STANDARD/LOOSE, not just
+  //      a plain-drag-only setting, so hiding it for shapes it doesn't
+  //      apply to is now the correct read of "only visible for tight,
+  //      standard, loose"): visible for dragGrid/tight/standard/line,
+  //      hidden entirely for circle/square — those two never read
+  //      window._mc3FormationDepth (circle's ring math and square's own
+  //      sideSize are both purely unit-count driven, confirmed in
+  //      calculateFormationOffsets), so there's nothing left to disable-
+  //      and-show-inert the way the button used to; it simply isn't
+  //      relevant and doesn't appear, exactly like the FORM tray's other
+  //      style-specific controls would.
   function _syncFormationUI() {
     const depthBtn = D.getElementById('mc3-depth-btn');
     if (!depthBtn) return; // not in battle / bar not built yet
@@ -2216,34 +2405,11 @@
     });
 
     depthBtn.dataset.activeStyle = style;
-    const lbl = D.getElementById('mc3-depth-lbl');
-    if (style === 'square') {
-      depthBtn.classList.add('mc3-depth-disabled');
-      if (lbl) lbl.textContent = 'DEPTH —';
-    } else {
-      depthBtn.classList.remove('mc3-depth-disabled');
-      // BUG FIX (audit pass, direct request): this used to WRITE
-      // window._mc3FormationDepth down to 2 right here, every 350ms,
-      // whenever the currently-viewed selection happened to be circle and
-      // the stored value was >2 — a silent background mutation triggered
-      // purely by which selection the player happened to be looking at,
-      // not by any click. Re-traced every consumer of this value (grep
-      // across both files): _mc3FormationDepth is read in exactly ONE
-      // place, dragGrid's row-count calc in calculateFormationOffsets —
-      // it's "what depth the next plain drag will use," not a saved
-      // preference belonging to any particular formation or selection, so
-      // this was never actually destroying meaningful per-formation state.
-      // Still wrong to mutate it from a passive sync tick though — every
-      // other write to this value in the file happens on a real user
-      // click, and a background tick silently changing what the NEXT
-      // plain drag will do, just because the player glanced at an
-      // unrelated circle selection, is a surprising side effect with no
-      // visible cause. Fixed by only clamping what's DISPLAYED while
-      // circle is active; the actual 1<->2 write for circle happens only
-      // in the depth button's own click handler below, on a real click.
-      const displayDepth = (style === 'circle' && window._mc3FormationDepth > 2)
-        ? 2 : window._mc3FormationDepth;
-      if (lbl) lbl.textContent = `DEPTH ${displayDepth}`;
+    const hideDepth = (style === 'circle' || style === 'square');
+    depthBtn.style.display = hideDepth ? 'none' : '';
+    if (!hideDepth) {
+      const lbl = D.getElementById('mc3-depth-lbl');
+      if (lbl) lbl.textContent = `DEPTH ${window._mc3FormationDepth}`;
     }
   }
 
@@ -2373,41 +2539,95 @@ function _buildHeader() {
         'mc3-formbtn-' + f.style, 'mc3-tray-btn', () => Cmd.formation(f.style)
       ));
     });
-    // Drag-formation DEPTH toggle — cycles rows deep for the Total War-style
-    // per-unit arrow-grid drag (executeBoxFormationMove / calculateFormation
-    // Offsets' "dragGrid" case in battlefield_commands.js).
-    // REWORKED per direct request — this used to vanish entirely (display:
-    // none) whenever a named formation was active, which also silently hid
-    // BOX along with it (the bug report: "formation depth button is gone").
-    // Now it NEVER disappears. Instead _syncFormationUI (below) puts it in
-    // one of three states depending on the currently active named style:
-    //   - No named style active (plain drag) or TIGHT/STANDARD/LOOSE active:
-    //     full range, cycles 1→2→3→4→1 same as always. These three don't
-    //     read window._mc3FormationDepth in calculateFormationOffsets
-    //     either way — the toggle only really drives the plain drag grid —
-    //     but per direct request ("the other formations still have 1234")
-    //     it stays fully live/clickable for them regardless.
-    //   - CIRCLE active: range clamped to 1↔2 only (cycles 1→2→1→2...).
-    //     Circle's own layout math still doesn't read this value, so this
-    //     is a UI-level lock as specified ("merely locks the formation
-    //     depth to be 1 or 2") — it keeps the toggle meaningful/consistent
-    //     if the player then drags, rather than letting it silently hold a
-    //     3 or 4 that doesn't correspond to anything circle does.
-    //   - BOX/square active: shown disabled, no number — "a button to ask
-    //     units to blob to each other," per direct request. Square's own
-    //     case computes its own sideSize from unit count alone and was
-    //     never driven by depth even before this rework.
+    // Drag-formation / row-depth toggle. Two consumers now, both driven by
+    // this one window._mc3FormationDepth value:
+    //   - Plain arrow-grid drag with no named formation selected
+    //     (executeBoxFormationMove / calculateFormationOffsets' "dragGrid"
+    //     case in battlefield_commands.js) — the original use.
+    //   - TIGHT/STANDARD/LOOSE (per direct request: "rank depth is NOT
+    //     working... depths should correspond to the blue arrow depth...
+    //     trying to match the closest equivalent"). Each role-group's
+    //     column count is now solved BACKWARD from the requested depth via
+    //     assignBlock's own row formula (rows = ceil(count/cols), inverted
+    //     to cols = ceil(count/rows)) instead of a hardcoded column count —
+    //     see calculateFormationOffsets' depthCols() helper in
+    //     battlefield_commands.js. Ceil-based solving lands each group on
+    //     the closest depth actually reachable for its size (e.g. 5 units
+    //     at a requested depth of 4 settle on 3 rows — 2/2/1 — the nearest
+    //     achievable shape, not an exact miss silently ignored) rather than
+    //     requiring an exact division.
+    // VISIBILITY (reworked per direct request — "rank depth emoji should
+    // only be visible for tight, standard and loose... not visible for
+    // square or circle"): _syncFormationUI (below) hides this button
+    // entirely for circle/square, since neither reads this value at all —
+    // circle's ring math and square's own sideSize are both purely
+    // unit-count driven. Visible for dragGrid/tight/standard/loose, all
+    // four of which now genuinely use it.
+    //
+    // FIX ("DEPTH 4 is disabled to be toggled unless theres 40 or more
+    // units... a small message pop to explain... if units are low enough
+    // it just goes back to depth 1" — direct request, gating rule per
+    // direct follow-up: "do what mathematically makes sense... factor in
+    // the selection of non perfectly divisible as stragglers"): a bare
+    // "N×constant" lookup table doesn't actually capture what makes a
+    // depth wrong for a given count — e.g. depth 3 on 8 units gives
+    // cols=3, a real 3/3/2 formation (last row 67% full, genuinely fine),
+    // while depth 4 on 13 units gives cols=4, a 4/4/4/1 formation (last
+    // row 25% full — a lone straggler, not a real 4th rank).
+    //
+    // BUG FIX ("MOMENT I CLICK TIGHT STANDARD OR LOOSE IT LOCKS TO SINGLE
+    // LINE... even with low units selected ruler depth can still be
+    // toggled to 4; for example 3 units can do 4 depth" — direct report):
+    // the first version of this check only measured the BACK ROW's fill
+    // ratio, which is blind to the actual failure mode here. For n=3,
+    // N=4: depthCols solves cols=ceil(3/4)=1 — a single column, i.e.
+    // every unit stacked in one straight LINE, no depth at all. But with
+    // cols=1, each "row" holds exactly 1 unit out of a 1-wide row, which
+    // is a trivially "100% full" last row by the old ratio check, so it
+    // always passed regardless of how degenerate the shape actually was.
+    // The real requirement for a depth to mean anything is cols >= 2 — at
+    // least two units side by side, an actual block instead of a column —
+    // checked FIRST, before the back-row fill-ratio check even runs.
+    // Re-verified directly (not just re-read) against n=3/8/13/20 at every
+    // depth 1-4 after this fix: 3 units now correctly rejects depth 3 AND
+    // 4 (both would still collapse to cols=1), matching the exact bug
+    // report, while 8/13/20 continue to behave as previously verified.
+    // Depth 1 is always accepted unconditionally — cols=n there by
+    // definition (everyone in one row), which is a valid, real shape, not
+    // a collapse.
+    //
+    // Checked against the WHOLE selection (G.selected().length) per
+    // direct request, not per role-bucket — a mixed-role selection's
+    // sub-counts are smaller than the whole anyway, so gating on the
+    // whole is the more permissive, simpler-to-reason-about reading of
+    // "do I have enough units for this depth." Every click re-checks
+    // fresh from the CURRENT selection (per direct request: "every click
+    // recheck") rather than remembering which depths were blocked last
+    // time — reselecting more units immediately unlocks a deeper cycle on
+    // the very next click, no stale state.
+    function _isDepthWorthwhileFor(n, N) {
+      if (n <= 0) return false;
+      if (N === 1) return true; // always a valid shape — everyone in one row
+      const cols = Math.ceil(n / N);
+      if (cols < 2) return false; // would collapse to a single-file column, not a real block
+      const fullRows = Math.floor(n / cols);
+      const lastRowCount = n - fullRows * cols;
+      const lastRowFillRatio = lastRowCount > 0 ? (lastRowCount / cols) : 1;
+      // Back rank isn't a near-empty straggler (at least half a row).
+      return lastRowFillRatio >= 0.5;
+    }
     if (typeof window._mc3FormationDepth !== 'number') window._mc3FormationDepth = 2;
     const depthBtn = _mkBtn(
       `<span class="ticon">📏</span><span class="tlbl" id="mc3-depth-lbl">DEPTH ${window._mc3FormationDepth}</span>`,
       'mc3-depth-btn', 'mc3-tray-btn',
       () => {
-        const activeStyle = D.getElementById('mc3-depth-btn')?.dataset.activeStyle || 'dragGrid';
-        if (activeStyle === 'square') { Cmd._audio('ui_click'); return; } // disabled — no-op
-        if (activeStyle === 'circle') {
-          window._mc3FormationDepth = (window._mc3FormationDepth === 1) ? 2 : 1; // 1↔2 only
+        const n = G.selected().length;
+        const nextDepth = (window._mc3FormationDepth % 4) + 1; // 1→2→3→4→1
+        if (nextDepth > 1 && !_isDepthWorthwhileFor(n, nextDepth)) {
+          _showToast(`Not enough units for DEPTH ${nextDepth} — back to DEPTH 1`);
+          window._mc3FormationDepth = 1;
         } else {
-          window._mc3FormationDepth = (window._mc3FormationDepth % 4) + 1; // 1→2→3→4→1
+          window._mc3FormationDepth = nextDepth;
         }
         const lbl = D.getElementById('mc3-depth-lbl');
         if (lbl) lbl.textContent = `DEPTH ${window._mc3FormationDepth}`;
@@ -2588,13 +2808,13 @@ function _buildHeader() {
           ['LOOSE',    'Spread-out battle line — maximises frontage to prevent flanking.'],
           ['CIRCLE',   'Circular orb formation — all-round defence in open terrain.'],
           ['BOX',      'Square blob — units group by count alone, no rows/depth. Room for cavalry inside.'],
-          ['📏 DEPTH', 'Rows for a plain drag-formation move (no named shape picked). Cycles 1-4. Locked to 1-2 while CIRCLE is active, disabled while BOX is active — neither shape uses row depth.'],
+          ['📏 DEPTH', 'Sets how many rows deep the formation is, for TIGHT / STANDARD / LOOSE and for a plain drag-formation move. Cycles 1-4, but a deeper level only unlocks once your selection has enough units to fill it out — too few and it drops back to DEPTH 1 with a message.'],
         ],
       },
       {
         heading: 'Commands Tray',
         rows: [
-          ['ADVANCE', 'Selected units immediately seek and engage the nearest enemy — a single push, no formation, no re-evaluation after it starts.'],
+          ['ADVANCE', 'Selected units immediately seek and engage the nearest enemy — a single push, no formation, no re-evaluation after it starts. Ranged units stop and fire at roughly half their weapon range rather than closing to melee; melee units close all the way in.'],
           ['STOP',    'Selected units immediately halt in place. Not an AI posture — they\u2019ll still fight back in melee self-defence range or if an enemy closes to point-blank, but they won\u2019t chase.'],
           ['RETREAT', 'Each selected unit falls back toward whichever battlefield edge is nearest to it — a mixed selection can flee in different directions at once.'],
           ['FOLLOW',  'Selected units form up on the commander in a square and stay with them as they move.'],
@@ -4056,9 +4276,18 @@ _applyBoxSelect(x1, y1, x2, y2) {
       const inCamp   = !!(W.inCampMode);
       const root     = D.getElementById(ROOT);
 
-      if (root) root.style.display = inMenu ? 'none' : '';
+      // Naval Escort minigame: the whole RTS root (return button included)
+      // stays hidden during the autopiloted SAILING leg — there's nothing to
+      // command and no battle to return from yet. It reappears on its own
+      // once a pirate encounter flips the mode into COMBAT (inBattleMode
+      // becomes true then, same as any other battle).
+      const escort = window.NavalEscortMode;
+      const inEscortSailing = !!(escort && escort.isActive && escort.isActive() &&
+          escort.getState && escort.getState().state === 'SAILING');
 
-      if (inMenu) {
+      if (root) root.style.display = (inMenu || inEscortSailing) ? 'none' : '';
+
+      if (inMenu || inEscortSailing) {
         Joystick.setVisible(false);
         UnitCards.setVisible(false);
         AIEmoji._removeAll();

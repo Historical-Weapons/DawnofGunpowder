@@ -29,7 +29,7 @@
 //    at the edges, no gap to the map border.
 //  • Wall has a SLIGHT MEANDERING CURVE along its length (sinusoidal Y
 //    offset), mimicking the Great Wall's organic line in aerial photos.
-//  • ONE real, closable GATE (see _S3_GATE) directly north of Black Sand
+//  • ONE real, closable GATE (see _S3_GATE) directly north of Fushun Suo
 //    Fort, plus two narrow ~24 px always-open patrol gaps further along the
 //    wall, used by the story's scout triggers.
 //  • Towers are bird's-eye squares with crenellated edges and a small
@@ -107,7 +107,7 @@ function _s3InPatrolGap(px) {
 
 // =============================================================================
 // THE GATE — the wall's one real, closable crossing, directly north of
-// Black Sand Fort (same spot the old central patrol gap used to sit).
+// Fushun Suo (same spot the old central patrol gap used to sit).
 // ─────────────────────────────────────────────────────────────────────────────
 // CLOSED by default. It only opens when a scenario trigger grants passage
 // (out OR back in — guards work the same winch either direction) via
@@ -117,7 +117,7 @@ function _s3InPatrolGap(px) {
 // file, and _s3DrawGate() for the per-frame door art.
 // =============================================================================
 const _S3_GATE = {
-    x:     1680,   // world px — directly north of Black Sand Fort
+    x:     1680,   // world px — directly north of Fushun Suo
     halfW:   32,   // passage half-width — doubled from the old 16px footprint
     open:  false   // closed at boot; a future "grant passage" trigger flips this
 };
@@ -218,7 +218,7 @@ function _s3OnWallBand(px, py) {
 // =============================================================================
 // SETTLEMENT LIST
 // ─────────────────────────────────────────────────────────────────────────────
-// Ming Liaodong frontier. Black Sand Fort is the player's home base.
+// Ming Liaodong frontier. Fushun Suo is the player's home base.
 // Kaiyuan and Liaoyang are the major garrisons further south — Liaoyang is
 // the seat of the Liaodong Regional Military Commission.
 // Civilian villages are sparse and well clear of the wall.
@@ -227,16 +227,22 @@ function _s3OnWallBand(px, py) {
 // =============================================================================
 const FIXED_SETTLEMENTS_story3 = [
     // ── PLAYER HOME (wall-adjacent fort) ─────────────────────────────────────
-    { name: "Black Sand Fort",      x: 1680, y: 1410, pop:  170, isVillage: false, isMilitary: true, faction: "Ming Dynasty", isPlayerHome: true },
+    // Y values below were moved north (closer to the wall) from their old
+    // 210-570px gaps to a consistent ~40px south of the wall's actual south
+    // face at each post's x (computed from _s3WallCenterYAt + half the wall
+    // thickness + a 40px buffer so sprites/collision stay clear of the wall
+    // band). Connecting dirt roads in _S3_ROADS reshift automatically since
+    // _s3DrawRoads looks up each settlement's x/y live every draw call.
+    { name: "Fushun Suo",           x: 1680, y: 1237, pop:  170, isVillage: false, isMilitary: true, faction: "Ming Dynasty", isPlayerHome: true },
 
     // ── WALL-LINE MILITARY POSTS (just south of the wall band) ──────────────
-    { name: "Powder Magazine",      x: 1160, y: 1500, pop:   60, isVillage: false, isMilitary: true, faction: "Ming Dynasty" },
-    { name: "Arrow & Bolt Store",   x:  780, y: 1505, pop:   50, isVillage: false, isMilitary: true, faction: "Ming Dynasty" },
-    { name: "Barracks West",        x:  440, y: 1520, pop:  140, isVillage: false, isMilitary: true, faction: "Ming Dynasty" },
-    { name: "Smithy & Wagonyard",   x: 2500, y: 1510, pop:   85, isVillage: false, isMilitary: true, faction: "Ming Dynasty" },
-    { name: "Signal Tower Post",    x: 3140, y: 1480, pop:   55, isVillage: false, isMilitary: true, faction: "Ming Dynasty" },
-    { name: "Barracks East",        x: 3540, y: 1530, pop:  130, isVillage: false, isMilitary: true, faction: "Ming Dynasty" },
-    { name: "Fushun Pass Tower",    x: 1920, y: 1600, pop:   90, isVillage: false, isMilitary: true, faction: "Ming Dynasty" },
+    { name: "Powder Magazine",      x: 1160, y: 1258, pop:   60, isVillage: false, isMilitary: true, faction: "Ming Dynasty" },
+    { name: "Arrow & Bolt Store",   x:  780, y: 1282, pop:   50, isVillage: false, isMilitary: true, faction: "Ming Dynasty" },
+    { name: "Barracks West",        x:  440, y: 1295, pop:  140, isVillage: false, isMilitary: true, faction: "Ming Dynasty" },
+    { name: "Smithy & Wagonyard",   x: 2500, y: 1300, pop:   85, isVillage: false, isMilitary: true, faction: "Ming Dynasty" },
+    { name: "Signal Tower Post",    x: 3140, y: 1278, pop:   55, isVillage: false, isMilitary: true, faction: "Ming Dynasty" },
+    { name: "Barracks East",        x: 3540, y: 1239, pop:  130, isVillage: false, isMilitary: true, faction: "Ming Dynasty" },
+    { name: "Fushun Pass Tower",    x: 1920, y: 1266, pop:   90, isVillage: false, isMilitary: true, faction: "Ming Dynasty" },
     { name: "Grain Tax Post",       x: 1520, y: 1760, pop:   70, isVillage: false, isMilitary: true, faction: "Ming Dynasty" },
 
     // ── MAIN MING GARRISONS (further south, command centres) ────────────────
@@ -256,14 +262,14 @@ const _S3_ROADS = [
     // Wall-line lateral road (along the back of the wall)
     ["Barracks West",       "Arrow & Bolt Store",  2001],
     ["Arrow & Bolt Store",  "Powder Magazine",     2002],
-    ["Powder Magazine",     "Black Sand Fort",     2003],
-    ["Black Sand Fort",     "Fushun Pass Tower",   2004],
+    ["Powder Magazine",     "Fushun Suo",          2003],
+    ["Fushun Suo",          "Fushun Pass Tower",   2004],
     ["Fushun Pass Tower",   "Smithy & Wagonyard",  2005],
     ["Smithy & Wagonyard",  "Signal Tower Post",   2006],
     ["Signal Tower Post",   "Barracks East",       2007],
 
     // North-south supply roads down to the main garrisons
-    ["Black Sand Fort",     "Grain Tax Post",      2010],
+    ["Fushun Suo",          "Grain Tax Post",      2010],
     ["Grain Tax Post",      "Kaiyuan Garrison",    2011],
     ["Grain Tax Post",      "Liaoyang",            2012],
     ["Powder Magazine",     "Kaiyuan Garrison",    2013],
@@ -1086,14 +1092,16 @@ function _s3SnapToPassable(px, py) {
 function populateCities_story3() {
     console.log("[Story3] Founding garrisons, military posts, and southern villages…");
     cities_story3 = [];
-    if (typeof window.clearCustomLocations === 'function') window.clearCustomLocations();
+    if (typeof window.clearPointsOfInterest === 'function') window.clearPointsOfInterest();
 
     // The small wall-line posts below aren't real settlements — they're
-    // single-purpose buildings (see custom_locations_system.js). Routing them
-    // through the city panel ("Visit Settlement" → full walled-city grid)
-    // never made sense for a powder magazine. Mapping is name-based since
-    // FIXED_SETTLEMENTS_story3 doesn't carry a location kind of its own.
-    // Black Sand Fort (home), the two Garrisons, and the civilian villages
+    // single-purpose points of interest (see poi_system.js). They're
+    // generated as tiny walled-less villages (fort/blacksmith/barracks
+    // cosmetics stamped on top) via inCityMode, not routed through the
+    // full economic city panel ("Visit Settlement" → walled-city grid) —
+    // that never made sense for a powder magazine. Mapping is name-based
+    // since FIXED_SETTLEMENTS_story3 doesn't carry a location kind of its
+    // own. Fushun Suo (home), the two Garrisons, and the civilian villages
     // are real settlements and keep the standard city panel.
     const CUSTOM_LOC_KIND_BY_NAME = {
         "Powder Magazine":    "storage",
@@ -1111,8 +1119,8 @@ function populateCities_story3() {
         if (!snapped) snapped = { x: site.x, y: site.y };
 
         const clKind = CUSTOM_LOC_KIND_BY_NAME[site.name];
-        if (clKind && typeof window.registerCustomLocation === 'function') {
-            window.registerCustomLocation({
+        if (clKind && typeof window.registerPointOfInterest === 'function') {
+            window.registerPointOfInterest({
                 id:      "s3_" + site.name.replace(/\s+/g, "_").toLowerCase(),
                 x:       snapped.x,
                 y:       snapped.y,
@@ -1120,7 +1128,7 @@ function populateCities_story3() {
                 name:    site.name,
                 faction: site.faction
             });
-            return; // not added to cities_story3 — it's a custom location, not a city
+            return; // not added to cities_story3 — it's a point of interest, not a city
         }
 
         cities_story3.push({
@@ -1243,9 +1251,9 @@ window.initGame_story3 = async function () {
     await setLoading(95, "Sighting Jurchen riders on the northern horizon…");
     _s3SpawnJurchenPatrols();
 
-    // 9. Player start — Black Sand Fort
+    // 9. Player start — Fushun Suo
     const startCity =
-        cities.find(function (c) { return c.name === "Black Sand Fort"; }) ||
+        cities.find(function (c) { return c.name === "Fushun Suo"; }) ||
         cities.find(function (c) { return c.isPlayerHome; }) ||
         cities.find(function (c) { return c.faction === "Ming Dynasty"; });
 

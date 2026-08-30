@@ -480,6 +480,8 @@ function toggleDipLog() {
     <script src="core/soundeffects.js"></script>
     <script src="menu/custom_battle_gui.js"></script>
     <script src="menu/customsiegebattle.js"></script>
+    <script src="menu/naval_exploration.js"></script>
+    <script src="menu/naval_exploration_menu.js"></script>
     <script src="core/RandomDialogue.js"></script>
     <script src="core/parler_system.js"></script>
 	<script src="core/parler_patch.js"></script>
@@ -496,6 +498,7 @@ function toggleDipLog() {
 	<script src="story/s3/story3_map_and_update.js"></script>  
     <script src="core/camp_system.js"></script>
     <script src="core/camp_system_combat.js"></script>
+	   <script src="core/poi_system.js"></script>
     <script src="core/viewport_culling.js"></script>
     <script src="battle_engine/viewport_culling_battles.js"></script>
     <script src="sandboxmode/sandboxmode_update.js"></script>
@@ -546,6 +549,7 @@ function toggleDipLog() {
         const campaignBtn = allBtns.find(b => b.innerText.includes("Campaign Mode"));
         const customBattleBtn = allBtns.find(b => b.innerText.includes("Custom Battle"));
         const survivalBtn = allBtns.find(b => b.innerText.includes("Survival"));
+        const navalEscortBtn = allBtns.find(b => b.innerText.includes("Naval Escort"));
         const loadGameBtn = allBtns.find(b => b.innerText.includes("Load Game"));
         
         // Find root UI buttons
@@ -559,7 +563,7 @@ function toggleDipLog() {
             
             // Group arrays
             const scenarioBtns = [launchBtn, editorBtn, sandboxImportBtn, story1Btn, story2Btn];
-            const playBtns = [campaignBtn, sandboxGameBtn, customBattleBtn, survivalBtn, loadGameBtn].filter(Boolean);
+            const playBtns = [campaignBtn, sandboxGameBtn, customBattleBtn, survivalBtn, navalEscortBtn, loadGameBtn].filter(Boolean);
             const rootBtns = [manualBtn, unitsBtn, optionsBtn].filter(Boolean); 
 
             // --- SURGERY: DYNAMIC WIDTH CLONING ---

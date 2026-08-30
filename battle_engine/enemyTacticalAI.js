@@ -155,11 +155,24 @@
   // ROLE RESOLVER & HELPERS
   // ══════════════════════════════════════════════════════════════════════════
 
-  const _CAV_ROLES  = new Set(['CAVALRY', 'HORSE_ARCHER', 'MOUNTED_GUNNER', 'CAMEL', 'ELEPHANT']);
+  // MOUNTED_GUNNER (wagon cannons) removed from _CAV_ROLES and added to
+  // _GUN_ROLES -- see the CANNON OVERRIDE comment in resolveRole() below.
+  const _CAV_ROLES  = new Set(['CAVALRY', 'HORSE_ARCHER', 'CAMEL', 'ELEPHANT']);
   const _RNG_ROLES  = new Set(['ARCHER', 'CROSSBOW', 'THROWING']);
-  const _GUN_ROLES  = new Set(['GUNNER', 'FIRELANCE', 'BOMB', 'ROCKET']);
+  const _GUN_ROLES  = new Set(['GUNNER', 'FIRELANCE', 'BOMB', 'ROCKET', 'MOUNTED_GUNNER']);
 
   function resolveRole(unit) {
+    // ── CANNON OVERRIDE (direct request) ──────────────────────────
+    // Same fix as enemyLandStrategyAI.js's resolveBroadRole() (see that
+    // file for the full writeup): wagon cannons (role "mounted_gunner")
+    // were reaching CAVALRY via the shared window.getTacticalRole()
+    // classifier, and via this file's own _CAV_ROLES fallback above,
+    // which put them in cavalry-speed kite/skirmish behavior instead of
+    // holding position and firing. Intercept before the shared-classifier
+    // delegation so cannons get GUNPOWDER behavior here too (river
+    // battles), matching the land AI.
+    if (String((unit.stats && unit.stats.role) || '').toUpperCase() === 'MOUNTED_GUNNER') return 'GUNPOWDER';
+
     if (typeof W.getTacticalRole === 'function') return W.getTacticalRole(unit);
     const r = String((unit.stats && unit.stats.role) || '').toUpperCase();
     if (_CAV_ROLES.has(r))  return 'CAVALRY';
@@ -415,6 +428,25 @@
     unit.orderType        = 'seek_engage';
     unit.orderTargetPoint = null;
     unit.target           = null; // let engine re-acquire nearest target
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  //  DUMB AI TIER (LOW graphics/performance setting)
+  // ══════════════════════════════════════════════════════════════════════════
+  // Mirrors enemyLandStrategyAI.js's isDumbAITier()/runDumbTick() (see that
+  // file for the full writeup) so river battles -- the only battles this
+  // legacy file still actively drives -- get the same treatment: at the
+  // LOW graphics/performance tier, skip all coordinated tactics and just
+  // let each unit chase/engage the nearest enemy via orderChase().
+  function isDumbAITier () {
+    const q = (typeof W.mobileBattleQuality === 'number')  ? W.mobileBattleQuality
+            : (typeof W.desktopBattleQuality === 'number') ? W.desktopBattleQuality
+            : null;
+    return (q !== null) && (q < 40);
+  }
+
+  function runDumbTick (enemyUnits) {
+    for (let i = 0; i < enemyUnits.length; i++) orderChase(enemyUnits[i]);
   }
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -926,6 +958,14 @@
     const playerUnits = getPlayerUnits();
 
     if (enemyUnits.length === 0 || playerUnits.length === 0) { teardown(); return; }
+
+    // DUMB MODE (LOW graphics/performance tier) -- see isDumbAITier() above.
+    // Skips crisis handling, tickLand/tickRiver, all of it -- every enemy
+    // unit just re-affirms orderChase() and the tick is done.
+    if (isDumbAITier()) {
+      runDumbTick(enemyUnits);
+      return;
+    }
 
     const playerCentroid = centroid(playerUnits);
 

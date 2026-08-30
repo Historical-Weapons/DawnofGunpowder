@@ -883,6 +883,20 @@ const ACTION_HANDLERS = {
             });
         } finally {
             rt.storyPlaying = false;
+            // FIX: un-pause the player after EVERY dialogue, not just the
+            // opening cinematic. window.player.isMapPaused is only ever
+            // cleared inside _onIntroDone() (see _maybePlayStoryIntro below),
+            // which runs exactly once. Any later quest/story dialogue that
+            // goes through this plain show_dialogue action — e.g.
+            // t_repair_wall_arrive's Veteran Wei conversation — left
+            // isMapPaused (and any stray dialogue-overlay pointer-events
+            // lock) stuck on forever, freezing the player and anything
+            // whose tick is gated on the same pause check. Mirrors step 4/6
+            // of _onIntroDone's cleanup exactly.
+            if (window.player) window.player.isMapPaused = false;
+            if (window.StoryPresentation && typeof window.StoryPresentation.clear === "function") {
+                window.StoryPresentation.clear();
+            }
         }
     },
 
@@ -912,6 +926,13 @@ const ACTION_HANDLERS = {
             });
         } finally {
             rt.storyPlaying = false;
+            // FIX: same reasoning as show_dialogue above — don't rely on the
+            // one-shot _onIntroDone() to be the only place that un-pauses
+            // the player after a cinematic beat.
+            if (window.player) window.player.isMapPaused = false;
+            if (window.StoryPresentation && typeof window.StoryPresentation.clear === "function") {
+                window.StoryPresentation.clear();
+            }
         }
     },
     "show_title": async (p) => {
@@ -925,6 +946,11 @@ const ACTION_HANDLERS = {
             });
         } finally {
             rt.storyPlaying = false;
+            // FIX: same reasoning as show_dialogue/show_art above.
+            if (window.player) window.player.isMapPaused = false;
+            if (window.StoryPresentation && typeof window.StoryPresentation.clear === "function") {
+                window.StoryPresentation.clear();
+            }
         }
     },
     "show_subtitle": async (p) => {
@@ -2358,6 +2384,14 @@ async function _playMovie(movie) {
         }
     } finally {
         rt.storyPlaying = false;
+        // FIX: same reasoning as the show_dialogue/show_art/show_title action
+        // handlers above — play_movie can fire mid-game via any trigger, not
+        // just the boot intro, so this can't rely on _onIntroDone (a one-shot
+        // call) to be the thing that un-pauses the player afterward.
+        if (window.player) window.player.isMapPaused = false;
+        if (window.StoryPresentation && typeof window.StoryPresentation.clear === "function") {
+            window.StoryPresentation.clear();
+        }
     }
 }
 

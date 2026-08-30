@@ -1608,6 +1608,14 @@ function _fishAvoidanceVector(f) {
 // lets HIGH/MAX water actually move instead of being a static baked-in
 // texture like the land terrain passes.
 function _navWaterQL() {
+    // NAVAL EXPLORATION OVERRIDE: this mode wants a calm, relaxing sea
+    // regardless of the player's own device/graphics-quality choice — HIGH's
+    // whitecap foam and MAX's glitter octave read as too busy for a long,
+    // slow voyage. Capped at MED (1: gentle drifting swell texture, no foam,
+    // no sparkle) rather than LOW (0: completely flat/static), since some
+    // motion is still part of the "sailing" feel. Scoped to this one mode's
+    // flag only — every other battle type is untouched.
+    if (window.__IS_NAVAL_EXPLORATION__) return 1;
     const tier = window.currentGraphicsQualityTier;
     if (tier === "MAX")                      return 3;
     if (tier === "HIGH")                     return 2;
@@ -1702,7 +1710,10 @@ function drawProceduralOceanWater(ctx) {
         // terrain's ridged FBM), scrolled over time so the crests visibly
         // travel across the water like real swell.
         const bandFreq = 0.006;
-        const speed = 6.0; // world-px/sec drift
+        // NAVAL EXPLORATION: slowed further on top of the MED-tier cap above
+        // — 6.0 world-px/sec still read as brisk over a long relaxed voyage
+        // even with foam/glitter already stripped out.
+        const speed = window.__IS_NAVAL_EXPLORATION__ ? 1.6 : 6.0; // world-px/sec drift
         const driftX = time * speed;
         const driftY = time * speed * 0.6;
         for (let wx = x0; wx < x1; wx += cell) {
@@ -2119,7 +2130,19 @@ function drawNavalShips(ctx) {
     ctx.save();
     ctx.translate(navalEnvironment.shipSwayX, navalEnvironment.shipSwayY);
 	
-    navalEnvironment.ships.forEach(s => {
+    navalEnvironment.ships.forEach(s => _drawSingleNavalShip(ctx, s));
+
+    ctx.restore(); // end sway translate
+}
+
+// ============================================================================
+// SINGLE-SHIP HULL RENDER — extracted from drawNavalShips' own per-ship loop
+// body so other callers (naval_merchant_escort.js's SAILING-phase cruise
+// view) can draw an IDENTICAL hull without going through drawNavalShips'
+// `if (!inNavalBattle) return;` gate. drawNavalShips itself is unchanged
+// behaviorally — it just calls this per ship instead of inlining the body.
+// ============================================================================
+function _drawSingleNavalShip(ctx, s) {
         ctx.save();
         ctx.translate(s.x, s.y);
         // ── SHIP HEADING ROTATION ────────────────────────────────────────
@@ -2179,7 +2202,7 @@ function drawNavalShips(ctx) {
 
         // ── 4. OARS — rendered BEFORE deck so deck visually covers their inboard ends.
         //   This makes them look like real oars threading through oarlocks.
-        if (window.NavalRowing && typeof window.NavalRowing.drawOars === 'function') {
+        if (!s._noOars && window.NavalRowing && typeof window.NavalRowing.drawOars === 'function') {
             window.NavalRowing.drawOars(ctx, s, time);
         }
 
@@ -2299,9 +2322,6 @@ function drawNavalShips(ctx) {
         });
 
         ctx.restore(); // end ship translate
-    });
-
-    ctx.restore(); // end sway translate
 }
 
 // ============================================================================
